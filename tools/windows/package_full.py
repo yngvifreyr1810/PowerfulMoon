@@ -8,7 +8,7 @@ import subprocess
 import zipfile
 from installer_core import check_name
 
-VERSION='0.2.0-powerfulmoon.1'
+VERSION='0.2.0-powerfulmoon.2'
 def sha(data):return hashlib.sha256(data).hexdigest()
 def generator_modules(root):
     todo=[root/'tools/gen.py'];seen=set()

@@ -7,7 +7,8 @@
 #include <windows.h>
 #endif
 
-#include "hle.h"
+// Settings has no guest-CPU dependency; the platform redirects stderr to the host log.
+#define LOG(...) fprintf(stderr, __VA_ARGS__)
 #include "input_bind.h"
 
 #define SETTINGS_FILE settings_file()
