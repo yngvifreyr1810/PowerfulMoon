@@ -20,6 +20,25 @@ class UpstreamBot(unittest.TestCase):
         self.merge(False)
     def test_conflict_stops_without_commit_or_publication(self):
         self.merge(True)
+    def test_upstream_resource_version_bump_keeps_fork_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            git(root, 'init'); git(root, 'config', 'user.name', 'test'); git(root, 'config', 'user.email', 'test@example.invalid')
+            path = root / 'runtime/platform/windows.rc'; path.parent.mkdir(parents=True)
+            path.write_text('FILEVERSION 0, 2, 1, 0\nVALUE "FileVersion", "0.2.1"\nVALUE "ProductName", "Power Moon"\n')
+            git(root, 'add', '.'); git(root, 'commit', '-m', 'base')
+            base = git(root, 'rev-parse', 'HEAD').stdout.strip()
+            path.write_text(path.read_text().replace('0, 2, 1, 0', '0, 2, 2, 0').replace('0.2.1', '0.2.2'))
+            git(root, 'add', '.'); git(root, 'commit', '-m', 'upstream version')
+            new = git(root, 'rev-parse', 'HEAD').stdout.strip()
+            git(root, 'checkout', '-b', 'fork', base)
+            path.write_text(path.read_text().replace('Power Moon', 'PowerfulMoon').replace('0.2.1', '0.2.1-powerfulmoon.1'))
+            git(root, 'add', '.'); git(root, 'commit', '-m', 'fork branding')
+            selected, ignored = apply_delta(root, base, new)
+            self.assertEqual(selected, [])
+            self.assertIn('PowerfulMoon', path.read_text())
+            self.assertIn('0.2.1-powerfulmoon.1', path.read_text())
+            self.assertTrue(any('regenerated' in name for name in ignored))
     def merge(self, conflict):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

@@ -36,6 +36,19 @@ def apply_delta(root, base, new):
     blocked = [p for p in ignored if re.search(r'license|copying|\.gitmodules|cmakelists|requirements|\.lock$', p, re.I)]
     if blocked:
         raise RuntimeError('Upstream legal/dependency changes require review: ' + ', '.join(blocked))
+    resource = 'runtime/platform/windows.rc'
+    if resource in selected:
+        def without_version(text):
+            return '\n'.join(line for line in text.splitlines() if not re.search(
+                r'^\s*(?:FILEVERSION|PRODUCTVERSION)\b|VALUE "(?:FileVersion|ProductVersion)"', line))
+        before = git(root, 'show', base + ':' + resource).stdout
+        after = git(root, 'show', new + ':' + resource).stdout
+        if without_version(before) != without_version(after):
+            raise RuntimeError('Upstream Windows branding/resource changes require review: ' + resource)
+        # Fork-owned identity is generated from release.json. Reapplying upstream's
+        # numeric/string version bump would create an avoidable conflict every time.
+        selected.remove(resource)
+        ignored.append(resource + ' (version-only; regenerated for PowerfulMoon)')
     if selected:
         patch = git(root, 'diff', '--binary', '--no-renames', base, new, '--', *selected, binary=True).stdout
         result = subprocess.run(['git', '-C', str(root), 'apply', '--3way', '-'], input=patch, capture_output=True)
