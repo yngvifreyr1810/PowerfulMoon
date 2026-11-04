@@ -1,5 +1,8 @@
 name: Upstream candidate bot
 on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/upstream-sync.yml', 'tools/automation/upstream_sync.py']
   schedule:
     - cron: '17 */2 * * *'
   workflow_dispatch:

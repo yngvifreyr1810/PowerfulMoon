@@ -1,5 +1,8 @@
 name: Build review candidate
 on:
+  push:
+    branches: [main]
+    paths: ['runtime/**', 'tools/**', 'release.json', '.github/workflows/candidate.yml']
   workflow_dispatch:
     inputs:
       candidate_sha:
@@ -16,12 +19,12 @@ jobs:
       - name: Validate requested commit
         shell: pwsh
         env:
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
         run: |
           if ($env:CANDIDATE_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'An exact source commit is required' }
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_sha }}
+          ref: ${{ inputs.candidate_sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -79,7 +82,7 @@ jobs:
           if ($setup.ExitCode -ne 0) { throw 'Setup smoke test failed' }
       - uses: actions/upload-artifact@v4
         with:
-          name: PowerfulMoon-candidate-${{ inputs.candidate_sha }}
+          name: PowerfulMoon-candidate-${{ inputs.candidate_sha || github.sha }}
           path: build/dist/*
           retention-days: 30
           compression-level: 0
@@ -87,7 +90,7 @@ jobs:
       - name: Review summary
         shell: pwsh
         env:
-          SOURCE_SHA: ${{ inputs.candidate_sha }}
+          SOURCE_SHA: ${{ inputs.candidate_sha || github.sha }}
         run: |
           "## Candidate prepared`nSource: $env:SOURCE_SHA`n`nNo release was published. Download the artifact and test controller/motion/rumble, VRR and save migration before approving this exact commit." >> $env:GITHUB_STEP_SUMMARY
   notify:
@@ -105,6 +108,6 @@ jobs:
       - name: Post result for owner review
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
           BUILD_RESULT: ${{ needs.build.result }}
         run: python3 tools/automation/report_candidate.py

@@ -1,5 +1,8 @@
 name: Publish owner-reviewed candidate
 on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-reviewed.yml']
   workflow_dispatch:
     inputs:
       candidate_run:
@@ -20,7 +23,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   publish:
-    if: github.actor == github.repository_owner && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.actor == github.repository_owner && github.ref == 'refs/heads/main'
     environment: release-approval
     runs-on: ubuntu-latest
     timeout-minutes: 20

@@ -68,7 +68,7 @@ def main():
         raise ValueError('Only the repository owner may promote a candidate')
     api = GitHub(repo, os.environ['GITHUB_TOKEN'])
     run = api.call('actions/runs/' + str(args.run))
-    if run['conclusion'] != 'success' or run['event'] != 'workflow_dispatch' or run['path'] != '.github/workflows/candidate.yml':
+    if run['conclusion'] != 'success' or run['event'] not in ('workflow_dispatch', 'push') or run['path'] != '.github/workflows/candidate.yml':
         raise ValueError('A successful candidate workflow run is required')
     artifacts = api.call('actions/runs/' + str(args.run) + '/artifacts')['artifacts']
     matches = [a for a in artifacts if not a['expired'] and a['name'] == 'PowerfulMoon-candidate-' + args.sha]
