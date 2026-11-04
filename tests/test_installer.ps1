@@ -35,3 +35,6 @@ $unsupported=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
 Run-Setup Install 1
 if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ne $unsupported) { throw 'Unsupported host was modified' }
 Write-Output 'Installer, idempotence, restoration, dependency cleanup, save preservation, version refusal: PASS'
+# The final refusal deliberately returns 1. Do not leak that expected child
+# exit code to GitHub's PowerShell wrapper after every assertion has passed.
+exit 0
