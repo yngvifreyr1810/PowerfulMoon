@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import urllib.parse
 import urllib.request
+import urllib.error
 import zipfile
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'windows'))
@@ -85,6 +86,17 @@ def main():
                     shutil.copyfileobj(file, out)
         meta, files = verified_files(payload, args.sha)
         version = meta['version']; tag = 'v' + version
+        try:
+            latest = api.call('releases/latest')
+        except urllib.error.HTTPError as error:
+            if error.code != 404: raise
+        else:
+            if version_tuple(version) <= version_tuple(latest['tag_name']):
+                raise ValueError('A public release must advance the stable PowerfulMoon version')
+        # Advance the integration baseline only after owner approval. If main
+        # diverged incompatibly, GitHub returns a conflict and nothing is released.
+        api.call('merges', {'base': 'main', 'head': args.sha,
+                          'commit_message': 'Integrate owner-reviewed PowerfulMoon ' + version})
         body = ('Customized fork of [Power Moon Recomp](https://gitlab.com/zzzarathustra-dev/power-moon-recomp) ' + meta['upstream_tag'] + '.\n\n'
                 'Includes the upstream update, Switch 2 Pro Controller Bluetooth support through the bundled ProCon2Bridge, persistent controller settings, and the VRR interpolation/VSync controls. '
                 'The Update button offers only approved PowerfulMoon releases.\n\n'

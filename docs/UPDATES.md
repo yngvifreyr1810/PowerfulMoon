@@ -27,7 +27,7 @@ The source candidate is public, but it is **not a release and is never offered b
 
 After testing, the repository owner runs **Publish owner-reviewed candidate** from `main`, supplies the successful candidate run ID and exact tested commit, and types `PUBLISH`. The `release-approval` GitHub environment requires owner approval before the publish job starts. Keep that environment protection configured in repository settings.
 
-Publication promotes the existing immutable artifact after verifying its source identity, content-audit report and checksums. It does not rebuild newer source. Assets upload to a draft first; only a complete release becomes public. Neither a schedule nor the source-sync bot can invoke this publication path as the owner.
+Publication integrates the approved source into `main` so the next upstream merge starts from the accepted fork. If that source conflicts with newer `main` changes, publication stops for review. It then promotes the existing immutable artifact after verifying its source identity, content-audit report and checksums. It does not rebuild newer source. Assets upload to a draft first; only a complete release becomes public. Neither a schedule nor the source-sync bot can invoke this publication path as the owner.
 
 To repair a conflict, inspect the review issue, merge upstream changes manually, and run the candidate build for that repaired commit. To retry an expired artifact, rebuild and test the new artifact before approving it. Each completed build posts its result and artifact link to the review issue; GitHub's notification settings control email delivery.
 

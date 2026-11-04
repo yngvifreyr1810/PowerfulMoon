@@ -11,6 +11,7 @@
 #include "kernel.h"
 #include "romfs_build.h"
 #include "ui/setup.h"
+#include "release_info.h"
 
 const char *g_romfs_dir;
 
@@ -159,6 +160,11 @@ static void boot(const char *root) {
 }
 
 int main(int argc, char **argv) {
+    // CI verifies the packaged native dependency set without GPU/game/user data.
+    if (argc == 2 && !strcmp(argv[1], "--check-runtime")) {
+        puts("PowerfulMoon " POWERFULMOON_VERSION);
+        return 0;
+    }
     plat_init();
 #ifdef _WIN32
     setvbuf(stderr, NULL, _IONBF, 0);  // the Windows CRT treats _IOLBF as full buffering

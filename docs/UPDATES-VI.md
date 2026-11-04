@@ -45,7 +45,7 @@ Chỉ thực hiện khi muốn **công khai bản vừa thử cho mọi người
 1. Mở [Publish owner-reviewed candidate](https://github.com/yngvifreyr1810/PowerfulMoon/actions/workflows/publish-reviewed.yml), chọn **Run workflow**, nhánh `main`.
 2. Điền `candidate_run` = Run ID đã thành công; `approved_sha` = commit 40 ký tự đã kiểm thử; `confirmation` = `PUBLISH`.
 3. Run sẽ chờ tại môi trường `release-approval`. Mở run, chọn **Review deployments**, chọn môi trường đó rồi **Approve and deploy** bằng tài khoản chủ repository.
-4. Job kiểm tra danh tính commit, checksum và báo cáo nội dung, tải lên đúng bộ cài đã kiểm thử rồi mới công khai release. Không build lại một bản khác trong lúc phát hành.
+4. Job kiểm tra danh tính commit, checksum và báo cáo nội dung; ghép mã nguồn đã duyệt vào `main` để làm nền cho lần cập nhật sau; tải lên đúng bộ cài đã kiểm thử rồi mới công khai release. Nếu nhánh đã duyệt xung đột với `main` mới hơn, job dừng để xử lý trước. Không build lại một bản khác trong lúc phát hành.
 
 Bot chạy theo lịch không có quyền tự vượt bước này. Không muốn phát hành thì không chạy workflow duyệt, hoặc chọn **Reject**. Nếu phát hiện lỗi, sửa và tạo ứng viên mới, sau đó duyệt SHA mới.
 

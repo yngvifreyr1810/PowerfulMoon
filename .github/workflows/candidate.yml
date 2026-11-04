@@ -80,6 +80,8 @@ jobs:
           if ($helper.ExitCode -ne 0) { throw 'Updater smoke test failed' }
           $setup=Start-Process "build/dist/PowerfulMoon-Setup-$version.exe" -ArgumentList '--smoke-test' -WindowStyle Hidden -Wait -PassThru
           if ($setup.ExitCode -ne 0) { throw 'Setup smoke test failed' }
+          python tools/windows/smoke_package.py --zip "build/dist/PowerfulMoon-$version-windows-x64.zip" --version $version
+          if ($LASTEXITCODE -ne 0) { throw 'Clean package smoke test failed' }
       - uses: actions/upload-artifact@v4
         with:
           name: PowerfulMoon-candidate-${{ inputs.candidate_sha || github.sha }}
