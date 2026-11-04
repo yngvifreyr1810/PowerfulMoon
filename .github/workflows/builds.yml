@@ -37,7 +37,7 @@ jobs:
           python3 - <<'PY'
           import subprocess,re
           files=subprocess.check_output(['git','ls-files'],text=True).splitlines()
-          forbidden=r'(^|/)(extracted|generated[^/]*|romfs|exefs|save|screenshots)/|\.(nsp|xci|nca|nso|nsz|xcz|npdm|keys)$|(^|/)(prod\.keys|title\.keys|odyssey_game\.(dll|so|dylib))$'
+          forbidden=r'(^|/)(extracted|generated[^/]*|romfs|exefs|save|screenshots)/|\.(nsp|xci|nca|nso|nsz|xcz|npdm|keys|bfttf)$|(^|/)(prod\.keys|title\.keys|odyssey_game\.(dll|so|dylib))$'
           bad=[p for p in files if re.search(forbidden,p,re.I)]
           assert not bad,bad
           print('Source content audit: PASS')

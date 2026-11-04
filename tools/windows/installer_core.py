@@ -8,8 +8,8 @@ import time
 import zipfile
 
 PREFIX = 'PowerfulMoon/'
-FORBIDDEN_PARTS = {'extracted','exefs','romfs','save','cache','screenshots'}
-FORBIDDEN_SUFFIXES = {'.nsp','.xci','.nca','.nso','.nsz','.xcz','.keys','.npdm'}
+FORBIDDEN_PARTS = {'extracted','exefs','romfs','save','cache','screenshots','input','logs'}
+FORBIDDEN_SUFFIXES = {'.nsp','.xci','.nca','.nso','.nsz','.xcz','.keys','.npdm','.bfttf'}
 
 def safe_path(root, name):
     rel=PurePosixPath(name)

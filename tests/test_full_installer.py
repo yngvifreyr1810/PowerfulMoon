@@ -42,7 +42,7 @@ class FullInstallerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'checksum'):installer.install(self.package(corrupt=True),self.target)
         self.assertEqual((self.target/'PowerfulMoon.exe').read_bytes(),b'old host')
     def test_path_escape_and_user_payload_are_rejected(self):
-        for name in ('../escape.exe','save/slot.bin','odyssey_game.dll','config.json'):
+        for name in ('../escape.exe','save/slot.bin','odyssey_game.dll','config.json','fonts/nintendo_udsg.bfttf','input/main.nso'):
             with self.subTest(name=name),self.assertRaises(ValueError):installer.install(self.package(extra={name:b'bad'}),self.target)
         self.assertFalse((self.root/'escape.exe').exists())
     def test_copy_failure_rolls_back_replaced_files(self):

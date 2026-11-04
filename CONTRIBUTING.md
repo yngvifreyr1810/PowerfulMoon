@@ -1,4 +1,6 @@
-# Contributing to Power Moon Recomp
+# Contributing to PowerfulMoon
+
+PowerfulMoon is a customized fork of Power Moon Recomp by zzzarathustra-dev. The upstream no-Nintendo-files rule below applies to this fork, its installer and every release asset.
 
 Bug reports, testing on different hardware and code contributions are welcome.
 
@@ -17,8 +19,7 @@ game in bug reports are fine.
 ## Reporting bugs
 
 Please include your hardware (CPU, GPU, driver version), what you did, what happened and what you expected, and the
-log: `PowerMoonRecomp.log` next to `PowerMoonRecomp.exe` (it names the crash and the game's call chain). A save from just before the problem
-helps a lot.
+log: `PowerfulMoon.log` next to `PowerfulMoon.exe` (it names the crash and the game's call chain). Do not post raw saves or private paths publicly; provide sanitized reproduction steps instead.
 
 ## Code
 

@@ -3,7 +3,7 @@
 fail=0
 for f in $(git diff --cached --name-only --diff-filter=AM); do
   case "$f" in
-    *.nso|*.nca|*.nsp|*.xci|*.nsz|*.xcz|*.npdm|*.keys|*exefs/*|*romfs/*|extracted/*|generated/*|input/*)
+    *.nso|*.nca|*.nsp|*.xci|*.nsz|*.xcz|*.npdm|*.keys|*.bfttf|*odyssey_game.dll|*odyssey_game.so|*odyssey_game.dylib|*exefs/*|*romfs/*|extracted/*|generated/*|input/*)
       echo "BLOCKIERT (Spieldatei/Key/generiert): $f"; fail=1 ;;
   esac
   size=$(git cat-file -s ":$f" 2>/dev/null || echo 0)
