@@ -1,0 +1,14 @@
+# SDK functions whose body tools/gen.py replaces with a call to the host's hle_<symbol>(Cpu *) (one mangled name
+# per line). For functions called from inside the SDK, which an import binding (HLE_FUNC) never sees.
+# nn::diag: assertion / abort messages (runtime/hle/diag.c)
+_ZN2nn4diag6detail18OnAssertionFailureENS0_13AssertionTypeEPKcS4_S4_iS4_z
+_ZN2nn4diag6detail18OnAssertionFailureENS0_13AssertionTypeEPKcS4_S4_i
+_ZN2nn4diag6detail9AbortImplEPKcS3_S3_i
+_ZN2nn4diag6detail9AbortImplEPKcS3_S3_iS3_z
+_ZN2nn4diag6detail9AbortImplEPKcS3_S3_iPKNS_6ResultES3_z
+_ZN2nn4diag6detail9AbortImplEPKcS3_S3_iPKNS_6ResultEPKNS_2os17UserExceptionInfoES3_z
+_ZN2nn4diag6detail10VAbortImplEPKcS3_S3_iPKNS_6ResultEPKNS_2os17UserExceptionInfoES3_St9__va_list
+# sead (in main): halts with their message, debug output (runtime/hle/diag.c)
+_ZN4sead6system14HaltWithDetailEPKciS2_z
+_ZN4sead6system4HaltEv
+_ZN4sead6system15PrintStringImplEPKci

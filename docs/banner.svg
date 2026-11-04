@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" width="1280" height="360" role="img" aria-label="Power Moon Recomp">
+  <!-- README banner: the icon's crescent (tools/make_icon.py: a disc, minus the same disc moved half its radius right and
+       up) and the menu's palette (runtime/ui/theme.h). -->
+  <defs>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#E5383B" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#E5383B" stop-opacity="0"/>
+    </radialGradient>
+    <mask id="cut">
+      <rect width="1280" height="360" fill="#fff"/>
+      <circle cx="290" cy="125" r="110" fill="#000"/>
+    </mask>
+  </defs>
+  <rect width="1280" height="360" rx="28" fill="#121316"/>
+  <circle cx="235" cy="180" r="190" fill="url(#glow)"/>
+  <circle cx="235" cy="180" r="110" fill="#E5383B" mask="url(#cut)"/>
+  <g font-family="Roboto, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif">
+    <text x="410" y="168" font-size="76" font-weight="600" fill="#F2F2F5">Power Moon Recomp</text>
+    <text x="412" y="224" font-size="31" fill="#9698A0">Super Mario Odyssey, natively recompiled for PC</text>
+    <text x="412" y="276" font-size="24" fill="#E5383B" letter-spacing="1">WINDOWS  ·  LINUX  ·  MACOS</text>
+  </g>
+</svg>

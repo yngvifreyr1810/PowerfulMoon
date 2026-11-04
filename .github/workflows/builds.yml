@@ -1,0 +1,33 @@
+name: Controller checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise install and recovery with synthetic files
+        shell: powershell
+        run: ./tests/test_installer.ps1
+  controller:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test motion math and ABI (no game data)
+        run: |
+          mkdir -p build
+          cc tests/test_motion.c -lm -o build/test_motion
+          build/test_motion
+          cc tests/test_hd_wire.c -o build/test_hd_wire
+          build/test_hd_wire
+      - name: Reject proprietary/generated payload paths
+        run: |
+          python3 - <<'PY'
+          import subprocess,re
+          files=subprocess.check_output(['git','ls-files'],text=True).splitlines()
+          forbidden=r'(^|/)(extracted|generated[^/]*|romfs|exefs|save|screenshots)/|\.(nsp|xci|nca|nso|nsz|xcz|npdm|keys)$|(^|/)(prod\.keys|title\.keys|odyssey_game\.(dll|so|dylib))$'
+          bad=[p for p in files if re.search(forbidden,p,re.I)]
+          assert not bad,bad
+          print('Source content audit: PASS')
+          PY

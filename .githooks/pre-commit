@@ -1,0 +1,14 @@
+#!/bin/sh
+# Blockiert Commits mit Spieldateien, Keys oder sehr großen Dateien.
+fail=0
+for f in $(git diff --cached --name-only --diff-filter=AM); do
+  case "$f" in
+    *.nso|*.nca|*.nsp|*.xci|*.nsz|*.xcz|*.npdm|*.keys|*exefs/*|*romfs/*|extracted/*|generated/*|input/*)
+      echo "BLOCKIERT (Spieldatei/Key/generiert): $f"; fail=1 ;;
+  esac
+  size=$(git cat-file -s ":$f" 2>/dev/null || echo 0)
+  if [ "$size" -gt 5242880 ]; then
+    echo "BLOCKIERT (>5 MB): $f"; fail=1
+  fi
+done
+[ $fail -eq 0 ] || { echo "Commit abgebrochen. Datei(en) mit 'git restore --staged <datei>' entfernen."; exit 1; }

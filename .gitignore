@@ -1,0 +1,50 @@
+# your own game files and what's made from them (building from source puts them here)
+input/
+extracted/
+generated/
+generated-*/
+# RomFS mods (runtime/services/fs.c: mods/romfs/ replaces the game's files) - your own, never versioned
+/mods/
+# Nintendo fonts (users import their own; only the README ships)
+/fonts/*
+!/fonts/README.md
+# build output, caches, saves and settings
+build/
+/cache/
+save/
+/*.bat
+/powermoon.ini
+/odyssey.ini
+/larecomp.ini
+
+# tools and Python environments (machine-specific)
+tools/venv/
+venv/
+__pycache__/
+.DS_Store
+
+# --- Spieldateien, Keys, Dumps NIEMALS committen ---
+exefs/
+romfs/
+*.nso
+*.nca
+*.nsp
+*.xci
+*.nsz
+*.xcz
+*.npdm
+*.keys
+prod.keys
+title.keys
+# lokale Konfiguration, Logs, Crash-Dumps
+logs/
+*.log
+crash-*.txt
+*.dmp
+# externe Referenz-Checkouts (OdysseyDecomp liegt außerhalb oder hier, nie versioniert)
+/ref/
+/docs/screenshots/
+.local-settings.json
+/payload/
+/runtime-manifest.json
+*.zip
