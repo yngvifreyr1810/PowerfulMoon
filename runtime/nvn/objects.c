@@ -5,6 +5,7 @@
 
 #include "../kernel.h"
 #include "interp.h"
+#include "rqueue.h"
 #include "nvn.h"
 
 void renderer_sync(void);
@@ -119,11 +120,15 @@ NVN(nvnQueueResetMemoryUsageCounts) { (void)c; }
 NVN(nvnQueueSubmitCommands) {
     int n = (int)A(1);
     const uint64_t *handles = AP(2);
+    if (rq_enabled()) {  // (translated on the render thread: rqueue.c)
+        for (int i = 0; i < n; i++) rq_push(RQ_EXEC, NULL, handles[i]);
+        return;
+    }
     kernel_block_begin();
     for (int i = 0; i < n; i++) backend_execute(handles[i]);
 }
 NVN(nvnQueueFlush) { (void)c; }
-NVN(nvnQueueFinish) { (void)c; renderer_sync(); }
+NVN(nvnQueueFinish) { (void)c; rq_drain(); renderer_sync(); }
 
 static NvnSync *sync_of(uint64_t guest) {
     NvnSync *s = HOST(NvnSync, guest);
@@ -132,7 +137,12 @@ static NvnSync *sync_of(uint64_t guest) {
 }
 uint64_t renderer_fence_seq(void);
 void renderer_wait_seq(uint64_t seq);
-NVN(nvnQueueFenceSync) { NvnSync *s = sync_of(A(1)); s->signaled = 1; s->seq = renderer_fence_seq(); }
+NVN(nvnQueueFenceSync) {
+    NvnSync *s = sync_of(A(1));
+    if (rq_enabled()) { s->signaled = 0; s->ticket = rq_push(RQ_FENCE, s, 0); return; }  // (its submission: known there)
+    s->signaled = 1;
+    s->seq = renderer_fence_seq();
+}
 void nvn_sync_set_seq(uint64_t guest, uint64_t seq) { NvnSync *s = sync_of(guest); s->signaled = 1; s->seq = seq; }
 NVN(nvnQueueWaitSync) { RET(1); }
 
@@ -148,6 +158,7 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     if (getenv("ODYSSEY_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
     static int whole = -1;  // ODYSSEY_SYNC_ALL=1: old behaviour, wait for all submitted work
     if (whole < 0) whole = getenv("ODYSSEY_SYNC_ALL") ? 1 : 0;
+    rq_drain();  // (the render thread first: the fence's lists, or a command list's fence, may still be queued)
     if (flush) renderer_flush();
     else if (whole) renderer_sync();
     else renderer_wait_seq(sync_of(A(0))->seq);  // only the submission that holds this fence
@@ -201,7 +212,7 @@ NVN(nvnMemoryPoolInitialize) {
     RET(1);
 }
 // (frame interpolation: a replay on its own thread must not run while a host object it may use goes - interp.c)
-NVN(nvnMemoryPoolFinalize) { interp_free_begin(); free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); interp_free_end(); }
+NVN(nvnMemoryPoolFinalize) { rq_drain(); interp_free_begin(); free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); interp_free_end(); }
 NVN(nvnMemoryPoolSetDebugLabel) { (void)c; }
 NVN(nvnMemoryPoolMap) { RET(HOST(NvnPool, A(0))->storage); }
 NVN(nvnMemoryPoolGetBufferAddress) { RET(HOST(NvnPool, A(0))->storage); }  // GPU address == CPU address
@@ -831,7 +842,7 @@ NvnDescPool *nvn_find_pool(NvnDescPool **reg, uint64_t guest_pool) {
 
 // ================================================================== programs
 NVN(nvnProgramInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnProgram))); RET(1); }
-NVN(nvnProgramFinalize) { interp_free_begin(); free(HOST(NvnProgram, A(0))); SET_HOST(A(0), 0); interp_free_end(); }
+NVN(nvnProgramFinalize) { rq_drain(); interp_free_begin(); free(HOST(NvnProgram, A(0))); SET_HOST(A(0), 0); interp_free_end(); }
 NVN(nvnProgramSetDebugLabel) { (void)c; }
 NVN(nvnProgramSetSampleShading) { (void)c; }
 NVN(nvnProgramSetSubroutineLinkage) { RET(1); }
@@ -992,12 +1003,24 @@ NVN(nvnQueuePresentTexture) {
     int interval = forced >= 0 ? forced : w->interval;
     int i = (int)A(2);
     NvnTexture *tex = i >= 0 && i < w->num ? HOST(NvnTexture, w->textures[i]) : NULL;
+    // ODYSSEY_LOG_GAME_TIME=1: the game thread's time from the end of one present to the next present (its frame without
+    // the present's vsync wait: logic, recording, and with the render thread its waits for it), averaged over 10 s
+    static int gt_log = -1;
+    static uint64_t gt_out, gt_sum, gt_n;
+    if (gt_log < 0) gt_log = getenv("ODYSSEY_LOG_GAME_TIME") != NULL;
+    if (gt_log && gt_out && plat_now_ns() - gt_out < 100000000ull) {
+        gt_sum += plat_now_ns() - gt_out;
+        if (++gt_n == 600) { LOG("[game-time] %.2f ms a frame outside its present\n", gt_sum / 600.0 / 1e6); gt_sum = gt_n = 0; }
+    }
+    bool rq = rq_enabled();
+    if (rq) rq_present_throttle();  // (the render thread one frame behind at most)
     if (interval > 0) {
         extern uint64_t vi_vsync_count(void), vi_wait_vsync(uint64_t target), vi_vsync_time(uint64_t count);
         extern __thread uint64_t g_blocked_ns;
         uint64_t v = vi_vsync_count(), target = w->last_vsync + (uint64_t)interval;
         bool wait = w->last_vsync && v < target;
-        if (tex) backend_frame_done(tex, wait ? vi_vsync_time(target) : plat_now_ns());
+        if (tex && rq) rq_push(RQ_FRAME, tex, wait ? vi_vsync_time(target) : plat_now_ns());
+        else if (tex) backend_frame_done(tex, wait ? vi_vsync_time(target) : plat_now_ns());
         if (wait) {
             uint64_t t0 = plat_now_ns();
             kernel_block_begin();  // (the core's other threads run until the vsync: kernel.c core gates)
@@ -1005,9 +1028,12 @@ NVN(nvnQueuePresentTexture) {
             g_blocked_ns += plat_now_ns() - t0;
         }
         w->last_vsync = v;
-    } else if (tex) backend_frame_done(tex, plat_now_ns());
-    if (tex) backend_present(tex);
+    } else if (tex && rq) rq_push(RQ_FRAME, tex, plat_now_ns());
+    else if (tex) backend_frame_done(tex, plat_now_ns());
+    if (tex && rq) rq_push(RQ_PRESENT, tex, 0);
+    else if (tex) backend_present(tex);
     tex_process_releases();
+    if (gt_log) gt_out = plat_now_ns();
 }
 
 // ================================================================== small state objects

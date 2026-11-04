@@ -1,0 +1,110 @@
+name: Build review candidate
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact 40-character source commit to build (no publication)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Validate requested commit
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          if ($env:CANDIDATE_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'An exact source commit is required' }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            make
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-llvm
+            mingw-w64-clang-x86_64-lld
+            mingw-w64-clang-x86_64-binutils
+      - name: Install packaging tools
+        run: python -m pip install PyInstaller==6.22.3
+      - name: Fetch checksum-pinned build inputs
+        run: python tools/automation/bootstrap_windows.py
+      - name: Generate release identity
+        run: python tools/windows/version_info.py
+      - name: Test updater, merge bot and installer transactions
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Compile and test native host (without game data)
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          for test in motion hd_wire present_policy; do
+            clang tests/test_$test.c -lm -o build/test_$test.exe
+            build/test_$test.exe
+          done
+          clang tests/test_settings_profile.c runtime/settings.c -lm -o build/test_settings_profile.exe
+          export ODYSSEY_SETTINGS="$(cygpath -w "$PWD/build/test-profile.ini")"
+          build/test_settings_profile.exe seed
+          build/test_settings_profile.exe recover
+          make -j4 DEPS="$PWD/build/ci-inputs/sdk/clang64" build/PowerfulMoon.exe
+          llvm-strip --strip-debug build/PowerfulMoon.exe
+          if llvm-nm build/PowerfulMoon.exe | grep -E ' T (func_|sub_)[0-9a-fA-F]{8,}'; then exit 1; fi
+      - name: Build complete candidate installer
+        shell: pwsh
+        run: |
+          ./tools/windows/build_full.ps1 -RuntimeRoot build/ci-inputs/runtime -BridgeZip build/ci-inputs/bridge.zip -Libcxx build/ci-inputs/runtime/libc++.dll -DependencySources build/ci-inputs/runtime/licenses/source -OutputDirectory build/dist
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging failed' }
+          $version=(Get-Content release.json -Raw | ConvertFrom-Json).version
+          python tools/windows/audit_release.py --zip "build/dist/PowerfulMoon-$version-windows-x64.zip" --setup "build/dist/PowerfulMoon-Setup-$version.exe" --report build/dist/PowerfulMoon-content-audit.json
+          if ($LASTEXITCODE -ne 0) { throw 'Content audit failed' }
+          Copy-Item release.json build/dist/release.json
+      - name: Smoke-test packaged helper interfaces
+        shell: pwsh
+        run: |
+          $version=(Get-Content release.json -Raw | ConvertFrom-Json).version
+          $helper=Start-Process build/PowerfulMoon-Update.exe -ArgumentList @('--target', 'build', '--current', $version, '--smoke-test') -WindowStyle Hidden -Wait -PassThru
+          if ($helper.ExitCode -ne 0) { throw 'Updater smoke test failed' }
+          $setup=Start-Process "build/dist/PowerfulMoon-Setup-$version.exe" -ArgumentList '--smoke-test' -WindowStyle Hidden -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw 'Setup smoke test failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PowerfulMoon-candidate-${{ inputs.candidate_sha }}
+          path: build/dist/*
+          retention-days: 30
+          compression-level: 0
+          if-no-files-found: error
+      - name: Review summary
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          "## Candidate prepared`nSource: $env:SOURCE_SHA`n`nNo release was published. Download the artifact and test controller/motion/rumble, VRR and save migration before approving this exact commit." >> $env:GITHUB_STEP_SUMMARY
+  notify:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Post result for owner review
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: python3 tools/automation/report_candidate.py

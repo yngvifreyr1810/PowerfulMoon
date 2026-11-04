@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "nvn.h"
+#include "rqueue.h"
 
 #define GUEST_RESERVE 16  // (kept free at the end of the game's memory, as the driver keeps room for its jump)
 
@@ -45,10 +46,31 @@ static ArenaBlock *block_new(size_t cap) {
     return b;
 }
 
-static void arena_release(Arena *a) {  // (g_list_lock)
-    if (!a || a->live || a->open) return;
+static void arena_free(Arena *a) {
     for (ArenaBlock *b = a->blocks, *n; b; b = n) n = b->next, atomic_fetch_sub(&g_rec_bytes, b->cap), free(b);
     free(a);
+}
+// With the render thread (rqueue.c) a list the game records over may still be queued or running there, or in a frame
+// interpolation replay: its records go once the thread is past everything queued when it ended (the game overwrote a
+// display list at a stage start while the thread ran it: an access violation in exec_list).
+typedef struct { Arena *a; uint64_t ticket; } Grave;
+static Grave *graves;
+static int ngraves, cap_graves;
+static void arena_release(Arena *a) {  // (g_list_lock)
+    if (!a || a->live || a->open) return;
+    if (!rq_enabled()) { arena_free(a); return; }
+    if (ngraves == cap_graves) graves = realloc(graves, sizeof *graves * (size_t)(cap_graves = cap_graves ? cap_graves * 2 : 64));
+    graves[ngraves++] = (Grave){a, rq_last_ticket()};
+}
+void cmd_reap(uint64_t done) {  // (the render thread, after an item: what no queued list or replay can reach any more)
+    if (!ngraves) return;
+    pthread_mutex_lock(&g_list_lock);
+    int k = 0;
+    for (int i = 0; i < ngraves; i++)
+        if (graves[i].ticket <= done) arena_free(graves[i].a);
+        else graves[k++] = graves[i];
+    ngraves = k;
+    pthread_mutex_unlock(&g_list_lock);
 }
 
 static int list_lower_bound(uint64_t handle) {  // (g_list_lock)

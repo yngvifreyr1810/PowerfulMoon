@@ -26,3 +26,7 @@ also be used by other applications. No game files, keys, firmware, Nintendo artw
 Report issues without raw private logs or game content. The host log is PowerfulMoon.log; controller
 logs can contain local Bluetooth device addresses. Credits and dependency source/licensing details are
 in CREDITS.md, source/ and licenses/.
+
+## Update channel
+
+The updater contacts the public GitHub Releases API and downloads only published stable PowerfulMoon installers with matching repository URLs and SHA-256 metadata. Scheduled upstream integration creates review candidates, never app updates. It does not send game data, saves, controller profiles or device addresses. See [the approval workflow](docs/UPDATES.md).

@@ -77,6 +77,7 @@ typedef struct {
 typedef struct {
     uint64_t key; uint32_t occ, first_cb, ncb;
     uint8_t depth_only;  // drawn into a depth-only target (a shadow pass: its shared blocks are the light's)
+    uint8_t screen_pass; // a lone draw without per-object blocks, paired (match_all): a full-screen pass
     uint64_t obj;   // the object: the guest addresses of its per-object uniform buffers (0: none - UI); frame_end
     uint32_t oocc;  // occurrence of (obj, key) in the frame
     int32_t pair;   // the draw's partner in the frame before (-1 none; -2 UI, not blended); frame_end
@@ -252,6 +253,51 @@ static uint32_t object_bytes(const DrawRec *d) {  // the per-object uniforms a d
 // its own, instead of taking another's and starting a chain of wrong pairs). Equal distances - the same object drawn
 // in two passes (depth pre-pass and colour pass: identical per-object data, different per-pass buffers) - keep the
 // occurrence order: crossing those blended one pass's camera / light buffer with the other's (whole scene flat-lit).
+// The per-object uniforms (what draw_distance compares) as one number: an unchanged object finds its draw of the frame
+// before among hundreds (match_all; draw_distance confirms)
+// How many of this frame's draws bind each per-object copy: one an object's passes share (its matrices) has a few;
+// one bound by hundreds (a material or scene block in a high slot) is no object's - one decision per object
+// (frame_end) must not spread through it.
+#define UBITS 14
+static struct { uint32_t off, n; } cb_uses[1 << UBITS];
+static void uses_build(void) {
+    memset(cb_uses, 0, sizeof cb_uses);
+    for (uint32_t i = 0; i < cur->ncbs; i++) {
+        const CbRec *c = &cur->cbs[i];
+        if (c->stage > 1 || c->slot < 2) continue;
+        uint32_t h = (c->off * 0x9E3779B1u) >> (32 - UBITS);
+        for (int k = 0; k < 64; k++, h = (h + 1) & ((1 << UBITS) - 1)) {
+            if (cb_uses[h].off == c->off + 1) { cb_uses[h].n++; break; }
+            if (!cb_uses[h].off) { cb_uses[h].off = c->off + 1, cb_uses[h].n = 1; break; }
+        }
+    }
+}
+static bool few_uses(const CbRec *c) {
+    uint32_t h = (c->off * 0x9E3779B1u) >> (32 - UBITS);
+    for (int k = 0; k < 64 && cb_uses[h].off; k++, h = (h + 1) & ((1 << UBITS) - 1))
+        if (cb_uses[h].off == c->off + 1) return cb_uses[h].n <= 6;
+    return false;
+}
+
+typedef struct { uint64_t h; uint32_t q; } ObjHash;
+static int ph_cmp(const void *a, const void *b) {
+    const ObjHash *x = a, *y = b;
+    return x->h != y->h ? (x->h < y->h ? -1 : 1) : (x->q < y->q ? -1 : x->q > y->q);
+}
+static uint64_t object_hash(const Frame *F, const DrawRec *d) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < d->ncb; i++) {
+        const CbRec *c = &F->cbs[d->first_cb + i];
+        h = (h ^ ((uint64_t)c->stage << 40 | (uint64_t)c->slot << 32 | c->size)) * 0x100000001b3ull;
+        if (c->stage != 0 || c->slot < 2) continue;
+        const uint8_t *p = F->bytes + c->off;
+        uint32_t q = 0;
+        for (; q + 8 <= c->used; q += 8) { uint64_t w; memcpy(&w, p + q, 8); h = (h ^ w) * 0x100000001b3ull; }
+        for (; q < c->used; q++) h = (h ^ p[q]) * 0x100000001b3ull;
+    }
+    return h;
+}
+
 typedef struct { float d; uint16_t c, p, docc; } Pair;
 static int pair_cmp(const void *a, const void *b) {
     const Pair *x = a, *y = b;
@@ -259,7 +305,7 @@ static int pair_cmp(const void *a, const void *b) {
     return x->docc < y->docc ? -1 : x->docc > y->docc;
 }
 static int32_t *p_match;  // per draw of this frame: its previous-frame draw (-1: none; -2: UI; -3: just appeared - not blended)
-static uint64_t st_id_pairs, st_content_pairs, st_new_objects, s_id_pairs, s_content_pairs, s_new_objects, s_class_snaps, s_toggled, s_integral, s_wraps, s_discont;  // (stats)
+static uint64_t st_id_pairs, st_content_pairs, st_new_objects, st_same_pairs, st_occ_pairs, s_same_pairs, s_occ_pairs, s_id_pairs, s_content_pairs, s_new_objects, s_class_snaps, s_toggled, s_integral, s_wraps, s_discont;  // (stats)
 static uint32_t *p_order; static uint32_t p_order_cap;
 static int order_cmp(const void *a, const void *b) {
     const DrawRec *x = &cur->draws[*(const uint32_t *)a], *y = &cur->draws[*(const uint32_t *)b];
@@ -277,7 +323,7 @@ static void match_all(void) {
     memset(p_used, 0, prev->ndraws);
     for (uint32_t j = 0; j < cur->ndraws; j++) p_order[j] = j, p_match[j] = -1;
     // by identity: the object's draw in prev2 (same per-object buffer addresses) and that draw's partner in prev
-    st_id_pairs = st_content_pairs = st_new_objects = 0;
+    st_id_pairs = st_content_pairs = st_new_objects = st_same_pairs = st_occ_pairs = 0;
     if (prev2->ndraws && !prev2->overflow && !history_reset) {
         index_prev2();
         static int32_t *inv; static uint32_t inv_cap;  // prev2's draw -> prev's draw paired with it
@@ -293,6 +339,12 @@ static void match_all(void) {
             // (same pass of the object: its occurrence within (obj, key) - a pre-pass / colour-pass crossing made once
             // by a tie would otherwise be carried along the parity chain for ever: flat-lit images every other frame)
             if (x < 0 || p_used[x] || prev->draws[x].key != d->key || prev->draws[x].oocc != d->oocc) continue;
+            // (the game hands its per-object uniform blocks out per frame in draw order for some objects - Tostarena's
+            // ice and its neighbours: turning the camera reorders them, and the "same" addresses held another object,
+            // thousands of units away. Paired by address anyway, that draw jumped (drawn as this frame has it) while
+            // the object's other pass blended: its depth-equal colour pass failed along the edges - holes and bright
+            // lines in the ice, flicker at every in-between. A partner that far is found by content instead.)
+            if (draw_maxdiff(d, &prev->draws[x]) > cut_threshold()) continue;
             p_match[j] = x;
             p_used[x] = 1;
             st_id_pairs++;
@@ -304,12 +356,13 @@ static void match_all(void) {
         uint64_t key = cur->draws[p_order[g]].key;
         uint32_t ge = g + 1;
         while (ge < cur->ndraws && cur->draws[p_order[ge]].key == key) ge++;
-        uint32_t ncur = ge - g;
-        int32_t cand[GROUP_MAX];
+        static int32_t *cand;
+        static uint32_t cand_cap;
         uint32_t nprev = 0;
-        for (; nprev < GROUP_MAX; nprev++) {
+        for (;; nprev++) {
             int32_t pj = lookup_prev(key, nprev);
             if (pj < 0) break;
+            if (nprev == cand_cap) cand = realloc(cand, sizeof *cand * (cand_cap = cand_cap ? cand_cap * 2 : 256));
             cand[nprev] = pj;
         }
         // Draws without per-object uniforms (vertex stage, slots 2 and up) are the HUD's and the menus' quads (and a
@@ -321,39 +374,76 @@ static void match_all(void) {
         uint32_t left = 0;  // (draws of the group not paired by identity)
         for (uint32_t k = g; k < ge; k++) left += p_match[p_order[k]] == -1;
         if (object_bytes(&cur->draws[p_order[g]]) < 48) {
-            for (uint32_t k = g; k < ge; k++) p_match[p_order[k]] = -2;
-        } else if (!left) {
-        } else if (nprev == 1 && ncur == 1) {
-            if (!p_used[cand[0]]) {
-                if (draw_maxdiff(&cur->draws[p_order[g]], &prev->draws[cand[0]]) > cut_threshold()) p_match[p_order[g]] = -3, st_new_objects++;
-                else p_match[p_order[g]] = cand[0], p_used[cand[0]] = 1, st_content_pairs++;
-            }
-        }
-        else if (nprev >= GROUP_MAX || ncur > GROUP_MAX) {  // (too many: by occurrence, as before)
-            for (uint32_t k = g; k < ge; k++) {
-                if (p_match[p_order[k]] != -1) continue;
-                int32_t pj = lookup_prev(key, cur->draws[p_order[k]].occ);
-                if (pj >= 0 && !p_used[pj]) p_match[p_order[k]] = pj, p_used[pj] = 1;
-            }
-        } else if (nprev) {
-            uint32_t np = 0;
-            for (uint32_t c = 0; c < ncur; c++)
-                for (uint32_t q = 0; q < nprev; q++)
-                {   // ties: the same pass of the object first (occurrence within obj + key), then the nearest occurrence
-                    const DrawRec *dc = &cur->draws[p_order[g + c]], *dp = &prev->draws[cand[q]];
-                    uint32_t dpass = dc->oocc > dp->oocc ? dc->oocc - dp->oocc : dp->oocc - dc->oocc;
-                    pairs[np++] = (Pair){draw_distance(dc, dp), (uint16_t)c, (uint16_t)q,
-                                         (uint16_t)((dpass > 255 ? 255 : dpass) << 8 | (c > q ? c - q : q - c) % 256)};
+            // ... except a lone one: a full-screen pass (the shadow mask, the lighting, fog) whose pass block holds the
+            // camera's inverse and the shadow matrices - it reads the in-between's depth, so it takes the in-between's
+            // camera too. Unblended, it unprojected that depth with this frame's: shadows cast where nothing stands
+            // (Tostarena: a shop keeper's long dark silhouette on the sand while the camera turned).
+            if (ge - g == 1 && nprev == 1 && !p_used[cand[0]] && p_match[p_order[g]] == -1) {
+                p_match[p_order[g]] = cand[0], p_used[cand[0]] = 1, st_content_pairs++;
+                cur->draws[p_order[g]].screen_pass = 1;
+            } else
+                for (uint32_t k = g; k < ge; k++) p_match[p_order[k]] = -2;
+        } else if (left && nprev) {
+            // Unchanged first: a draw whose per-object uniforms are byte for byte those of a draw of the frame before
+            // is that object (static: most of a town), in the same pass of it (occurrence within obj + key). Before, a
+            // key with more than GROUP_MAX draws (Tostarena's houses and palms with their shadow passes) was paired by
+            // occurrence, and the game's depth sort reorders them as the camera turns: the in-betweens blended one
+            // object with another (the town flickered while the camera moved).
+            static ObjHash *ph;
+            static uint32_t ph_cap;
+            if (nprev > ph_cap) ph = realloc(ph, sizeof *ph * (ph_cap = nprev * 2));
+            uint32_t nph = 0;
+            for (uint32_t q = 0; q < nprev; q++)
+                if (!p_used[cand[q]]) ph[nph].h = object_hash(prev, &prev->draws[cand[q]]), ph[nph++].q = q;
+            qsort(ph, nph, sizeof *ph, ph_cmp);
+            for (uint32_t k = g; k < ge && nph; k++) {
+                uint32_t j = p_order[k];
+                if (p_match[j] != -1) continue;
+                const DrawRec *dc = &cur->draws[j];
+                uint64_t h = object_hash(cur, dc);
+                uint32_t lo = 0, hi = nph;
+                while (lo < hi) { uint32_t m = (lo + hi) / 2; if (ph[m].h < h) lo = m + 1; else hi = m; }
+                for (uint32_t i = lo; i < nph && ph[i].h == h; i++) {
+                    int32_t pj = cand[ph[i].q];
+                    if (p_used[pj] || prev->draws[pj].oocc != dc->oocc || draw_distance(dc, &prev->draws[pj]) != 0) continue;
+                    p_match[j] = pj, p_used[pj] = 1, st_same_pairs++;
+                    break;
                 }
-            qsort(pairs, np, sizeof *pairs, pair_cmp);
-            for (uint32_t i = 0; i < np; i++) {
-                uint32_t j = p_order[g + pairs[i].c];
-                int32_t pj = cand[pairs[i].p];
-                if (p_match[j] != -1 || p_used[pj] || pairs[i].d >= 1e30f) continue;
-                if (draw_maxdiff(&cur->draws[j], &prev->draws[pj]) > cut_threshold()) { p_match[j] = -3; st_new_objects++; continue; }  // (another object)
-                p_match[j] = pj;
-                p_used[pj] = 1;
-                st_content_pairs++;
+            }
+            // The rest - objects that moved - by distance, nearest first (past GROUP_MAX each way: by occurrence)
+            uint32_t rc[GROUP_MAX], rq[GROUP_MAX], nrc = 0, nrq = 0;
+            bool big = false;
+            for (uint32_t k = g; k < ge && !big; k++)
+                if (p_match[p_order[k]] == -1) { if (nrc == GROUP_MAX) big = true; else rc[nrc++] = k - g; }
+            for (uint32_t q = 0; q < nprev && !big; q++)
+                if (!p_used[cand[q]]) { if (nrq == GROUP_MAX) big = true; else rq[nrq++] = q; }
+            if (big) {
+                for (uint32_t k = g; k < ge; k++) {
+                    if (p_match[p_order[k]] != -1) continue;
+                    int32_t pj = lookup_prev(key, cur->draws[p_order[k]].occ);
+                    if (pj >= 0 && !p_used[pj]) p_match[p_order[k]] = pj, p_used[pj] = 1, st_occ_pairs++;
+                }
+            } else if (nrc && nrq) {
+                uint32_t np = 0;
+                for (uint32_t x = 0; x < nrc; x++)
+                    for (uint32_t y = 0; y < nrq; y++)
+                    {   // ties: the same pass of the object first (occurrence within obj + key), then the nearest occurrence
+                        uint32_t c = rc[x], q = rq[y];
+                        const DrawRec *dc = &cur->draws[p_order[g + c]], *dp = &prev->draws[cand[q]];
+                        uint32_t dpass = dc->oocc > dp->oocc ? dc->oocc - dp->oocc : dp->oocc - dc->oocc;
+                        pairs[np++] = (Pair){draw_distance(dc, dp), (uint16_t)c, (uint16_t)q,
+                                             (uint16_t)((dpass > 255 ? 255 : dpass) << 8 | (c > q ? c - q : q - c) % 256)};
+                    }
+                qsort(pairs, np, sizeof *pairs, pair_cmp);
+                for (uint32_t i = 0; i < np; i++) {
+                    uint32_t j = p_order[g + pairs[i].c];
+                    int32_t pj = cand[pairs[i].p];
+                    if (p_match[j] != -1 || p_used[pj] || pairs[i].d >= 1e30f) continue;
+                    if (draw_maxdiff(&cur->draws[j], &prev->draws[pj]) > cut_threshold()) { p_match[j] = -3; st_new_objects++; continue; }  // (another object)
+                    p_match[j] = pj;
+                    p_used[pj] = 1;
+                    st_content_pairs++;
+                }
             }
         }
         g = ge;
@@ -466,23 +556,35 @@ static uint32_t rp_draw, rp_cb;
 static int32_t rp_cur = -1;  // the replayed draw's record (-1: not found: guest memory as it is)
 static uint64_t st_replay_misses, st_replay_draws, st_replay_cb_miss;
 
-void interp_draw(uint64_t key, bool depth_only) {
+bool interp_draw(uint64_t key, bool depth_only) {
     if (g_interp_replaying) {
+        // A replayed draw finds its record among the next logged draws. One that has none was not in the frame (its
+        // program was still being built then and the draw left out, ready now) - or not found: it read the uniform
+        // buffers as the game has them by now, the next frame's camera already in them, and broke the in-between
+        // (Tostarena: a parasol's colour pass at the next frame's camera, its depth pre-pass blended - the depth-equal
+        // test failed, the parasol black in every in-between of a camera turn). Such a draw is left out (false).
         st_replay_draws++;
         rp_cur = -1;
-        for (uint32_t j = rp_draw; j < cur->ndraws && j < rp_draw + 8; j++)
+        for (uint32_t j = rp_draw; j < cur->ndraws && j < rp_draw + 64; j++)
             if (cur->draws[j].key == key) { rp_cur = (int32_t)j; rp_draw = j + 1; rp_cb = cur->draws[j].first_cb; break; }
-        if (rp_cur < 0) st_replay_misses++;
-        return;
+        if (rp_cur < 0) {
+            st_replay_misses++;
+            extern bool g_debug_frame;
+            if (g_debug_frame) LOG("[interp] replay draw without its record: key %016llx (next record %u of %u)\n",
+                                   (unsigned long long)key, rp_draw, cur->ndraws);
+        }
+        return rp_cur >= 0;
     }
-    if (!frame_open || !lg) return;  // (a list run outside a frame: nothing to track)
+    if (!frame_open || !lg) return true;  // (a list run outside a frame: nothing to track)
     GROW(lg->draws, lg->ndraws, lg->cap_draws, 1024);
     DrawRec *d = &lg->draws[lg->ndraws++];
     d->key = key;
     d->occ = next_occ(key);
     d->depth_only = depth_only;
+    d->screen_pass = 0;
     d->first_cb = lg->ncbs;
     d->ncb = 0;
+    return true;
 }
 
 const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t size, uint64_t used) {
@@ -494,6 +596,19 @@ const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t si
         CbRec *c = &cur->cbs[rp_cb];
         if (c->stage != stage || c->slot != slot || c->size != size) { st_replay_cb_miss++; return src; }
         rp_cb++;
+        extern bool g_debug_frame;
+        static int dbg_cb = -1;  // ODYSSEY_INTERP_DEBUG_CB=<n> (research, a replay debug frame): each block's first n
+        if (dbg_cb < 0) dbg_cb = getenv("ODYSSEY_INTERP_DEBUG_CB") ? atoi(getenv("ODYSSEY_INTERP_DEBUG_CB")) : 0;
+        if (g_debug_frame && dbg_cb && stage <= 1) {  // values: blended (used), this frame's, the previous frame's
+            const float *u = (const float *)(c->blend >= 0 ? blend_bytes + c->blend : cur->bytes + c->off),
+                        *b = (const float *)(cur->bytes + c->off), *a = c->prev_off >= 0 ? (const float *)(prev->bytes + c->prev_off) : NULL;
+            char line[4096];
+            int o = snprintf(line, sizeof line, "[interp-cb] draw %d stage %d slot %d size %u snap %d prev %s:", rp_cur, stage, slot,
+                             (unsigned)size, c->snap, a ? "yes" : "no");
+            for (int q = 0; q < dbg_cb && q < (int)(c->used / 4) && o < (int)sizeof line - 64; q++)
+                if (u[q] != b[q] || (a && a[q] != b[q])) o += snprintf(line + o, sizeof line - (size_t)o, " [%d] %g/%g/%g", q, u[q], b[q], a ? a[q] : 0.0f);
+            LOG("%s\n", line);
+        }
         return c->blend >= 0 ? blend_bytes + c->blend : cur->bytes + c->off;
     }
     if (!frame_open || !lg || !lg->ndraws) return src;
@@ -709,7 +824,7 @@ bool interp_frame_begin(InterpFrame *f) {
     match_all();
     for (uint32_t j = 0; j < cur->ndraws; j++) cur->draws[j].pair = p_match[j] >= 0 ? p_match[j] : -1;
     history_reset = false;  // (this frame paired without the old chain: from here on it is the chain)
-    s_id_pairs += st_id_pairs, s_content_pairs += st_content_pairs, s_new_objects += st_new_objects;
+    s_id_pairs += st_id_pairs, s_content_pairs += st_content_pairs, s_new_objects += st_new_objects, s_same_pairs += st_same_pairs, s_occ_pairs += st_occ_pairs;
     float cut = cut_threshold();
     int stages = blend_stages();
     uint64_t matched = 0, changed = 0, cuts = 0;
@@ -795,6 +910,102 @@ bool interp_frame_begin(InterpFrame *f) {
             }
         }
     }
+    {   // One decision per object: a draw with a per-object block that jumped shows this frame's values in all of its
+        // per-object blocks, both stages - and so does every draw sharing one of those blocks (the object's other
+        // passes). Decided per buffer, Tostarena's shop keeper's shadow volume took this frame's fragment values (its
+        // reach, 8550 -> 0) and blended its vertex block (the box): a box half-way between parked and in place, a huge
+        // dark silhouette on the sand for an in-between every third frame - the flicker while the camera moved.
+        enum { SBITS = 14 };
+        static uint32_t snapped[1 << SBITS];  // (open hash of the copies' offsets + 1)
+        memset(snapped, 0, sizeof snapped);
+        uint32_t nsn = 0;
+        uses_build();
+        // Draws without a partner (an object that just appeared, one whose partner was too far: -3, -1) show their own
+        // blocks as this frame has them - but in the in-between's camera and pass: their shared blocks blend as the
+        // other draws' copies of them do. And the object's other draws (its depth pre-pass) take this frame's values
+        // for the blocks they share with it. Before, such a draw kept this frame's camera while the object's pre-pass
+        // blended: its colour pass (depth equal) failed everywhere - in Tostarena a parasol near the camera turned
+        // black in every in-between of a camera turn, the screen flickering.
+        // (By content: the depth pre-pass reads the camera from a 256-byte block of its own, the colour pass from the
+        // scene's 4800-byte one - Tostarena's parasol, partnerless in both passes, got the blended camera in its colour
+        // pass and this frame's in its pre-pass, the block's copy being bound by no partnered draw: black. A shared
+        // block takes the partner of any partnered draw's block with the same bytes.)
+        {
+            static struct { uint64_t key; int64_t prev_off, prev2_off; } smap[1 << SBITS];
+            static struct { uint32_t off; uint64_t key; } khash[1 << SBITS];  // (each copy's content key, once)
+            memset(smap, 0, sizeof smap);
+            memset(khash, 0, sizeof khash);
+            #define CB_KEY(cc, out) do { \
+                uint32_t kh_ = ((cc)->off * 0x9E3779B1u) >> (32 - SBITS); int kk_ = 0; \
+                while (kk_++ < 64 && khash[kh_].off && khash[kh_].off != (cc)->off + 1) kh_ = (kh_ + 1) & ((1 << SBITS) - 1); \
+                if (khash[kh_].off == (cc)->off + 1) (out) = khash[kh_].key; \
+                else { \
+                    uint64_t h_ = 0xcbf29ce484222325ull ^ ((uint64_t)(cc)->stage << 48 | (uint64_t)(cc)->slot << 40 | (cc)->size); \
+                    const uint8_t *p_ = cur->bytes + (cc)->off; \
+                    for (uint32_t q_ = 0; q_ + 8 <= (cc)->used; q_ += 8) { uint64_t w_; memcpy(&w_, p_ + q_, 8); h_ = (h_ ^ w_) * 0x100000001b3ull; } \
+                    (out) = h_ | 1; \
+                    if (!khash[kh_].off) khash[kh_].off = (cc)->off + 1, khash[kh_].key = (out); \
+                } } while (0)
+            for (uint32_t j = 0; j < cur->ndraws; j++) {
+                if (p_match[j] < 0) continue;
+                DrawRec *d = &cur->draws[j];
+                for (uint32_t i = 0; i < d->ncb; i++) {
+                    CbRec *cc = &cur->cbs[d->first_cb + i];
+                    if (cc->stage > 1 || cc->slot > 1 || cc->prev_off < 0) continue;
+                    uint64_t key;
+                    CB_KEY(cc, key);
+                    uint32_t h = (uint32_t)(key >> (64 - SBITS));
+                    for (int k = 0; k < 64 && smap[h].key && smap[h].key != key; k++) h = (h + 1) & ((1 << SBITS) - 1);
+                    if (!smap[h].key) smap[h].key = key, smap[h].prev_off = cc->prev_off, smap[h].prev2_off = cc->prev2_off;
+                }
+            }
+            for (uint32_t j = 0; j < cur->ndraws; j++) {
+                if (p_match[j] != -1 && p_match[j] != -3) continue;
+                DrawRec *d = &cur->draws[j];
+                for (uint32_t i = 0; i < d->ncb; i++) {
+                    CbRec *cc = &cur->cbs[d->first_cb + i];
+                    if (cc->stage > 1) continue;
+                    uint32_t h = (cc->off * 0x9E3779B1u) >> (32 - SBITS);
+                    if (cc->slot <= 1) {
+                        uint64_t key;
+                        CB_KEY(cc, key);
+                        for (uint32_t s = (uint32_t)(key >> (64 - SBITS)), k = 0; k < 64 && smap[s].key; k++, s = (s + 1) & ((1 << SBITS) - 1))
+                            if (smap[s].key == key) { cc->prev_off = smap[s].prev_off, cc->prev2_off = smap[s].prev2_off, cc->snap = 0; break; }
+                    } else if (nsn < (1u << SBITS) / 2 && few_uses(cc)) {
+                        while (snapped[h] && snapped[h] != cc->off + 1) h = (h + 1) & ((1 << SBITS) - 1);
+                        if (!snapped[h]) snapped[h] = cc->off + 1, nsn++;
+                    }
+                }
+            }
+        }
+        #undef CB_KEY
+        for (int round = 0; round < 3; round++) {
+            bool grew = false;
+            for (uint32_t j = 0; j < cur->ndraws; j++) {
+                DrawRec *d = &cur->draws[j];
+                bool any = false;
+                for (uint32_t i = 0; i < d->ncb && !any; i++) {
+                    CbRec *cc = &cur->cbs[d->first_cb + i];
+                    if (cc->stage > 1 || cc->slot < 2 || cc->prev_off < 0) continue;
+                    if (cc->snap) { any = true; break; }
+                    if (nsn)
+                        for (uint32_t h = (cc->off * 0x9E3779B1u) >> (32 - SBITS), k = 0; snapped[h] && k < 64; h = (h + 1) & ((1 << SBITS) - 1), k++)
+                            if (snapped[h] == cc->off + 1) { any = true; break; }
+                }
+                if (!any) continue;
+                for (uint32_t i = 0; i < d->ncb; i++) {
+                    CbRec *cc = &cur->cbs[d->first_cb + i];
+                    if (cc->stage > 1 || cc->slot < 2 || cc->prev_off < 0) continue;
+                    if (!cc->snap) cc->snap = 1, s_class_snaps++, grew = true;
+                    if (nsn >= (1u << SBITS) / 2 || !few_uses(cc)) continue;
+                    uint32_t h = (cc->off * 0x9E3779B1u) >> (32 - SBITS);
+                    while (snapped[h] && snapped[h] != cc->off + 1) h = (h + 1) & ((1 << SBITS) - 1);
+                    if (!snapped[h]) snapped[h] = cc->off + 1, nsn++, grew = true;
+                }
+            }
+            if (!grew) break;
+        }
+    }
     {   // One decision per light (Dusklight: the light's view and projection are recorded once and every reader -
         // the caster pass and the receivers' texture matrix - takes the same replacement, src/d/d_drawlist.cpp).
         // The light's block is the shared block (slots 0 and 1) the shadow pass binds; the ground reads a copy of it
@@ -838,7 +1049,7 @@ bool interp_frame_begin(InterpFrame *f) {
                 bool light = d->depth_only || cc->stage == 1;
                 if (light) { for (; k < nl; k++) if (lcls[k].slot == cc->slot && lcls[k].size == cc->size) break; light = k < nl; }
                 if (light) { if (lcls[k].snap && !cc->snap) cc->snap = 1, s_class_snaps++; }
-                else if (cc->snap) camera_jump = true;
+                else if (cc->snap && !d->screen_pass) camera_jump = true;  // (a pass's own jump: that pass shows this frame's)
             }
         }
         if (camera_jump) { log_cut(6, NULL); return false; }
@@ -997,14 +1208,14 @@ void interp_log_stats(void) {
     int o = 0;
     for (int i = 0; i < 9; i++)
         if (s_cuts[i]) o += snprintf(cuts + o, sizeof cuts - (size_t)o, " %s %llu", cut_name[i], (unsigned long long)s_cuts[i]);
-    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f, new objects %.1f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class), toggling elements %.0f/image, whole-number %.0f, wraps %.1f, discontinuities %.1f | "
+    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f - unchanged %.0f/f, by order %.0f/f -, new objects %.1f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class), toggling elements %.0f/image, whole-number %.0f, wraps %.1f, discontinuities %.1f | "
         "in-betweens %.1f/s, replay cpu %.2f ms avg %.2f max, prep %.2f ms/f | cuts:%s\n",
-        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_new_objects / n, s_blended_cbs / n, s_cut_cbs / n, s_class_snaps / n, s_replays ? (double)s_toggled / s_replays : 0, s_replays ? (double)s_integral / s_replays : 0, s_replays ? (double)s_wraps / s_replays : 0, s_replays ? (double)s_discont / s_replays : 0,
+        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_same_pairs / n, s_occ_pairs / n, s_new_objects / n, s_blended_cbs / n, s_cut_cbs / n, s_class_snaps / n, s_replays ? (double)s_toggled / s_replays : 0, s_replays ? (double)s_integral / s_replays : 0, s_replays ? (double)s_wraps / s_replays : 0, s_replays ? (double)s_discont / s_replays : 0,
         s_replays / dt, s_replays ? s_replay_cpu / s_replays : 0, s_replay_cpu_max, s_prep / n, o ? cuts : " none");
     if (st_replay_misses || st_replay_cb_miss)
         LOG("[interp] replay draw misses %llu/%llu, uniform misses %llu\n", (unsigned long long)st_replay_misses,
             (unsigned long long)st_replay_draws, (unsigned long long)st_replay_cb_miss);
-    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = s_new_objects = s_class_snaps = s_toggled = s_integral = s_wraps = s_discont = 0;
+    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = s_same_pairs = s_occ_pairs = s_new_objects = s_class_snaps = s_toggled = s_integral = s_wraps = s_discont = 0;
     memset(s_cuts, 0, sizeof s_cuts);
     s_replays = 0;
     s_replay_cpu = s_replay_cpu_max = s_prep = 0;

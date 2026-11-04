@@ -557,8 +557,8 @@ static void write_tex_result(Ctx *c, int slot, const char *call, uint32_t mask, 
 
 // Integer texel coordinates in guest units -> the (possibly larger) allocation of texture slot `slot`.
 static const char *RSC2(Ctx *c, int slot, const char *fmt, ...) {
-    static char bufs[4][1024];
-    static int bi;
+    static __thread char bufs[4][1024];  // (per thread: the shader precompile translates on several at once)
+    static __thread int bi;
     char *o = bufs[bi++ & 3];
     char inner[700];
     va_list ap;

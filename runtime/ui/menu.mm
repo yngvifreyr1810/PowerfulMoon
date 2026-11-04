@@ -35,6 +35,8 @@ void controls_bindings_draw(float scale);  // controls_ui.mm
 #include "../input_bind.h"
 #include "../controller_motion.h"
 #include "../paths.h"
+#include "../update_launcher.h"
+#include "../release_info.h"
 }
 
 // ------------------------------------------------------------------ state shared with the main thread
@@ -42,6 +44,7 @@ static std::atomic<bool> g_open{false};
 static std::atomic<bool> g_setup{false};  // the first-start setup page (setup.mm) instead of the menu
 static std::atomic<bool> g_text_busy{false};  // a text field / the on-screen keyboard has the keys (render thread: ui_text_busy)
 static std::atomic<bool> g_want_fullscreen_apply{false};
+static std::atomic<bool> g_want_update{false};
 
 struct QEvent {
     enum { KEY, ANALOG, MOUSE_POS, MOUSE_BUTTON, WHEEL, TEXT } kind;
@@ -266,6 +269,12 @@ bool menu_handle_event(const SDL_Event *e) {
 }
 
 void menu_apply_window_requests(void *win) {
+    static bool update_checked = false;
+    if (!update_checked) {
+        update_checked = true;
+        if (g_settings.check_updates && !getenv("ODYSSEY_HIDDEN")) pm_open_updater(true);
+    }
+    if (g_want_update.exchange(false)) pm_open_updater(false);
     SDL_Window *w = (SDL_Window *)win;
     g_pixel_density = SDL_GetWindowPixelDensity(w);
     static bool text_input;
@@ -627,6 +636,12 @@ static void tab_quit(float scale, bool in_game) {
 }
 
 static void tab_about(void) {
+#ifdef _WIN32
+    ImGui::Text("PowerfulMoon %s", POWERFULMOON_VERSION);
+    if (ImGui::Button("Check for updates")) g_want_update.store(true);
+    if (ImGui::Checkbox("Check for approved updates on startup", &g_settings.check_updates)) settings_save();
+    ImGui::Separator();
+#endif
     header("About PowerfulMoon");
     ImGui::TextWrapped("Customized fork of Power Moon Recomp by zzzarathustra-dev. Maintained by Vinh An Project / yngvifreyr1810. MIT host; separate GPL controller bridge. Not affiliated with Nintendo.");
     if (ImGui::Button("Upstream project")) SDL_OpenURL("https://gitlab.com/zzzarathustra-dev/power-moon-recomp");
@@ -642,6 +657,16 @@ static void tab_about(void) {
         if (choice("Language", &g_settings.language, names, N_LANGUAGES)) settings_save();
     }
     hint("The game's text language, as its own system setting. Applies the next time the game starts.");
+    ImGui::Spacing();
+    header("Controller");
+    {
+        static const int pct[] = {0, 5, 10, 15, 20, 25, 30};
+        static const char *const names[] = {"Off", "5%", "10%", "15%", "20%", "25%", "30%"};
+        int i = 0;
+        for (int k = 0; k < 7; k++) if (pct[k] <= g_settings.stick_deadzone) i = k;
+        if (choice("Stick deadzone", &i, names, 7)) g_settings.stick_deadzone = pct[i];
+    }
+    hint("How far a controller stick moves before it counts. Raise it if Mario or the camera drifts on their own.");
     ImGui::Spacing();
     header("Controls");
     if (ImGui::Checkbox("Motion controls",&g_settings.motion)) settings_save();

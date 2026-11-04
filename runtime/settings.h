@@ -22,6 +22,7 @@ extern const char *const g_language_names[N_LANGUAGES];  // for the menu ("Auto"
 
 typedef struct {
     bool fullscreen;
+    bool check_updates; // notify about approved fork releases; never install automatically
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (MetalFX: macOS, FSR 1: Windows)
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
@@ -35,6 +36,7 @@ typedef struct {
     bool reverb;         // the audio renderer's reverb effect
     bool movie_audio;
     bool show_fps;
+    int stick_deadzone;  // percent of a controller stick's travel that counts as rest (runtime/hle/input.c), 0: none
     int language;        // LANG_AUTO or an index into g_language_codes: the game's text language
     bool motion, rumble, hd_rumble;
     float rumble_strength; // 0..2, default 1

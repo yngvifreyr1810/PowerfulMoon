@@ -40,6 +40,10 @@ typedef struct NvnTexture {
     int live;
     bool queued;
     uint64_t release_at;
+    struct NvnTexture *twin;  // (vulkan/textures.c: what frame interpolation's replays draw instead of this one)
+    uint32_t twin_gen;
+    uint32_t rd_epoch, wr_epoch, snap_epoch;  // (textures.c: read / first written in a game frame; its frame-start copy)
+    bool carry;  // (textures.c) a frame read it before writing it: what replays draw into it must not reach the game
     bool window;  // one of the window's textures (nvnWindowInitialize): what is drawn into it is dithered (exec.c draw_;
                   // past addr: not part of the description, so its other initializations still find it)
 } NvnTexture;
@@ -94,6 +98,7 @@ typedef struct NvnWindow {
 typedef struct NvnSync {
     volatile int signaled;
     volatile uint64_t seq;  // GPU submission this fence belongs to (renderer_fence_seq), 0 = none
+    uint64_t ticket;        // the render thread's item that fences it (rqueue.c; 0: none)
 } NvnSync;
 
 // ---- command recording (runtime/nvn/cmdbuf.c: records in host memory, counted against the game's command memory)

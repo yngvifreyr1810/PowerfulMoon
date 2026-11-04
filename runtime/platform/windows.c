@@ -267,6 +267,8 @@ void plat_init(void) {
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
     SetConsoleOutputCP(CP_UTF8);
+    // ODYSSEY_AFFINITY=<mask> (tests): only these logical processors, as on a CPU with fewer cores (0x55: 4 cores, 0x5: 2)
+    if (getenv("ODYSSEY_AFFINITY")) SetProcessAffinityMask(GetCurrentProcess(), (DWORD_PTR)strtoull(getenv("ODYSSEY_AFFINITY"), NULL, 0));
     timeBeginPeriod(1);  // 1 ms Sleep / condition-variable timeouts (default 15.6 ms)
     // Opt out of EcoQoS and of Windows 11 ignoring the timer resolution while the window is occluded.
     PROCESS_POWER_THROTTLING_STATE pt = {
@@ -275,6 +277,15 @@ void plat_init(void) {
         .StateMask = 0,
     };
     SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &pt, sizeof pt);
+}
+
+// (Windows installed on a Steam Deck: the firmware's maker)
+bool plat_is_steam_deck(void) {
+    char v[64] = "";
+    DWORD n = sizeof v;
+    if (RegGetValueA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\BIOS", "SystemManufacturer", RRF_RT_REG_SZ, NULL, v, &n) != ERROR_SUCCESS)
+        return false;
+    return !strncmp(v, "Valve", 5);
 }
 
 bool plat_exe_path(char *buf, size_t size) {

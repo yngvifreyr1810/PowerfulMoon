@@ -6,6 +6,8 @@
 #include "../settings.h"
 #include "../controller_motion.h"
 
+void input_vibration(uint32_t handle, float amp_low, float amp_high);  // (hle/input.c)
+
 static uint32_t new_event_handle(void) {
     uint32_t w, r;
     kernel_create_event_pair(&w, &r);

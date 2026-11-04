@@ -1,0 +1,38 @@
+[
+  {
+    "NAME": "mingw-w64-clang-x86_64-ffmpeg",
+    "FILENAME": "mingw-w64-clang-x86_64-ffmpeg-9.0.2-2-any.pkg.tar.zst",
+    "VERSION": "9.0.2-2",
+    "SHA256SUM": "db8a64ffa128cc287bf6dd7230cca3801c3af4cadc00e4a134a21dd3c595b8e3"
+  },
+  {
+    "NAME": "mingw-w64-clang-x86_64-sdl3",
+    "FILENAME": "mingw-w64-clang-x86_64-sdl3-3.4.18-1-any.pkg.tar.zst",
+    "VERSION": "3.4.18-1",
+    "SHA256SUM": "26847e18a9f413a1ebec5a2359881ceeef810558c63235ca0997a353c868035b"
+  },
+  {
+    "NAME": "mingw-w64-clang-x86_64-shaderc",
+    "FILENAME": "mingw-w64-clang-x86_64-shaderc-2026.4-1-any.pkg.tar.zst",
+    "VERSION": "2026.4-1",
+    "SHA256SUM": "1eb1df14e08720f354e4a99bb8d8512ab4d6c2a8179023ee60f809a66bbe13b4"
+  },
+  {
+    "NAME": "mingw-w64-clang-x86_64-vulkan-headers",
+    "FILENAME": "mingw-w64-clang-x86_64-vulkan-headers-1~1.4.363.0-1-any.pkg.tar.zst",
+    "VERSION": "1~1.4.363.0-1",
+    "SHA256SUM": "7eabb1efd99c5bd80d2a2b3b5f9ef76afee32f096a175e0e4d0f86793fcb7247"
+  },
+  {
+    "NAME": "mingw-w64-clang-x86_64-vulkan-loader",
+    "FILENAME": "mingw-w64-clang-x86_64-vulkan-loader-1~1.4.363.0-1-any.pkg.tar.zst",
+    "VERSION": "1~1.4.363.0-1",
+    "SHA256SUM": "1299c3ffd60fefbb22cb985ea1d81f3a36dd5185f6c5ac8e5ff0e3257b37e2f5"
+  },
+  {
+    "NAME": "mingw-w64-clang-x86_64-vulkan-memory-allocator",
+    "FILENAME": "mingw-w64-clang-x86_64-vulkan-memory-allocator-3.5.0-1-any.pkg.tar.zst",
+    "VERSION": "3.5.0-1",
+    "SHA256SUM": "60a48bc0ae8691eb66641d9b0b4a3f31c1e325eadf89527fa5c608ad21546d3e"
+  }
+]

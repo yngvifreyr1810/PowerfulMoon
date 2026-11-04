@@ -1,0 +1,28 @@
+name: Upstream candidate bot
+on:
+  schedule:
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+  actions: write
+concurrency:
+  group: upstream-candidate-bot
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Prepare source candidate (never publish)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python tools/automation/upstream_sync.py

@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: '3.14'
       - name: Exercise full installation and rollback with synthetic files
-        run: python -m unittest discover -s tests -p test_full_installer.py -v
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
   controller:
     runs-on: ubuntu-latest
     steps:

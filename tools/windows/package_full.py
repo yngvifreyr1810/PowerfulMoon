@@ -8,7 +8,9 @@ import subprocess
 import zipfile
 from installer_core import check_name
 
-VERSION='0.2.0-powerfulmoon.2'
+from version_info import metadata
+RELEASE = metadata()
+VERSION = RELEASE['version']
 def sha(data):return hashlib.sha256(data).hexdigest()
 def generator_modules(root):
     todo=[root/'tools/gen.py'];seen=set()
@@ -39,6 +41,7 @@ def main():
         data=(args.dependency_sources/item['name']).read_bytes()
         if sha(data)!=item['sha256']:raise ValueError('Dependency source archive changed: '+item['name'])
         add('licenses/source/'+item['name'],data)
+    add('PowerfulMoon-Update.exe',(root/'build/PowerfulMoon-Update.exe').read_bytes())
     add('PowerfulMoon.exe',(root/'build/PowerfulMoon.exe').read_bytes())
     add('PowerfulMoon.dll.a',(root/'build/PowerfulMoon.dll.a').read_bytes())
     add('libc++.dll',args.libcxx.read_bytes())
@@ -59,7 +62,7 @@ def main():
         p=root/name
         if p.is_file():add('source/'+name,p.read_bytes())
     commit=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()
-    add('SOURCE.txt',f'PowerfulMoon {VERSION}\nhttps://github.com/yngvifreyr1810/PowerfulMoon\nSource commit: {commit}\nFork/customization of https://gitlab.com/zzzarathustra-dev/power-moon-recomp at v0.2.0 (1fdc703def082ae44277e62d869f3de06ce5f699).\nMIT host source: source/. Separate GPL bridge source/licenses: controller-bridge/.\nUpstream-authored moon icon retained; no Nintendo logo/artwork is included.\nNo game data, keys, saves or generated game-code library are distributed.\n'.encode())
+    add('SOURCE.txt',f'PowerfulMoon {VERSION}\nhttps://github.com/yngvifreyr1810/PowerfulMoon\nSource commit: {commit}\nFork/customization of https://gitlab.com/zzzarathustra-dev/power-moon-recomp at {RELEASE['upstream_tag']} ({RELEASE['upstream_commit']}).\nMIT host source: source/. Separate GPL bridge source/licenses: controller-bridge/.\nUpstream-authored moon icon retained; no Nintendo logo/artwork is included.\nNo game data, keys, saves or generated game-code library are distributed.\n'.encode())
     manifest={'name':'PowerfulMoon','version':VERSION,'source_commit':commit,'legacy_programs':json.loads((root/'tools/windows/legacy-programs.json').read_text()),'files':{name:sha(data) for name,data in sorted(files.items())}}
     args.output.parent.mkdir(parents=True,exist_ok=True)
     with zipfile.ZipFile(args.output,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:

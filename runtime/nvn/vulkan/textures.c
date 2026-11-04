@@ -452,8 +452,10 @@ static TexBackend *tex_backend(NvnTexture *t) {
     return b;
 }
 
+static void twin_forget(NvnTexture *t);
 void backend_texture_destroyed(NvnTexture *t) {
     vk_render_lock();  // (any game thread: Odyssey finalizes on its loading threads while another one renders)
+    twin_forget(t);
     TexBackend *b = t->backend;
     if (b) {
         extern void vk_alias_texture_destroyed(NvnTexture *t);  // (exec.c copy aliases: a source's contents handed over)
@@ -700,7 +702,97 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     }
 }
 
+// ---- frame interpolation's replays (runtime/nvn/interp.c) draw into twins of the game's images
+// A replay re-runs a frame's command lists: drawn into the game's own images it left its in-between in everything the
+// game reads again later - a target updated every other frame (a shadow cascade, an effect), a feedback (water ripples,
+// a light's fading glare) - and the next game frames showed that state half a frame off: shadows and surfaces flickering
+// with in-betweens on. Each image a replay writes is a twin (made once, with the original's description); within the
+// replay, reads of what it wrote go to the twin, of anything else to the game's image. A twin starts from its original's
+// content at the replay's first write (a pass may load it). The game's images are never written by a replay.
+// Frame-start contents: an image the game reads in a frame before writing it (a shadow map drawn for the next frame,
+// a buffer used in turn by several effects) held this frame's end by the time the replay ran - the replay read the
+// state the frame left, not the one it started from: Tostarena's shop keeper cast a long dark shadow across the sand
+// in every third in-between (the depth shadow map, drawn later in the same frame for another use), ice showed holes.
+// So the first write of such an image in a logged frame first copies it to its twin, and the replay of that frame
+// starts from there; images the frame writes without reading them first need no copy (the replay draws them anew).
+extern bool g_interp_log;  // (interp.h: this frame's lists are logged for in-betweens)
+static uint32_t twin_gen = 1, replay_epoch;
+uint32_t g_tex_epoch = 1;           // the game frame whose lists run (device.c frame_decide counts them)
+uint32_t g_interp_replay_epoch;     // (device.c, for the replay to come) the replayed frame's
+__thread bool g_twin_redirect;      // (exec.c renderer_interp_replay: this thread replays)
+uint32_t vk_twin_epoch = 1;         // (exec.c's replay view memo: changes whenever reads may move to a twin)
+void vk_twins_begin(uint32_t epoch) { twin_gen++, vk_twin_epoch++, replay_epoch = epoch; }  // (render lock: a replay starts)
+static void image_copy_all(TexBackend *s, TexBackend *d) {
+    extern void vk_end_pass(void);
+    vk_end_pass();
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkImageCopy c[16];
+    uint32_t n = 0;
+    for (uint32_t lv = 0; lv < s->levels && n < 16; lv++) {
+        uint32_t w = s->width >> lv, h = s->height >> lv, dd = s->depth >> lv;
+        c[n++] = (VkImageCopy){.srcSubresource = {s->aspect, lv, 0, s->layers}, .dstSubresource = {s->aspect, lv, 0, s->layers},
+                               .extent = {w ? w : 1, h ? h : 1, dd ? dd : 1}};
+    }
+    vkCmdCopyImage(cb, s->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, n, c);
+    vk_full_barrier(cb);
+}
+static NvnTexture *twin_of(NvnTexture *t) {
+    if (!t->twin) {
+        NvnTexture *w = malloc(sizeof *w);
+        *w = *t;
+        w->backend = NULL, w->twin = NULL, w->twin_gen = w->rd_epoch = w->wr_epoch = w->snap_epoch = 0, w->carry = false;
+        t->twin = w;
+    }
+    return t->twin;
+}
+static bool copy_to_twin(NvnTexture *t) {
+    TexBackend *src = tex_backend(t), *dst = tex_backend(twin_of(t));
+    dst->gpu_owned = true;
+    if (!src->image || !dst->image || src->width != dst->width || src->height != dst->height) return false;
+    image_copy_all(src, dst);
+    return true;
+}
+// (a logged frame's lists, render lock) t read or about to be written
+static void frame_access(NvnTexture *t, bool write) {
+    if (!write) {
+        if (t->wr_epoch != g_tex_epoch) t->rd_epoch = g_tex_epoch;
+        return;
+    }
+    if (t->wr_epoch == g_tex_epoch) return;
+    t->wr_epoch = g_tex_epoch;
+    if (t->rd_epoch == g_tex_epoch) t->carry = true;
+    if (t->carry && copy_to_twin(t)) t->snap_epoch = g_tex_epoch;
+}
+static NvnTexture *replay_redirect(NvnTexture *t, bool for_render) {
+    // Only images a frame reads before writing need a twin: every other one the next frame draws anew before reading
+    // it, so a replay may draw into the game's own (a twin of each cost ~230 MB at 1600 x 900, 1.3 GB in 4K)
+    if (!t->carry) return t;
+    bool start = t->twin && t->snap_epoch == replay_epoch;  // (the twin holds the replayed frame's start)
+    if (!for_render) return start || (t->twin && t->twin_gen == twin_gen) ? t->twin : t;
+    twin_of(t);
+    if (t->twin_gen != twin_gen) {
+        t->twin_gen = twin_gen;
+        vk_twin_epoch++;
+        if (!start) copy_to_twin(t);
+    }
+    return t->twin;
+}
+// (after a replay, render lock) the image it left for t: the twin when it wrote t, else the game's
+TexBackend *vk_tex_replayed(NvnTexture *t) {
+    return t->twin && t->twin_gen == twin_gen ? tex_backend(t->twin) : vk_tex(t, true);
+}
+static void twin_forget(NvnTexture *t) {  // (render lock) the game's image goes: its twin with it
+    NvnTexture *w = t->twin;
+    if (!w) return;
+    t->twin = NULL, t->twin_gen = 0;
+    backend_texture_destroyed(w);
+    free(w);
+}
+
 TexBackend *vk_tex(NvnTexture *t, bool for_render) {
+    if (g_twin_redirect) t = replay_redirect(t, for_render);
+    else if (g_interp_log) frame_access(t, for_render);
     TexBackend *b = tex_backend(t);
     if (b->pending_rgba) upload_pending(b);
     if (for_render) b->gpu_owned = true;

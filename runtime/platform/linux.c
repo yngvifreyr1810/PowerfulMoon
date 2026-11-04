@@ -120,6 +120,16 @@ void plat_init(void) {
 }
 
 // (inside an AppImage: the binary in its mount, which stays mounted while this process lives - re-exec included)
+// Steam's game mode sets SteamDeck=1; the board says Valve (Jupiter: LCD, Galileo: OLED)
+bool plat_is_steam_deck(void) {
+    const char *e = getenv("SteamDeck");
+    if (e && atoi(e) == 1) return true;
+    char v[64] = "";
+    FILE *f = fopen("/sys/class/dmi/id/board_vendor", "r");
+    if (f) { if (!fgets(v, sizeof v, f)) v[0] = 0; fclose(f); }
+    return !strncmp(v, "Valve", 5);
+}
+
 bool plat_exe_path(char *buf, size_t size) {
     ssize_t n = readlink("/proc/self/exe", buf, size - 1);
     if (n <= 0) return false;

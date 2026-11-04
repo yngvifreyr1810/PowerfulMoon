@@ -1,0 +1,43 @@
+name: Publish owner-reviewed candidate
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run:
+        description: Successful candidate Actions run ID
+        required: true
+        type: string
+      approved_sha:
+        description: Exact 40-character commit you tested and approve
+        required: true
+        type: string
+      confirmation:
+        description: Type PUBLISH to approve public distribution
+        required: true
+        type: string
+permissions: {}
+concurrency:
+  group: powerfulmoon-public-release
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.actor == github.repository_owner && github.ref == 'refs/heads/main'
+    environment: release-approval
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Promote the exact reviewed artifact, without rebuilding
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run }}
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: python tools/automation/publish_reviewed.py --run "$CANDIDATE_RUN" --sha "$APPROVED_SHA" --confirmation "$CONFIRMATION"

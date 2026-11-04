@@ -10,6 +10,7 @@
 // Settings has no guest-CPU dependency; the platform redirects stderr to the host log.
 #define LOG(...) fprintf(stderr, __VA_ARGS__)
 #include "input_bind.h"
+#include "platform.h"
 
 #define SETTINGS_FILE settings_file()
 
@@ -21,6 +22,7 @@ static const char *settings_file(void) {
 
 Settings g_settings = {
     .fullscreen = false,
+    .check_updates = true,
     .volume = 1.0f,
     .reverb = true,
     .movie_audio = true,
@@ -103,6 +105,7 @@ static const char *controller_file(void) {
 
 static bool controller_setting(const char *key, const char *val) {
     if (!strcmp(key,"motion")) g_settings.motion=atoi(val)!=0;
+    else if (!strcmp(key,"stick_deadzone")) g_settings.stick_deadzone=atoi(val)<0 ? 0 : atoi(val)>40 ? 40 : atoi(val);
     else if (!strcmp(key,"rumble")) g_settings.rumble=atoi(val)!=0;
     else if (!strcmp(key,"hd_rumble")) g_settings.hd_rumble=atoi(val)!=0;
     else if (!strcmp(key,"rumble_strength")) {
@@ -130,6 +133,7 @@ static void controller_save(void) {
     fprintf(f,"# PowerMoon-Switch2Pro controller profile; survives stock upstream settings saves\n");
     fprintf(f,"motion = %d\nrumble = %d\nhd_rumble = %d\nrumble_strength = %.6g\n",
             g_settings.motion,g_settings.rumble,g_settings.hd_rumble,g_settings.rumble_strength);
+    fprintf(f,"stick_deadzone = %d\n",g_settings.stick_deadzone);
     bind_settings_save(f);
     if (fclose(f)!=0) { remove(temp); return; }
 #ifdef _WIN32
@@ -144,6 +148,9 @@ void settings_load(void) {
     static bool loaded;
     if (loaded) return;
     loaded = true;
+    // Steam Deck: Dynamic resolution unless chosen otherwise - the game's 1600 x 900 or less, lowered while the GPU can't
+    // hold 60 fps (the screen has 1280 x 800)
+    if (plat_is_steam_deck()) g_settings.res_mode = RES_DYNAMIC;
     FILE *f = fopen(SETTINGS_FILE, "r");
     if (!f && !getenv("ODYSSEY_SETTINGS")) f = fopen("odyssey.ini", "r");  // (the settings of the earlier builds)
     if (!f && !getenv("ODYSSEY_SETTINGS")) f = fopen("larecomp.ini", "r");
@@ -155,13 +162,15 @@ void settings_load(void) {
         if (sscanf(line, " %63[^= ] = %599[^\n]", key, val) < 2) continue;
         for (size_t n = strlen(val); n && (val[n - 1] == ' ' || val[n - 1] == '\r'); n--) val[n - 1] = 0;
         if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
+        else if (!strcmp(key, "check_updates")) g_settings.check_updates = atoi(val) != 0;
         else if (!strcmp(key, "mod_off")) settings_set_mod_off(val, true);
         else if (!strcmp(key, "volume")) g_settings.volume = (float)atof(val);
         else if (!strcmp(key, "reverb")) g_settings.reverb = atoi(val) != 0;
         else if (!strcmp(key, "movie_audio")) g_settings.movie_audio = atoi(val) != 0;
         else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
         else if (!strcmp(key, "motion")) g_settings.motion = atoi(val) != 0;
-        else if (!strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;
+        else if (!strcmp(key, "stick_deadzone")) g_settings.stick_deadzone = atoi(val)<0 ? 0 : atoi(val)>40 ? 40 : atoi(val);
+        else if (!strcmp(key, "vibration") || !strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;
         else if (!strcmp(key, "hd_rumble")) g_settings.hd_rumble = atoi(val) != 0;
         else if (!strcmp(key, "rumble_strength")) { float v=(float)atof(val);g_settings.rumble_strength=v>=0 && v<=2?v:1; }
         else if (!strcmp(key, "resolution")) {
@@ -198,6 +207,7 @@ void settings_save(void) {
     if (!f) { LOG("[settings] cannot write %s\n", SETTINGS_FILE); return; }
     fprintf(f, "# Power Moon Recomp settings (edited from the in-game menu: F1, Esc, or the controller's Home button)\n");
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen);
+    fprintf(f, "check_updates = %d\n", g_settings.check_updates);
     fprintf(f, "volume = %.2f\n", g_settings.volume);
     fprintf(f, "reverb = %d\n", g_settings.reverb);
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
@@ -220,6 +230,7 @@ void settings_save(void) {
     fprintf(f, "language = %s\n", g_language_codes[g_settings.language > LANG_AUTO && g_settings.language < N_LANGUAGES
                                                      ? g_settings.language : LANG_AUTO]);
     for (int i = 0; i < g_nmod_off; i++) fprintf(f, "mod_off = %s\n", g_mod_off[i]);
+    fprintf(f,"stick_deadzone = %d\n",g_settings.stick_deadzone);
     bind_settings_save(f);
     fclose(f);
 }

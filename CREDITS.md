@@ -4,7 +4,8 @@ PowerfulMoon is a customized fork, not an original creation of the upstream port
 
 * **Power Moon Recomp**, zzzarathustra-dev and contributors, MIT:
   https://gitlab.com/zzzarathustra-dev/power-moon-recomp
-  Updated from v0.1.6 to v0.2.0, commit 1fdc703def082ae44277e62d869f3de06ce5f699.
+  Integrated through v0.2.1, commit cdbe05c9df0e2ff4bfbecece89ad3f0fd9806193.
+  The upstream 0.2.1 source also supplies shader preparation and render-queue improvements.
   Upstream authored the 0.2.0 renderer/interpolation/ultrawide changes; this fork adds
   controller persistence, VRR output selection and the host VSync setting.
   Original host, renderer, recompiler, setup flow, UI and original crescent icon

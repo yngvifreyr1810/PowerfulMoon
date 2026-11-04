@@ -13,6 +13,7 @@ from installer_core import install
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--target',type=Path,help='Install to this folder without the wizard')
+    parser.add_argument('--upgrade-folder',type=Path,help='Preselect an existing folder in the upgrade wizard')
     parser.add_argument('--archive',type=Path,help='Use a local PowerfulMoon package (developer mode)')
     parser.add_argument('--smoke-test',action='store_true')
     args=parser.parse_args()
@@ -41,7 +42,7 @@ def main():
     ttk.Label(box,text='PowerfulMoon',font=('Segoe UI',23,'bold')).pack(anchor='w')
     ttk.Label(box,text='Customized fork of Power Moon Recomp by zzzarathustra-dev',wraplength=590).pack(anchor='w',pady=(3,18))
     ttk.Label(box,text='Install or upgrade folder',font=('Segoe UI',10,'bold')).pack(anchor='w')
-    folder=tk.StringVar(value=str(Path(os.environ['LOCALAPPDATA'])/'Programs/PowerfulMoon'))
+    folder=tk.StringVar(value=str(args.upgrade_folder or Path(os.environ['LOCALAPPDATA'])/'Programs/PowerfulMoon'))
     row=ttk.Frame(box);row.pack(fill='x',pady=7)
     ttk.Entry(row,textvariable=folder).pack(side='left',fill='x',expand=True)
     ttk.Button(row,text='Browse...',command=lambda:choose()).pack(side='left',padx=(8,0))

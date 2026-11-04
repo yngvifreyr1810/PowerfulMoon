@@ -14,7 +14,7 @@ int interp_wanted(void);
 // g_interp_replaying: a replay runs (skip side effects, read the logged / blended uniforms).
 extern bool g_interp_log, g_interp_replaying;
 bool interp_list_submitted(uint64_t handle);  // true for the frame's first list (the backend saves its state then)
-void interp_draw(uint64_t key, bool depth_only);  // depth_only: no colour target (a shadow pass)
+bool interp_draw(uint64_t key, bool depth_only);  // false: a replayed draw without its record - leave it out  // depth_only: no colour target (a shadow pass)
 const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t size, uint64_t used);  // used: bytes the shader reads
 // The texture-pool entry a draw's texture i resolves to: logged with the frame (a replay takes the logged one - the
 // pool is the game's memory and it rewrites entries while the replays run; an area's lighting texture swapped under

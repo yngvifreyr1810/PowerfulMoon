@@ -66,3 +66,7 @@ Selecting your existing folder preserves game saves, mods, user files, and contr
 - **Upstream Engine**: Built on Power Moon Recomp by zzzarathustra-dev and contributors.
 
 See [CREDITS.md](CREDITS.md) for full attribution, [build notes](CONTROLLER-NOTES.md), and [SECURITY.md](SECURITY.md) for permissions and verification details.
+
+## Updates
+
+Use **F1 > Controls > Check for updates** for approved PowerfulMoon releases. Save and close the game before installing into its existing folder. The independent upstream bot prepares candidates on GitHub; only owner-approved releases reach the app. See [Updates and approval](docs/UPDATES.md) or the [Vietnamese step-by-step guide](docs/UPDATES-VI.md).
