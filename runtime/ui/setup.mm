@@ -157,25 +157,25 @@ static void fail(int k, double need_gb = 0) {
                                        "The game code didn't build", "No access to that folder", "Game files incomplete"};
     static const char *const hint[] = {
         "Choose the folder that holds the extracted game: exefs and romfs, or their contents.",
-        "Power Moon Recomp needs the extracted game files (exefs and romfs), not a game package (NSP, XCI).",
-        "Power Moon Recomp runs version 1.0.0 of Super Mario Odyssey only, without updates.",
+        "PowerfulMoon needs the extracted game files (exefs and romfs), not a game package (NSP, XCI).",
+        "PowerfulMoon runs version 1.0.0 of Super Mario Odyssey only, without updates.",
         "exefs has no sdk. Extract the game files again and choose that folder.",
         "",
         "Writing the game data failed. Make sure the drive has room and try again.",
-        "Download Power Moon Recomp again and keep everything in its folder together (the zig and odysseygen folders).",
-        "Make sure there's about 2 GB free and try again. If it happens again, report it with PowerMoonRecomp.log.",
+        "Download PowerfulMoon again and keep everything in its folder together (the zig and odysseygen folders).",
+        "Make sure there's about 2 GB free and try again. If it happens again, report it with PowerfulMoon.log.",
 #ifdef __APPLE__
-        "macOS didn't let Power Moon Recomp read it. Move the game files into a folder in your home folder (not the "
+        "macOS didn't let PowerfulMoon read it. Move the game files into a folder in your home folder (not the "
         "Desktop, Documents, Downloads or iCloud Drive) and choose that, or allow access: System Settings - Privacy & "
-        "Security - Files and Folders (or Full Disk Access) for Power Moon Recomp, or Terminal if you started it there."
+        "Security - Files and Folders (or Full Disk Access) for PowerfulMoon, or Terminal if you started it there."
 #else
-        "The system didn't let Power Moon Recomp read it. Copy the game files to a folder you own and choose that."
+        "The system didn't let PowerfulMoon read it. Copy the game files to a folder you own and choose that."
 #endif
         , ""};
     char h[600];
     if (k == FAIL_SPACE)
-        snprintf(h, sizeof h, "Setup needs about %.0f GB free on this drive, next to Power Moon Recomp. Free some space or "
-                 "move the Power Moon Recomp folder to a drive with more room.", ceil(need_gb));
+        snprintf(h, sizeof h, "Setup needs about %.0f GB free on this drive, next to PowerfulMoon. Free some space or "
+                 "move the PowerfulMoon folder to a drive with more room.", ceil(need_gb));
     else if (k == FAIL_ROMFS)  // (need_gb: the size found)
         snprintf(h, sizeof h, "Its romfs holds %.1f GB, Super Mario Odyssey 1.0.0's holds 5.2 GB. This is probably the "
                  "romfs of an update (only the files it changes): extract the base game, version 1.0.0, without "
@@ -326,7 +326,7 @@ void setup_draw(float scale, void *font_v, void *font_big_v) {
     }
     ImGui::PopFont();
     ImGui::PushStyleColor(ImGuiCol_Text, kTextDimV);
-    ImGui::TextUnformatted("Super Mario Odyssey, recompiled to run natively on this PC.");
+    ImGui::TextUnformatted("A customized fork of Power Moon Recomp by zzzarathustra-dev.");
     ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0, 26 * scale));
 
@@ -367,8 +367,8 @@ void setup_draw(float scale, void *font_v, void *font_big_v) {
                                    "1.0.0 (no updates), extracted (the exefs and romfs folders).");
             ImGui::Dummy(ImVec2(0, 6 * scale));
             ImGui::PushStyleColor(ImGuiCol_Text, kTextDimV);
-            ImGui::TextUnformatted("Power Moon Recomp includes no game files, and nothing is uploaded anywhere. Setup "
-                                   "copies what the game needs next to Power Moon Recomp (about 6 GB) and recompiles the "
+            ImGui::TextUnformatted("PowerfulMoon includes no game files, and nothing is uploaded anywhere. Setup "
+                                   "copies what the game needs next to PowerfulMoon (about 6 GB) and recompiles the "
                                    "game code on this PC.");
             ImGui::PopStyleColor();
         }

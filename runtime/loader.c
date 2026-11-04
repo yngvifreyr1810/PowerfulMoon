@@ -9,9 +9,13 @@ int g_nmodules;
 Game g_game;
 
 // main's build id (NSO header +0x40, first 8 bytes) -> the game
-static const struct { Game game; const char *name; uint8_t id[8]; } KNOWN_GAMES[] = {
-    {GAME_ODYSSEY, "Super Mario Odyssey v1.0.0", {0x3c, 0xa1, 0x2d, 0xfa, 0xaf, 0x9c, 0x82, 0xda}},
+// dev: a version that doesn't run yet - only with ODYSSEY_DEV_VERSIONS=1 (players get the setup's and the start's "only
+// 1.0.0" instead of a crash)
+static const struct { Game game; const char *name; uint8_t id[8]; bool dev; } KNOWN_GAMES[] = {
+    {GAME_ODYSSEY, "Super Mario Odyssey v1.0.0", {0x3c, 0xa1, 0x2d, 0xfa, 0xaf, 0x9c, 0x82, 0xda}, false},
+    {GAME_ODYSSEY, "Super Mario Odyssey v1.4.1", {0xb4, 0x24, 0xbe, 0x15, 0x0a, 0x8e, 0x7d, 0x78}, true},
 };
+static bool known(unsigned i) { return !KNOWN_GAMES[i].dev || getenv("ODYSSEY_DEV_VERSIONS"); }
 
 enum { DT_NULL = 0, DT_PLTRELSZ = 2, DT_HASH = 4, DT_STRTAB = 5, DT_SYMTAB = 6, DT_RELA = 7, DT_RELASZ = 8,
        DT_JMPREL = 23, DT_INIT_ARRAY = 25, DT_FINI_ARRAY = 26, DT_INIT_ARRAYSZ = 27, DT_FINI_ARRAYSZ = 28 };
@@ -117,13 +121,13 @@ Game loader_peek_game(const char *nso_path) {
     fclose(f);
     if (n != sizeof h || memcmp(h, "NSO0", 4)) return GAME_OTHER;
     for (unsigned i = 0; i < sizeof KNOWN_GAMES / sizeof KNOWN_GAMES[0]; i++)
-        if (!memcmp(h + 0x40, KNOWN_GAMES[i].id, sizeof KNOWN_GAMES[i].id)) return KNOWN_GAMES[i].game;
+        if (!memcmp(h + 0x40, KNOWN_GAMES[i].id, sizeof KNOWN_GAMES[i].id) && known(i)) return KNOWN_GAMES[i].game;
     return GAME_OTHER;
 }
 
 static Game detect_game(const Module *main) {
     for (unsigned i = 0; i < sizeof KNOWN_GAMES / sizeof KNOWN_GAMES[0]; i++)
-        if (!memcmp(main->build_id, KNOWN_GAMES[i].id, sizeof main->build_id)) {
+        if (!memcmp(main->build_id, KNOWN_GAMES[i].id, sizeof main->build_id) && known(i)) {
             LOG("game: %s\n", KNOWN_GAMES[i].name);
             return KNOWN_GAMES[i].game;
         }

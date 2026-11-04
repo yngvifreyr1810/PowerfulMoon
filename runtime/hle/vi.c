@@ -12,23 +12,30 @@ volatile uint64_t g_vsync_count;  // vsyncs signalled so far (runtime/hle/framep
 uint64_t g_native_window;
 static pthread_mutex_t vsync_lock = PTHREAD_MUTEX_INITIALIZER;  // (host waiters: vi_wait_vsync)
 static pthread_cond_t vsync_cond = PTHREAD_COND_INITIALIZER;
+#define VSYNC_NS 16666667ull
+static uint64_t base_ns, base_count;  // (vsync_lock) vsync number base_count + k is due at base_ns + k periods
 
 static void *vsync_thread(void *arg) {
     (void)arg;
-    const uint64_t period = 16666667;
+    const uint64_t period = VSYNC_NS;
     plat_thread_realtime(period);
     uint64_t next = plat_now_ns();
+    pthread_mutex_lock(&vsync_lock);
+    base_ns = next, base_count = g_vsync_count;
+    pthread_mutex_unlock(&vsync_lock);
     for (;;) {
         next += period;
         plat_sleep_until_ns(next);
         uint64_t now = plat_now_ns();
-        if (now > next + period * 3) {
+        bool late = now > next + period * 3;
+        if (late) {
             static int warned;
             if (warned++ < 20) LOG("[vi] vsync timer late by %llums (host throttling?)\n", (unsigned long long)((now - next) / 1000000));
             next = now;  // don't burst-signal to catch up
         }
         pthread_mutex_lock(&vsync_lock);
         __atomic_add_fetch(&g_vsync_count, 1, __ATOMIC_RELAXED);
+        if (late) base_ns = next, base_count = g_vsync_count;
         pthread_cond_broadcast(&vsync_cond);
         pthread_mutex_unlock(&vsync_lock);
         KEvent *ev = __atomic_load_n(&vsync_event, __ATOMIC_ACQUIRE);
@@ -65,6 +72,16 @@ uint64_t vi_wait_vsync(uint64_t target) {
     uint64_t n = g_vsync_count;
     pthread_mutex_unlock(&vsync_lock);
     return n;
+}
+
+// When vsync number `count` is due (host ns; the timer's schedule - it signals a little after). Frame interpolation
+// (runtime/nvn/vulkan/device.c) places a frame's images by the vsync its present waits for.
+uint64_t vi_vsync_time(uint64_t count) {
+    vsync_start();
+    pthread_mutex_lock(&vsync_lock);
+    uint64_t t = count >= base_count ? base_ns + (count - base_count) * VSYNC_NS : base_ns;
+    pthread_mutex_unlock(&vsync_lock);
+    return base_ns ? t : plat_now_ns();  // (the timer thread not started yet)
 }
 
 HLE_FUNC("_ZN2nn2vi10InitializeEv", vi_initialize) { (void)c; }

@@ -4,12 +4,17 @@ permissions:
   contents: read
 jobs:
   installer:
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Exercise install and recovery with synthetic files
-        shell: powershell
-        run: ./tests/test_installer.ps1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Exercise full installation and rollback with synthetic files
+        run: python -m unittest discover -s tests -p test_full_installer.py -v
   controller:
     runs-on: ubuntu-latest
     steps:
@@ -21,6 +26,12 @@ jobs:
           build/test_motion
           cc tests/test_hd_wire.c -o build/test_hd_wire
           build/test_hd_wire
+          cc tests/test_present_policy.c -o build/test_present_policy
+          build/test_present_policy
+          cc tests/test_settings_profile.c runtime/settings.c -lm -o build/test_settings_profile
+          profile=$(mktemp)
+          ODYSSEY_SETTINGS="$profile" build/test_settings_profile seed
+          ODYSSEY_SETTINGS="$profile" build/test_settings_profile recover
       - name: Reject proprietary/generated payload paths
         run: |
           python3 - <<'PY'

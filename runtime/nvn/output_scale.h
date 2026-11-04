@@ -13,10 +13,11 @@ bool output_scale_texture(const struct NvnTexture *t);
 
 typedef struct {
     double sx, sy;             // render-target scale (relative to the game's GAME_W x GAME_H sizes)
-    double shape;              // window aspect / 16:9 when the camera is widened, else 1
+    double shape;              // the image's aspect / 16:9 (the game's wide screen factor), 1: 16:9
     double vx, vy, vw, vh;     // where the image is drawn in the window (pixels)
 } OutScale;
 
-// dw x dh: the window's drawable size in pixels; now: seconds; gpu_ms: GPU time of the last frame (< 0: unknown)
-void output_scale(double dw, double dh, bool reshape_allowed, double now, double gpu_ms, OutScale *o);
+// dw x dh: the window's drawable size in pixels; want: the image's aspect / 16:9 (1: 16:9; runtime/hle/odyssey_wide.c);
+// now: seconds; gpu_ms: GPU time of the last frame (< 0: unknown)
+void output_scale(double dw, double dh, double want, double now, double gpu_ms, OutScale *o);
 double output_scale_dynamic_factor(void);

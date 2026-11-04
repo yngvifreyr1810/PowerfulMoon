@@ -121,7 +121,7 @@ void plat_thread_realtime(uint64_t period_ns) {
 }
 
 // ---- process
-// Release builds are GUI-subsystem executables (no console window): stdout / stderr go to PowerMoonRecomp.log next to the
+// Release builds are GUI-subsystem executables (no console window): stdout / stderr go to PowerfulMoon.log next to the
 // exe, and a fatal error shows a message box (plat_fatal_notice) instead of vanishing. Processes started by this one
 // (a re-exec for a fresh address layout) append to the same log.
 static char g_log_path[MAX_PATH];
@@ -133,7 +133,7 @@ static void log_to_file_without_console(void) {
     if (!n || n >= sizeof exe) return;
     char *slash = strrchr(exe, '\\');
     if (slash) slash[1] = 0;
-    snprintf(g_log_path, sizeof g_log_path, "%sPowerMoonRecomp.log", exe);
+    snprintf(g_log_path, sizeof g_log_path, "%sPowerfulMoon.log", exe);
     bool append = getenv("ODYSSEY_LOG_APPEND") != NULL;
     if (!freopen(g_log_path, append ? "ab" : "wb", stderr)) { g_log_path[0] = 0; return; }
     setvbuf(stderr, NULL, _IONBF, 0);
@@ -146,8 +146,8 @@ static void log_to_file_without_console(void) {
 static void require_cpu(void) {
     __builtin_cpu_init();
     if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2")) return;
-    MessageBoxA(NULL, "Power Moon Recomp needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer).",
-                "Power Moon Recomp", MB_ICONERROR | MB_OK);
+    MessageBoxA(NULL, "PowerfulMoon needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer).",
+                "PowerfulMoon", MB_ICONERROR | MB_OK);
     ExitProcess(1);
 }
 
@@ -228,7 +228,7 @@ void plat_heap_check(const char *where) {
 void plat_fatal_notice(void) {
     if (!g_log_path[0]) return;
     fflush(stderr);
-    char text[1600] = "Power Moon Recomp stopped because of an error.";
+    char text[1600] = "PowerfulMoon stopped because of an error.";
     FILE *f = fopen(g_log_path, "rb");
     if (f) {
         static char tail[16384];
@@ -244,10 +244,10 @@ void plat_fatal_notice(void) {
         if (line) {
             char *end = strchr(line, '\n');
             if (end) *end = 0;
-            snprintf(text, sizeof text, "Power Moon Recomp stopped because of an error:\n\n%.600s", line);
+            snprintf(text, sizeof text, "PowerfulMoon stopped because of an error:\n\n%.600s", line);
             if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {
                 size_t l = strlen(text);
-                snprintf(text + l, sizeof text - l, "\n\nPower Moon Recomp needs a graphics driver with Vulkan 1.3: install the "
+                snprintf(text + l, sizeof text - l, "\n\nPowerfulMoon needs a graphics driver with Vulkan 1.3: install the "
                          "latest driver for your GPU (NVIDIA, AMD or Intel).");
             }
         }
@@ -257,7 +257,7 @@ void plat_fatal_notice(void) {
         l += (size_t)snprintf(text + l, sizeof text - l, "\n\nMods are on. If this started with a new mod, move it out of "
                               "the mods folder: mods made for a later version of the game (1.3.0) can crash 1.0.0.");
     snprintf(text + l, sizeof text - l, "\n\nDetails: %s", g_log_path);
-    MessageBoxA(NULL, text, "Power Moon Recomp", MB_ICONERROR | MB_OK);
+    MessageBoxA(NULL, text, "PowerfulMoon", MB_ICONERROR | MB_OK);
 }
 
 void plat_init(void) {
@@ -361,7 +361,7 @@ void plat_print_backtrace(void) {
         const char *s = rt_host_fn_name(pc, &off);  // (game functions first: the OS can only name odyssey_game.dll as a whole)
         if (!s) s = plat_symbol(pc, &off);
         if (s) fprintf(stderr, "  #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, s, (unsigned long long)off);
-        else fprintf(stderr, "  #%-2d %016llx PowerMoonRecomp+%llx\n", i, (unsigned long long)pc,
+        else fprintf(stderr, "  #%-2d %016llx PowerfulMoon+%llx\n", i, (unsigned long long)pc,
                      (unsigned long long)(pc - exe));
     }
 }

@@ -1,4 +1,4 @@
-# Power Moon Recomp build
+# PowerfulMoon build
 # Windows: MSYS2 UCRT64 (see docs/BUILD-windows.md), clang + Vulkan renderer: `make gen`, then `make -j16`.
 # Linux: clang + Vulkan renderer; macOS: Homebrew clang/SDL3/FFmpeg, Metal renderer (both untested with Odyssey).
 UNAME := $(shell uname -s)
@@ -55,7 +55,7 @@ IMGUI_OBJ := $(B)/imgui/imgui.o $(B)/imgui/imgui_draw.o $(B)/imgui/imgui_tables.
 ifeq ($(PLATFORM),macos)
 SDL      := $(or $(DEPS),/opt/homebrew/opt/sdl3)
 FFMPEG   := $(or $(DEPS),/opt/homebrew/opt/ffmpeg)
-EXE      := $(B)/PowerMoonRecomp
+EXE      := $(B)/PowerfulMoon
 DEPINC   := -I$(SDL)/include -I$(FFMPEG)/include
 LDFLAGS  := -L$(SDL)/lib -lSDL3 -Wl,-rpath,$(SDL)/lib -L$(FFMPEG)/lib -lavformat -lavcodec -lavutil -lswscale -Wl,-rpath,$(FFMPEG)/lib \
             -framework CoreFoundation -framework Foundation -framework Metal -framework MetalFX -framework QuartzCore -framework AppKit -framework ImageIO -framework CoreGraphics -framework UniformTypeIdentifiers
@@ -67,7 +67,7 @@ GAMELIB  := $(B)/odyssey_game.dylib
 GAMELIB_LDFLAGS := -dynamiclib -undefined dynamic_lookup  # (the runtime functions it calls: the app's own)
 GAMELIB_SHARED := -shared -Wl,-undefined,dynamic_lookup  # (the same, for the setup page's build: runtime/gamebuild.c)
 else ifeq ($(PLATFORM),linux)
-EXE      := $(B)/PowerMoonRecomp
+EXE      := $(B)/PowerfulMoon
 DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 ifeq ($(ARCH),x86_64)
 GENARCH  ?= -march=x86-64-v3  # as on Windows: AVX2 + FMA for the lifted FP/SIMD code (checked at startup)
@@ -86,14 +86,14 @@ GAMELIB  := $(B)/odyssey_game.so
 GAMELIB_LDFLAGS := -shared -fuse-ld=lld  # (the runtime functions it calls: the app's own, -rdynamic)
 GAMELIB_SHARED := -shared -fuse-ld=lld
 else
-EXE      := $(B)/PowerMoonRecomp.exe
+EXE      := $(B)/PowerfulMoon.exe
 DEPINC   := $(if $(DEPS),-I$(DEPS)/include)
 OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S -DWIN32_LEAN_AND_MEAN -DNOMINMAX
 GENARCH  ?= -march=x86-64-v3  # AVX2 + FMA for the lifted FP/SIMD code (simd.h); override for older CPUs
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
             -lvulkan-1 -lwinmm -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared \
-            $(if $(CONSOLE),,-Wl$(comma)--subsystem$(comma)windows)  # no console window (log -> PowerMoonRecomp.log); CONSOLE=1: one
+            $(if $(CONSOLE),,-Wl$(comma)--subsystem$(comma)windows)  # no console window (log -> PowerfulMoon.log); CONSOLE=1: one
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
 BACKEND_OBJ += $(B)/rt/platform/windows_rc.o  # the .exe's icon (Explorer, taskbar)
@@ -102,9 +102,9 @@ IMGUI_OBJ += $(B)/imgui/imgui_impl_vulkan.o
 UIFLAGS  := -x c++ $(OSFLAGS)  # the .mm UI sources are plain C++ apart from __APPLE__ blocks
 GAMELIB  := $(B)/odyssey_game.dll
 # the runtime functions it calls: exported by the .exe, linked through its import library
-LDFLAGS  += -Wl,--export-all-symbols -Wl,--out-implib,$(B)/PowerMoonRecomp.dll.a
+LDFLAGS  += -Wl,--export-all-symbols -Wl,--out-implib,$(B)/PowerfulMoon.dll.a
 LDFLAGS  += -lpthread -lws2_32
-GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/PowerMoonRecomp.dll.a
+GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/PowerfulMoon.dll.a
 GAMELIB_SHARED := -shared -fuse-ld=lld  # (+ the import library: runtime/gamebuild.c)
 endif
 
@@ -113,12 +113,12 @@ endif
 # is never loaded (`make gen`, then `make` again; players' setup builds it again).
 GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/odyssey_patches.py \
                 tools/simd_c.py tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
-                runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/zig_slim.sh
+                runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h runtime/app_identity.h tools/zig_slim.sh
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
-RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
-CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(DEPINC)
+RTFLAGS  := -O2 -g -ffile-prefix-map=$(CURDIR)=. $(if $(DEPS),-ffile-prefix-map=$(DEPS)=dependencies) -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
+CXXFLAGS := -O2 -g -ffile-prefix-map=$(CURDIR)=. $(if $(DEPS),-ffile-prefix-map=$(DEPS)=dependencies) -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(DEPINC)
 
 all: $(EXE) $(if $(strip $(GEN_SRC)),$(GAMELIB))  # (strip: with no game code yet GEN_SRC is " ", which $(if) counts as set)
 
@@ -205,12 +205,12 @@ $(B)/rt/platform/windows_rc.o: runtime/platform/windows.rc docs/icon/icon.ico
 	$(WINDRES) -I docs/icon -O coff $< -o $@
 
 # Windows: the DLLs the exe loads (MSYS2 UCRT64's SDL3, FFmpeg, shaderc and what they pull in) copied next to it, so
-# PowerMoonRecomp.exe starts from Explorer or a shortcut without MSYS2 on the PATH. vulkan-1.dll is the system's.
+# PowerfulMoon.exe starts from Explorer or a shortcut without MSYS2 on the PATH. vulkan-1.dll is the system's.
 dlls: $(EXE)
 	ldd $(EXE) | awk '/ucrt64/ && !/vulkan-1/ {print $$3}' | sort -u | xargs -I{} cp -u {} $(dir $(EXE))
 
 # ---------------------------------------------------------------- release (Windows)
-# build/dist/Power Moon Recomp-<version>-windows.zip, top folder "Power Moon Recomp/": the exe and the DLLs it loads (runs
+# build/dist/PowerfulMoon-<version>-windows.zip, top folder "PowerfulMoon/": the exe and the DLLs it loads (runs
 # without MSYS2), what the setup page builds the game code with on the player's machine (runtime/gamebuild.c) - the
 # generator (make gen-helper), zig (tools/fetch_zig.sh, slimmed by tools/zig_slim.sh: its runtime built ahead of time),
 # gamelib-src/ and the exe's import library - the shader list, the menu font, README and LICENSE. No game code and no
@@ -218,7 +218,7 @@ dlls: $(EXE)
 # against the LGPL FFmpeg from `make deps-windows` (MSYS2's is a GPLv3 build); vulkan-1.dll is the system's.
 # Order: make deps-windows; make gen-helper; tools/fetch_zig.sh; make dist.
 VERSION  := $(shell sed -n 's/.*"ProductVersion", "\(.*\)"/\1/p' runtime/platform/windows.rc)
-DIST     := build/dist/Power Moon Recomp
+DIST     := build/dist/PowerfulMoon
 WIN_B    := build/win-release
 ifeq ($(PLATFORM),windows)
 PY312    ?= py -3.12
@@ -252,7 +252,7 @@ build/gen-venv/.ok:
 
 # ---------------------------------------------------------------- release (macOS, Linux)
 # macOS: make deps (SDL3, LGPL FFmpeg, a relocatable Python - for macOS APP_MIN+), make gen-helper, tools/fetch_zig.sh,
-# make dmg -> build/dist/Power Moon Recomp-<version>-macOS.dmg (Apple Silicon, ad-hoc signed).
+# make dmg -> build/dist/PowerfulMoon-<version>-macOS.dmg (Apple Silicon, ad-hoc signed).
 # Linux: make appimage (podman, Ubuntu 22.04 containers: tools/linux/appimage.sh) -> build/dist/...-linux-x86_64.AppImage.
 APP_MIN  := 15.0
 APP_B    := build/mac15
@@ -260,8 +260,8 @@ deps:
 	MACOS_MIN=$(APP_MIN) tools/build_deps_macos.sh
 app:
 	@[ -f build/deps/lib/libSDL3.0.dylib ] || { echo "make deps first"; exit 1; }
-	$(MAKE) B=$(APP_B) MACOS_MIN=$(APP_MIN) DEPS=$(CURDIR)/build/deps $(APP_B)/PowerMoonRecomp
-	MACOS_MIN=$(APP_MIN) tools/bundle_macos.sh $(APP_B)/PowerMoonRecomp
+	$(MAKE) B=$(APP_B) MACOS_MIN=$(APP_MIN) DEPS=$(CURDIR)/build/deps $(APP_B)/PowerfulMoon
+	MACOS_MIN=$(APP_MIN) tools/bundle_macos.sh $(APP_B)/PowerfulMoon
 dmg: app
 	tools/make_dmg.sh
 appimage:
@@ -271,11 +271,11 @@ dist:
 	@[ -f build/deps-win/lib/libavcodec.dll.a ] || { echo "make deps-windows first (LGPL FFmpeg)"; exit 1; }
 	@[ -d build/helper/odysseygen ] || { echo "make gen-helper first (the game code generator)"; exit 1; }
 	@[ -x build/zig/zig.exe ] || { echo "tools/fetch_zig.sh first (the compiler)"; exit 1; }
-	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win $(WIN_B)/PowerMoonRecomp.exe
-	! nm $(WIN_B)/PowerMoonRecomp.exe | grep ' f_70' >/dev/null  # (no game code inside)
+	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win $(WIN_B)/PowerfulMoon.exe
+	! nm $(WIN_B)/PowerfulMoon.exe | grep ' f_70' >/dev/null  # (no game code inside)
 	rm -rf build/dist && mkdir -p "$(DIST)/gamelib-src"
-	cp $(WIN_B)/PowerMoonRecomp.exe $(WIN_B)/PowerMoonRecomp.dll.a "$(DIST)/"
-	strip --strip-debug "$(DIST)/PowerMoonRecomp.exe"  # (its debug info names the build folder; exports stay)
+	cp $(WIN_B)/PowerfulMoon.exe $(WIN_B)/PowerfulMoon.dll.a "$(DIST)/"
+	strip --strip-debug "$(DIST)/PowerfulMoon.exe"  # (its debug info names the build folder; exports stay)
 	tools/zig_slim.sh $(strip $(filter-out -Iruntime,$(GENFLAGS)))  # (zig with its runtime built ahead of time)
 	cp -R build/helper/odysseygen "$(DIST)/"
 	cp -R build/zig-slim "$(DIST)/zig"
@@ -283,12 +283,12 @@ dist:
 	    "$(DIST)/gamelib-src/"
 	cp runtime/nvn/vulkan/known_programs.txt third_party/imgui/misc/fonts/Roboto-Medium.ttf README.md LICENSE "$(DIST)/"
 	tools/dist_licenses.sh "$(DIST)"  # (every shipped component's licence and source: licenses/README.txt)
-	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/PowerMoonRecomp.exe | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | \
+	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/PowerfulMoon.exe | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | \
 	    sort -u | xargs -I{} cp -u {} "$(DIST)/"
 	! ls "$(DIST)" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
 	tools/dist_check_paths.sh "$(DIST)"  # (no path of this machine inside: debug info, caches, logs)
-	cd build/dist && /c/Windows/System32/tar.exe -a -cf "Power Moon Recomp-$(VERSION)-windows.zip" "Power Moon Recomp"
-	@echo "build/dist/Power Moon Recomp-$(VERSION)-windows.zip"
+	cd build/dist && /c/Windows/System32/tar.exe -a -cf "PowerfulMoon-$(VERSION)-windows.zip" "PowerfulMoon"
+	@echo "build/dist/PowerfulMoon-$(VERSION)-windows.zip"
 
 .PHONY: all gen gen-objs runtime-objs dlls deps-windows gen-helper dist deps app dmg appimage
 

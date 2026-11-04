@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "../kernel.h"
+#include "interp.h"
 #include "nvn.h"
 
 void renderer_sync(void);
@@ -199,7 +200,8 @@ NVN(nvnMemoryPoolInitialize) {
     }
     RET(1);
 }
-NVN(nvnMemoryPoolFinalize) { free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); }
+// (frame interpolation: a replay on its own thread must not run while a host object it may use goes - interp.c)
+NVN(nvnMemoryPoolFinalize) { interp_free_begin(); free(HOST(NvnPool, A(0))); SET_HOST(A(0), 0); interp_free_end(); }
 NVN(nvnMemoryPoolSetDebugLabel) { (void)c; }
 NVN(nvnMemoryPoolMap) { RET(HOST(NvnPool, A(0))->storage); }
 NVN(nvnMemoryPoolGetBufferAddress) { RET(HOST(NvnPool, A(0))->storage); }  // GPU address == CPU address
@@ -829,7 +831,7 @@ NvnDescPool *nvn_find_pool(NvnDescPool **reg, uint64_t guest_pool) {
 
 // ================================================================== programs
 NVN(nvnProgramInitialize) { SET_HOST(A(0), calloc(1, sizeof(NvnProgram))); RET(1); }
-NVN(nvnProgramFinalize) { free(HOST(NvnProgram, A(0))); SET_HOST(A(0), 0); }
+NVN(nvnProgramFinalize) { interp_free_begin(); free(HOST(NvnProgram, A(0))); SET_HOST(A(0), 0); interp_free_end(); }
 NVN(nvnProgramSetDebugLabel) { (void)c; }
 NVN(nvnProgramSetSampleShading) { (void)c; }
 NVN(nvnProgramSetSubroutineLinkage) { RET(1); }
@@ -943,6 +945,12 @@ NVN(nvnWindowInitialize) {
     w->interval = (int)G(uint32_t, A(1), 0x20);
     w->active = G(uint32_t, A(1), 0x24) ? (int)G(uint32_t, A(1), 0x24) : w->num;
     SET_HOST(A(0), w);
+    // (the game's last draw of a frame copies its picture into one of these, through an sRGB view: dithered there,
+    // vulkan/exec.c draw_ rt_kind 3)
+    for (int i = 0; i < w->num; i++) {
+        NvnTexture *t = w->textures[i] ? HOST(NvnTexture, w->textures[i]) : NULL;
+        if (t) t->window = true;
+    }
     LOG("[nvn] window with %d textures\n", w->num);
     RET(1);
 }
@@ -975,25 +983,30 @@ NVN(nvnQueueAcquireTexture) {
 // the 60 Hz display timer (runtime/hle/vi.c) since the last one; a game that already waits for the vsync itself
 // (Link's Awakening) finds them passed. Counted as blocked time (the frame pacing statistics: vulkan/exec.c).
 // ODYSSEY_PRESENT_INTERVAL=<n> overrides the game's interval (0: no limit).
+// The frame is done before that wait: backend_frame_done gets it with the time its present is due (frame
+// interpolation makes the frame's in-between image while this thread waits).
 NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     static int forced = -2;
     if (forced == -2) forced = getenv("ODYSSEY_PRESENT_INTERVAL") ? atoi(getenv("ODYSSEY_PRESENT_INTERVAL")) : -1;
     int interval = forced >= 0 ? forced : w->interval;
+    int i = (int)A(2);
+    NvnTexture *tex = i >= 0 && i < w->num ? HOST(NvnTexture, w->textures[i]) : NULL;
     if (interval > 0) {
-        extern uint64_t vi_vsync_count(void), vi_wait_vsync(uint64_t target);
+        extern uint64_t vi_vsync_count(void), vi_wait_vsync(uint64_t target), vi_vsync_time(uint64_t count);
         extern __thread uint64_t g_blocked_ns;
         uint64_t v = vi_vsync_count(), target = w->last_vsync + (uint64_t)interval;
-        if (w->last_vsync && v < target) {
+        bool wait = w->last_vsync && v < target;
+        if (tex) backend_frame_done(tex, wait ? vi_vsync_time(target) : plat_now_ns());
+        if (wait) {
             uint64_t t0 = plat_now_ns();
             kernel_block_begin();  // (the core's other threads run until the vsync: kernel.c core gates)
             v = vi_wait_vsync(target);
             g_blocked_ns += plat_now_ns() - t0;
         }
         w->last_vsync = v;
-    }
-    int i = (int)A(2);
-    if (i >= 0 && i < w->num) backend_present(HOST(NvnTexture, w->textures[i]));
+    } else if (tex) backend_frame_done(tex, plat_now_ns());
+    if (tex) backend_present(tex);
     tex_process_releases();
 }
 

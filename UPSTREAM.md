@@ -1,4 +1,6 @@
-# Upstream v0.1.6 documentation (images omitted)
+# Upstream v0.2.0 documentation (images omitted)
+
+<p align="center"></p>
 
 A native PC port of **Super Mario Odyssey** (Nintendo Switch, version 1.0.0) by static recompilation: the game's
 ARM64 code is translated to C ahead of time and compiled into a regular program for Windows, Linux or macOS. No
@@ -11,6 +13,16 @@ code, no assets, no fonts.
 > [!NOTE]
 > Windows (x64) and Linux (x64): playable. macOS (Apple Silicon): an early test build - expect problems.
 > Built with heavy help from an AI coding agent (Claude), directed and tested by a human.
+
+<p align="center">
+
+
+</p>
+<p align="center">
+
+
+</p>
+<p align="center"><sub>Screenshots of the Windows version, game rendered at 4K. <i>Super Mario Odyssey</i> &copy; Nintendo.</sub></p>
 
 ## Play
 
@@ -28,12 +40,14 @@ code, no assets, no fonts.
    not provided.
 
    On Windows the program isn't code-signed: SmartScreen may say "Windows protected your PC" - *More info*, then *Run
-   anyway*. Some antivirus programs flag `odysseygen\odysseygen.exe` (the game code generator, a packed Python program:
-   a common false alarm); if setup says the builder is missing, restore it from quarantine or extract the zip again.
+   anyway*.
 3. The menu: **F1** or **Esc** (controller: Home / Guide button). Video: *Internal resolution* - Match display renders
    at your screen's resolution (at least the Switch's 1600 x 900), 1x-4x at 1080p times that (2x = 4K); 25-75% with
-   AMD FSR 1 for slower PCs. Change a setting with the arrows next to it (or left / right on the keyboard or
-   controller); the text on the right explains the selected one.
+   AMD FSR 1 for slower PCs. *Aspect ratio: Fill window* - ultrawide monitors (21:9, 32:9) show more of the world
+   at the sides, the HUD keeps its shape in the middle. *Frame interpolation* (experimental, for 120 Hz+ displays) -
+   an extra image between each two of the game's frames, made from the game's own state halfway. *Smooth gradients*
+   (on) - no visible steps in skies, fog and dark areas. Change a setting with the arrows next to it (or left / right
+   on the keyboard or controller); the text on the right explains the selected one.
 
 ## Status
 
@@ -51,7 +65,7 @@ Known issues:
 - Only version 1.0.0 of the game runs (no updates).
 - macOS: a test build; graphics problems are likely (some of the renderer's fixes are Vulkan-only so far).
 - The game runs at 60 fps, as on the Switch: its logic is tied to the frame rate (a higher rate would play faster).
-  More fps need frame interpolation, which is planned.
+  On 120 Hz+ displays, *Frame interpolation* (Video) shows 120 images per second; it adds about half a frame of latency.
 
 ## What you need
 
@@ -63,13 +77,13 @@ Known issues:
 
 ## Building from source
 
-Needs MSYS2 (clang, SDL3, FFmpeg, shaderc) and Python 3.12 - `tools\PowerMoon-Switch2Pro-Setup-Build-Environment.ps1` installs them.
+Needs MSYS2 (clang, SDL3, FFmpeg, shaderc) and Python 3.12 - `tools\setup_windows.ps1` installs them.
 
 1. Put the game files into `extracted\` in this folder: `extracted\exefs\` (main, sdk, subsdk0, rtld, main.npdm) and
    `extracted\romfs\`. Disable updates and mods when dumping: `main` must be 1.0.0 (build id `3ca12dfaaf9c82da`).
 2. One-time toolchain setup, in PowerShell from this folder:
 
-       powershell -ExecutionPolicy Bypass -File tools\PowerMoon-Switch2Pro-Setup-Build-Environment.ps1
+       powershell -ExecutionPolicy Bypass -File tools\setup_windows.ps1
 
 3. Build, from Git Bash (or an MSYS2 UCRT64 shell) with MSYS2 first on PATH:
 
@@ -140,7 +154,8 @@ program), `tools/fetch_zig.sh` (the compiler setup uses on the player's PC) and 
 ## Credits
 
 - **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai and its contributors - the static recompiler,
-  runtime and renderer this port is built on (MIT license). Huge thanks: without it this port wouldn't exist.
+  runtime and renderer this port is built on, and the frame interpolation (MIT license). Huge thanks: without it this
+  port wouldn't exist.
 - **[OdysseyDecomp](https://github.com/MonsterDruide1/OdysseyDecomp)** - names and structure of the game's code, used
   for reading and debugging (no code from it is in this repository)
 - [Switchbrew](https://switchbrew.org) and [envytools](https://github.com/envytools/envytools) - documentation of the

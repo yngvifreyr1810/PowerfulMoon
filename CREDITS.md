@@ -1,10 +1,12 @@
 # Sources, authors and redistribution
 
-This is a controller-focused fork, not an original creation of the upstream port.
+PowerfulMoon is a customized fork, not an original creation of the upstream port.
 
 * **Power Moon Recomp**, zzzarathustra-dev and contributors, MIT:
   https://gitlab.com/zzzarathustra-dev/power-moon-recomp
-  Based on v0.1.6, commit 2957896536727cdff26598bdd007733e65c6af89.
+  Updated from v0.1.6 to v0.2.0, commit 1fdc703def082ae44277e62d869f3de06ce5f699.
+  Upstream authored the 0.2.0 renderer/interpolation/ultrawide changes; this fork adds
+  controller persistence, VRR output selection and the host VSync setting.
   Original host, renderer, recompiler, setup flow, UI and original crescent icon
   are retained under MIT. Game-rendered screenshots have been excluded.
 * **LAS Recomp**, Peiikai and contributors, MIT:
@@ -41,3 +43,13 @@ retained upstream notices. No AI-generated game art or external game assets are 
 Only source that can be redistributed under the respective licenses is published.
 No game data, generated game-code library, decryption keys, console firmware,
 Nintendo font, screenshot or proprietary SDK is part of this repository/release.
+
+
+## Full distribution
+
+- Original crescent artwork: zzzarathustra-dev / Power Moon Recomp, MIT. Retained unchanged. No Cappy/Nintendo image is included.
+- Full host and installer customization: Vĩnh An Project / yngvifreyr1810, with OpenAI Codex implementation assistance, MIT.
+- Bundled ProCon2Bridge 0.4.0: separate GPL-3.0-or-later program; its complete project source, dependency notices and signed third-party USB/IP installer remain in controller-bridge/.
+- Windows runtime and setup dependencies are pinned by tools/windows/redistributables-0.2.0.json. The original licenses/README.txt identifies each component, license and source. FFmpeg DLLs were checked to have neither --enable-gpl nor --enable-nonfree.
+- Corresponding FFmpeg 9.0.2, libiconv 1.19, Unicorn 2.1.4 and pystray 0.19.5 source archives are included under licenses/source/. Their upstream URLs and SHA-256 values are pinned in tools/windows/dependency-sources.json. These are library sources, not game content.
+- CPython's interpreter and standard library, Capstone, python-lz4, Zig/LLVM/MinGW, SDL, shaderc, libc++, libiconv, winpthreads, ImGui, VMA, SMAA, FSR1, Ryujinx-derived upstream portions and the non-Nintendo Roboto font retain their original notices. No proprietary game or SDK material is used for the program's branding.

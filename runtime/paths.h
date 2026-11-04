@@ -1,12 +1,12 @@
-// Where Power Moon Recomp keeps its files (runtime/paths.c).
+// Where PowerfulMoon keeps its files (runtime/paths.c).
 //
 // Data root: everything the app writes or the user brings - extracted/ (game files), save/, cache/ (shaders /
 // pipelines), mods/ (RomFS mods), fonts/ (system fonts), powermoon.ini. rt_paths_init() picks it and makes it the
 // working directory, so the rest of the runtime opens those by their relative names. In order:
 //   1. ODYSSEY_DATA_ROOT (tests, scratch installs)
-//   2. dev / portable mode: the starting directory has extracted/ (a source checkout: `./build/PowerMoonRecomp`, the
-//      test scripts), or the executable's parent has (build/PowerMoonRecomp.exe started from Explorer or a shortcut)
-//   3. macOS: ~/Library/Application Support/io.github.powermoonrecomp (the .app bundle itself is never written to)
+//   2. dev / portable mode: the starting directory has extracted/ (a source checkout: `./build/PowerfulMoon`, the
+//      test scripts), or the executable's parent has (build/PowerfulMoon.exe started from Explorer or a shortcut)
+//   3. macOS: ~/Library/Application Support/io.github.yngvifreyr1810.powerfulmoon (the .app bundle itself is never written to)
 //      Windows: the folder of the .exe (portable, no installer); refuses to start, with a message, if not writable
 //      Linux: $XDG_DATA_HOME/power-moon-recomp (~/.local/share/power-moon-recomp)
 //
@@ -20,8 +20,8 @@
 extern "C" {
 #endif
 
-#define RT_APP_NAME "Power Moon Recomp"  // (window title, message boxes)
-#define RT_BUNDLE_ID "io.github.powermoonrecomp"
+#define RT_APP_NAME "PowerfulMoon"  // (window title, message boxes)
+#define RT_BUNDLE_ID "io.github.yngvifreyr1810.powerfulmoon"
 
 void rt_paths_init(void);         // first thing in main(), after plat_init
 const char *rt_data_root(void);   // absolute

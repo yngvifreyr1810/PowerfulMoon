@@ -2209,6 +2209,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             if (!m) continue;
             int kind = key ? key->rt_kind[rt] : 0;
             const char *cv = kind == 1 ? "int" : kind == 2 ? "uint" : "";
+            if (kind == 3) kind = 0;  // (float, dithered below)
             // ODYSSEY_FS_SOLID=1 (debug): every float output magenta, to see what is rasterized;
             // =<program address in hex> (as in the [draw] log's fs=): only that fragment program
             static long long solid = -1;
@@ -2233,6 +2234,21 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (tint)
             sp(&s, "  if (ltint[0].w > 0.0f) { vec3 g = c0.rgb; float l = dot(g, vec3(0.299f, 0.587f, 0.114f));\n"
                    "    c0.rgb = mix(g, ltint[0].rgb * pow(l, ltint[1].w) + ltint[1].rgb * l, ltint[0].w); }\n");
+        // rt_kind 3: a target the hardware stores as 8-bit sRGB (the game's last copy into its window): dithered by +-1
+        // step of the encoded value (triangular noise from two interleaved-gradient-noise values, fixed per pixel), so
+        // smooth gradients don't round into visible steps ("banding"; vulkan/textures.c, exec.c draw_). Pure black and
+        // white stay as they are.
+        for (int rt = 0; rt < 8; rt++) {
+            if (!key || key->rt_kind[rt] != 3 || !((c->omap_target >> (rt * 4)) & 0x7)) continue;
+            sp(&s, "  { vec2 dp = gl_FragCoord.xy;\n"
+                   "    float dn = fract(52.9829189f * fract(dot(dp, vec2(0.06711056f, 0.00583715f))))\n"
+                   "             + fract(52.9829189f * fract(dot(dp + vec2(47.0f, 17.0f), vec2(0.06711056f, 0.00583715f)))) - 1.0f;\n"
+                   "    vec3 dl = clamp(c%d.rgb, 0.0f, 1.0f);\n"
+                   "    vec3 ds = mix(dl * 12.92f, 1.055f * pow(dl, vec3(1.0f / 2.4f)) - 0.055f, step(vec3(0.0031308f), dl));\n"
+                   "    ds = clamp(ds + dn / 255.0f * step(vec3(1e-7f), ds) * step(ds, vec3(1.0f - 1e-7f)), 0.0f, 1.0f);\n"
+                   "    c%d.rgb = mix(ds / 12.92f, pow((ds + 0.055f) / 1.055f, vec3(2.4f)), step(vec3(0.04045f), ds)); }\n",
+               rt, rt);
+        }
         if (c->omap_depth) {
             if (c->reg_used[r + 1]) sp(&s, "  gl_FragDepth = as_f(r%d);\n", r + 1);
             else sp(&s, "  gl_FragDepth = gl_FragCoord.z;\n");

@@ -77,6 +77,9 @@ typedef struct TexBackend {
     VkImage image;
     VmaAllocation mem;
     VkFormat format;
+    VkFormat guest_format;  // the format of the game's bytes when the image stores another (textures.c "Banding": half
+                            // floats for its RGB10A2 screen targets): uploads and readbacks convert through a blit. 0: format
+    bool debandable;        // one of those targets: half floats while vk_deband()
     VkImageViewType base_type;
     uint32_t width, height, depth, layers, levels, samples;
     VkImageAspectFlags aspect;
@@ -95,6 +98,7 @@ typedef struct TexBackend {
 } TexBackend;
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads CPU contents unless for_render)
+bool vk_deband(void);  // smooth gradients (textures.c "Banding"): the menu's setting, ODYSSEY_DEBAND=0|1 overrides it
 VkFormat vk_format(uint32_t nvn_format);
 bool vk_format_alpha_one(uint32_t nvn_format);
 // View of t (optionally through an NVN texture view) for rendering or sampling.

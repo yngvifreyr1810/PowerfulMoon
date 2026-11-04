@@ -148,6 +148,10 @@ static int g_kbd_max = 8;
 static std::atomic<int> g_note{0};  // 1 shown, 2 closed
 static char g_note_title[128], g_note_text[800];
 static bool capturing() { return g_open.load() || g_kbd.load() == 1 || g_note.load() == 1 || g_setup.load(); }
+// (frame interpolation's presenter, runtime/nvn/vulkan/device.c, draws the overlay without the render lock) nothing open
+// that takes input or runs the menu's actions, and the overlay drawn once (ImGui uploads its fonts on the first frame)
+static std::atomic<bool> g_drawn;
+extern "C" bool menu_overlay_lockfree(void) { return !capturing() && (!g_settings.show_fps || g_drawn.load()); }
 // The game gets no input while this is true (runtime/hle/input.c): menu or name entry up.
 extern "C" bool menu_input_captured(void) { return capturing(); }
 
@@ -456,6 +460,14 @@ static void tab_display(void) {
         g_want_fullscreen_apply.store(true);
     }
     opt_toggle("Show FPS", &g_settings.show_fps, false, "Shows the frame rate in the top right corner.");
+#ifndef __APPLE__  // (Vulkan: runtime/hle/odyssey_wide.c)
+    {
+        static const char *asp[] = {"16:9", "Fill window"};
+        opt_choice("Aspect ratio", &g_settings.aspect, asp, 2, ASPECT_16_9,
+                   "For windows wider than 16:9 (ultrawide monitors). 16:9: the Switch's picture, with bars at the sides. "
+                   "Fill window: the game shows more of the world at the sides; the HUD keeps its shape in the middle.");
+    }
+#endif
 
     opt_section("Rendering");
     // display order -> RES_* (the ini / enum order predates the menu order)
@@ -502,6 +514,29 @@ static void tab_display(void) {
     opt_choice("Anti-aliasing", &g_settings.antialias, aa, 2, AA_OFF,
                "Smooths jagged edges of the game image before it is scaled to the window. SMAA: finds the edges and "
                "blends only along them, so textures stay sharp. Most useful at a lower internal resolution.");
+#ifndef __APPLE__  // (Vulkan: runtime/nvn/interp.c)
+    opt_toggle("Frame interpolation", &g_settings.frame_interp, false,
+               "Experimental. An extra image between each two of the game's frames: the game runs at 60, the picture moves "
+               "at 120 - for displays at 120 Hz or more (nothing changes below 90 Hz). The extra images come from the game's own "
+               "state halfway (positions, camera, animation), not from blending pictures. Costs about twice the GPU work and "
+               "half a frame of delay.");
+    static const char *interp_outputs[]={"Auto","120 fps (VRR)"};
+    int output=g_settings.interpolation_output==120;
+    if (opt_choice("Interpolation output",&output,interp_outputs,2,1,
+        "Auto uses the current/desktop refresh rate. 120 fps (VRR) keeps interpolation enabled when a high-refresh "
+        "display is temporarily reported at 60 Hz with VRR. Requires a mode of at least 120 Hz at the same resolution. "
+        "Game logic stays at 60 Hz; GPU load and the interpolation safety brake can still reduce output."))
+        g_settings.interpolation_output=output ? 120 : 0;
+    static const char *vsync_modes[]={"Auto","On","Off"};
+    opt_choice("VSync",&g_settings.vsync,vsync_modes,3,0,
+        "Host presentation only. Auto: low-latency mailbox. On: FIFO. Off: immediate, which may tear outside the VRR range. "
+        "Restart the game after changing this option. VRR remains controlled by Windows and the graphics driver.");
+#endif
+#ifndef __APPLE__  // (Vulkan: nvn/vulkan/textures.c "Banding")
+    opt_toggle("Smooth gradients", &g_settings.deband, true,
+               "Removes the visible color steps (banding) in skies, fog and dark areas: the game's image keeps more "
+               "precision until it reaches the screen and gets a fine dither there. Off: as on the Switch.");
+#endif
     opt_end();
 }
 
@@ -592,6 +627,10 @@ static void tab_quit(float scale, bool in_game) {
 }
 
 static void tab_about(void) {
+    header("About PowerfulMoon");
+    ImGui::TextWrapped("Customized fork of Power Moon Recomp by zzzarathustra-dev. Maintained by Vinh An Project / yngvifreyr1810. MIT host; separate GPL controller bridge. Not affiliated with Nintendo.");
+    if (ImGui::Button("Upstream project")) SDL_OpenURL("https://gitlab.com/zzzarathustra-dev/power-moon-recomp");
+    ImGui::Spacing();
     header("System language");
     {
         // what the game is told the console's language is: its text follows this (runtime/settings.c)
@@ -979,4 +1018,5 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 #else
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);  // inside the window image's rendering
 #endif
+    g_drawn = true;
 }

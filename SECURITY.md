@@ -1,45 +1,28 @@
-# Before you run / Trước khi chạy
+# What PowerfulMoon installs
 
-Open source and readable scripts help inspection; they are not proof that any
-download is harmless. This is the intended behavior of the controller update.
+Setup verifies every file against the embedded package's SHA-256 manifest before changing program files.
+It installs only the listed app/dependency/source files into the folder you choose. The portable ZIP
+contains the same files. Existing save/, extracted/, mods/, user fonts, powermoon.ini and the controller
+profile are not packaged, deleted or overwritten. Replaced program files and copies of settings are
+backed up in powerfulmoon-backups/. If a program-file copy fails, affected program files are restored.
+Known old Power Moon EXEs/launchers are moved to backup only when their exact hashes match this release.
 
-* PowerMoon-Switch2Pro-Install.cmd runs the local PowerMoon-Switch2Pro-Setup.ps1. You choose your existing
-  PowerMoonRecomp.exe. It checks the supported 0.1.6 executable hash and hashes
-  of the two supplied payload files, backs up PowerMoonRecomp.exe and any existing
-  libc++.dll under controller-backups/, then replaces only those program files.
-  It refuses unsupported versions and asks you to save/close a running game.
-* PowerMoon-Switch2Pro-Restore.cmd restores that backup. PowerMoon-Switch2Pro-Play.cmd remembers your chosen folders in
-  .local-settings.json beside the updater, starts the separately installed bridge
-  if necessary and starts your game. No administrator rights are requested by
-  this update. The bridge's separate first-time signed-driver install needs them.
-* The new haptic transport uses only 127.0.0.1:26761. The controller additions
-  introduce no telemetry or remote upload. The updater scripts do not fetch or
-  execute remote script text, register autorun, disable antivirus or change firewall
-  rules. Upstream's optional initial setup/compiler downloads remain upstream
-  behavior; this update is intended for an existing installation.
-* The update does not collect, supply or modify your game files, keys, save or
-  extracted/generated game library. Do not upload those when reporting a problem.
+The installer checks that a game in the destination folder is closed and creates a Start-menu shortcut.
+It requests no administrator rights for the host and registers no game startup entry or service.
+PowerfulMoon starts the separate bundled ProCon2Bridge if no bridge is listening locally. That bridge's
+first setup may request Windows approval to install the bundled signed USB/IP driver. Its behavior,
+local ports, startup registration and removal are documented in controller-bridge/SECURITY.md.
 
-Download only from this repository's Releases. Compare the ZIP against
-CHECKSUMS-SHA256.txt with `Get-FileHash -Algorithm SHA256 <download.zip>` and
-inspect the matching source tag, or build it yourself. Checksums check integrity,
-not malware safety. **This project's executable is currently unsigned.** An
-unknown-publisher or SmartScreen warning may occur. Keep Defender enabled; do
-not add blanket exclusions or bypass an unexplained antivirus detection.
-The cmd launchers set ExecutionPolicy Bypass only for their local PowerShell
-process; they do not persist a system policy change.
+Project executables are unsigned. Checksums provide integrity, not a promise of zero risk; keep your
+antivirus enabled. The installer contains no remote script execution or telemetry. Upstream's optional
+setup/compiler downloads remain upstream behavior; the full Windows package includes the setup tools.
+The user's own game code is generated locally and must not be redistributed.
 
-To remove the update, close the game, run PowerMoon-Switch2Pro-Restore.cmd, then remove the extracted
-updater folder. Backups remain in your game folder for your own recovery.
-No background service or startup task is installed by these update scripts.
+To remove the host: exit the game, preserve your saves/settings/game data, and remove the installed
+program files listed in PACKAGE.json and the PowerfulMoon Start-menu shortcut. Backups remain available
+for recovery. Remove the bridge separately according to its SECURITY.md; its shared USB/IP driver may
+also be used by other applications. No game files, keys, firmware, Nintendo artwork or SDK are supplied.
 
-**Compatibility evidence:** gameplay tested only in TOTK Recomp and SMO / Power
-Moon Recomp. No emulator has been tested; do not read the documentation as a
-Ryujinx/Eglantine compatibility guarantee. Haptic frequency calibration is experimental.
-
-**Tiếng Việt:** Script cài đặt cho bạn chọn bản 0.1.6, kiểm tra file và sao lưu
-trước khi thay đúng hai file chương trình; không kèm game hay keys. PowerMoon-Switch2Pro-Play.cmd nhớ
-thư mục đã chọn để mở bridge và game; PowerMoon-Switch2Pro-Restore.cmd khôi phục bản cũ. Exe chưa có
-chữ ký số. Có source và SHA-256 để kiểm tra, nhưng không khẳng định tuyệt đối
-“không có virus”. Không cần tắt Defender hay thêm ngoại lệ antivirus. Đến nay chỉ
-test gameplay với TOTK Recomp và SMO Recomp, **chưa test trình giả lập nào**.
+Report issues without raw private logs or game content. The host log is PowerfulMoon.log; controller
+logs can contain local Bluetooth device addresses. Credits and dependency source/licensing details are
+in CREDITS.md, source/ and licenses/.

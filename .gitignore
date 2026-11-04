@@ -48,3 +48,5 @@ crash-*.txt
 /payload/
 /runtime-manifest.json
 *.zip
+extracted141/
+generated141/

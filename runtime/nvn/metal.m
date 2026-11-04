@@ -947,6 +947,8 @@ void backend_represent(void) {
     else SDL_Delay(16);
 }
 
+void backend_frame_done(NvnTexture *t, uint64_t present_at) { (void)t, (void)present_at; }  // (frame interpolation: Vulkan only)
+
 void backend_present(NvnTexture *t) {
     g_last_presented = t;
     extern void renderer_submit(void);
@@ -982,7 +984,7 @@ void backend_present(NvnTexture *t) {
         double gpu_ms = gpu_prev ? (gpu_now - gpu_prev) / 1e6 : -1;
         gpu_prev = gpu_now;
         OutScale os;
-        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, gpu_ms, &os);
+        output_scale(dw, dh, 1.0, SDL_GetTicksNS() / 1e9, gpu_ms, &os);  // (16:9: the wide screen is Vulkan's)
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
         bool reshape = shape != 1.0;
         // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen

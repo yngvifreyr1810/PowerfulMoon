@@ -8,7 +8,8 @@
 //   .75x / .50x / .25x  of Match display (scaled up to the window - with MetalFX on macOS when chosen)
 //   Dynamic        Match display, lowered in steps while the GPU can't hold 60 fps and raised again when it can
 //                  (each change reallocates the render targets: a short hitch, so it changes rarely, with hysteresis)
-// Test overrides: ODYSSEY_SCALE=<f> (render height = 1080 x f), ODYSSEY_WIDE_TEST=<f> (forced shape).
+// The image is 16:9 times `want` (the game's wide screen factor, runtime/hle/odyssey_wide.c: 1 = 16:9).
+// Test override: ODYSSEY_SCALE=<f> (render height = 1080 x f).
 #include <math.h>
 #include <stdlib.h>
 
@@ -76,21 +77,20 @@ static void dyn_update(double now, double gpu_ms) {
 
 double output_scale_dynamic_factor(void) { return g_dyn; }
 
-void output_scale(double dw, double dh, bool reshape_allowed, double now, double gpu_ms, OutScale *o) {
-    double fit = fmin(dw / 1920.0, dh / 1080.0);
-    static double forced = -1, wide_test = -1;
+void output_scale(double dw, double dh, double want, double now, double gpu_ms, OutScale *o) {
+    static double forced = -1;
     if (forced < 0) forced = getenv("ODYSSEY_SCALE") ? atof(getenv("ODYSSEY_SCALE")) : 0;
-    if (wide_test < 0) wide_test = getenv("ODYSSEY_WIDE_TEST") ? atof(getenv("ODYSSEY_WIDE_TEST")) : 0;
-    double shape = wide_test > 0 ? wide_test : (dw / dh) / (16.0 / 9.0);
-    bool reshape = reshape_allowed && fabs(shape - 1.0) > 0.005;
-    if (!reshape) shape = 1.0;
+    double shape = want > 0 ? want : 1.0;
+    if (fabs(shape - 1.0) <= 0.005) shape = 1.0;
+    // the image (16:9 x shape) fitted into the window: it fills a window of its shape, else bars
+    double fit = fmin(dw / (1920.0 * shape), dh / 1080.0);
     // render height in units of the Switch's 1080 lines
     double h;
     int mode = g_settings.res_mode;
     if (forced > 0) h = forced;
     else if (mode >= 1 && mode <= 8) h = mode;
     else {
-        h = reshape ? dh / 1080.0 : fit;  // Match display
+        h = fit;  // Match display
         // ...but never below the game's own GAME_H lines: a smaller window (1280 x 720 at 100% display scaling) gets
         // the Switch's detail, filtered down (the shares below and Dynamic still go lower)
         if (mode == RES_MATCH || mode == RES_DYNAMIC) h = fmax(h, GAME_H / 1080.0);
@@ -105,12 +105,6 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     double cap = fmin(MAX_TEX / (GAME_W * sx), MAX_TEX / (GAME_H * sy));
     if (cap < 1.0) { sx *= cap; sy *= cap; }
     o->sx = sx; o->sy = sy; o->shape = shape;
-    // where the image goes in the window: fills it when reshaped, else a fitted 16:9 box
-    if (reshape) { o->vw = dw; o->vh = dh; }
-    else { o->vw = 1920.0 * fit; o->vh = 1080.0 * fit; }
-    if (wide_test > 0) {
-        double f2 = fmin(dw / (1920.0 * wide_test), dh / 1080.0);
-        o->vw = 1920.0 * wide_test * f2; o->vh = 1080.0 * f2;
-    }
+    o->vw = 1920.0 * shape * fit; o->vh = 1080.0 * fit;
     o->vx = (dw - o->vw) / 2; o->vy = (dh - o->vh) / 2;
 }

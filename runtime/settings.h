@@ -10,6 +10,9 @@ enum { UPSCALE_BILINEAR = 0, UPSCALE_METALFX = 1 /* macOS */, UPSCALE_FSR1 = 2 /
 #define UPSCALE_SHARP UPSCALE_FSR1
 #endif
 enum { AA_OFF = 0, AA_SMAA = 1 };
+// The image in a window of another shape: 16:9 with bars, or (Vulkan) filling a wider window with more of the scene
+// at the sides (runtime/hle/odyssey_wide.c)
+enum { ASPECT_16_9 = 0, ASPECT_FILL = 1 };
 // System language served to the game (runtime/services/am.c GetDesiredLanguage, services/hid_set.c GetLanguageCode):
 // the game picks its text language from it, as it would from the Switch's own system setting. LANG_AUTO follows the
 // host locale ($LC_ALL / $LC_MESSAGES / $LANG); the rest are the codes of the languages the game has text for.
@@ -22,6 +25,12 @@ typedef struct {
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (MetalFX: macOS, FSR 1: Windows)
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
+    int aspect;          // ASPECT_*: the image in a window wider than 16:9
+    int interpolation_output; // 0: nominal display refresh, 120: explicit VRR interpolation target
+    int vsync; // 0: auto/mailbox, 1: FIFO, 2: immediate (host presentation only)
+    bool frame_interp;   // images between the game's frames (Vulkan: runtime/nvn/interp.c)
+    bool deband;         // smooth gradients: the game's final picture in half floats, dithered into the window (Vulkan:
+                         // nvn/vulkan/textures.c vk_deband)
     float volume;        // master volume, 1 = 100%
     bool reverb;         // the audio renderer's reverb effect
     bool movie_audio;

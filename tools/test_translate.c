@@ -174,7 +174,7 @@ static size_t gen_program(uint8_t *buf, size_t cap, int stage) {
 static void gen_key(ShaderKey *k, int stage) {
     memset(k, 0, sizeof *k);
     for (int i = 0; i < 32; i++) k->attr_kind[i] = rnd(100) < 80 ? 0 : rnd(3);
-    for (int i = 0; i < 8; i++) k->rt_kind[i] = rnd(100) < 80 ? 0 : rnd(3);
+    for (int i = 0; i < 8; i++) k->rt_kind[i] = rnd(100) < 80 ? 0 : rnd(4);  // (3: dithered for sRGB, GLSL only)
     k->depth_minus_one = rnd(2);
     k->flip_y = rnd(2);
     if (stage == STAGE_FRAGMENT && rnd(2)) k->vs_out_mask = (uint32_t)rnd64();

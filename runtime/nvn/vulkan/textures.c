@@ -11,6 +11,7 @@
 #include "../astc.h"
 #include "../output_scale.h"
 #include "../renderer.h"
+#include "../../settings.h"
 
 // ================================================================== formats
 typedef struct { VkFormat vf; uint8_t expand_rgb, alpha_one; } VkFmt;
@@ -303,6 +304,23 @@ static void create_image(NvnTexture *t, TexBackend *b) {
             vf = VK_FORMAT_R8G8B8A8_UNORM;
         }
     }
+    b->guest_format = VK_FORMAT_UNDEFINED;
+    {   // Banding: Odyssey composes its picture (tonemapped scene and layouts) in an RGB10A2 target with linear values and
+        // converts it to the screen's sRGB at the end - 10 linear bits are coarser than 8 sRGB bits in dark tones (one step
+        // ~1.6 sRGB levels near 25/255): the steps in its night skies and fog, on the Switch too. Its screen-size RGB10A2
+        // targets get half floats (views follow b->format, copies to other formats blit, uploads / readbacks convert:
+        // guest_format), and the last copy into the window dithers (exec.c draw_). What is drawn into them stays in
+        // 0..1 as before (the tonemapper's colors come from its 8x8x8 grading map; anti-aliasing and layouts blend those),
+        // so only the precision differs. Off (menu "Smooth gradients", ODYSSEY_DEBAND=0): as the game made them.
+        const VkFormatFeatureFlags blit = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+        b->debandable = b->scalable && vf == VK_FORMAT_A2B10G10R10_UNORM_PACK32 && type == VK_IMAGE_TYPE_2D && layers == 1 &&
+                        levels == 1 && samples == 1 && format_supports(vf, blit) &&
+                        format_supports(VK_FORMAT_R16G16B16A16_SFLOAT, need | blit | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
+        if (b->debandable && vk_deband()) {
+            b->guest_format = vf;
+            vf = VK_FORMAT_R16G16B16A16_SFLOAT;
+        }
+    }
     bool depthfmt = renderer_format_is_depth(t->format);
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (depthfmt) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
@@ -399,10 +417,17 @@ static void live_remove(TexBackend *b) {
     b->reg = 0;
 }
 
+bool vk_deband(void) {
+    static int env = -2;
+    if (env == -2) env = getenv("ODYSSEY_DEBAND") ? atoi(getenv("ODYSSEY_DEBAND")) != 0 : -1;
+    return env >= 0 ? env : g_settings.deband;
+}
+
 static TexBackend *tex_backend(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
-        if (b->scalable && (b->sx != g_rs_x || b->sy != g_rs_y)) {  // output resolution changed: reallocate
+        // output resolution changed, or smooth gradients switched on / off (create_image "Banding"): reallocate
+        if (b->scalable && (b->sx != g_rs_x || b->sy != g_rs_y || (b->debandable && !b->guest_format == vk_deband()))) {
             destroy_image(b);
             create_image(t, b);
         }
@@ -487,14 +512,16 @@ static bool tex_scaled(const TexBackend *b) { return b->scalable && (b->sx != 1 
 // A buffer -> image copy in guest texels. A scaled allocation (a screen-shaped texture the CPU fills: a video frame,
 // a target the game uploads into) gets the region through a temporary guest-sized image, scaled into place - copied
 // directly, the data covered only the guest-sized corner of the image. Depth / stencil can't be blitted: direct.
+// An image in another format than the game's bytes (guest_format) gets them through such an image too, converted.
 void vk_copy_buffer_to_image(VkCommandBuffer cb, TexBackend *b, VkBuffer buf, const VkBufferImageCopy *rg) {
-    if (!tex_scaled(b) || b->depth > 1 || (b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) ||
-        !format_supports(b->format, VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT)) {
+    if (!b->guest_format && (!tex_scaled(b) || b->depth > 1 || (b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) ||
+                             !format_supports(b->format, VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT))) {
         vkCmdCopyBufferToImage(cb, buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, rg);
         return;
     }
     uint32_t w = rg->imageExtent.width, h = rg->imageExtent.height, nl = rg->imageSubresource.layerCount, lv = rg->imageSubresource.mipLevel;
-    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = b->format,
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                            .format = b->guest_format ? b->guest_format : b->format,
                             .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = nl, .samples = VK_SAMPLE_COUNT_1_BIT,
                             .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
@@ -520,7 +547,7 @@ void vk_copy_buffer_to_image(VkCommandBuffer cb, TexBackend *b, VkBuffer buf, co
         VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, nl}, .srcOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}},
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, rg->imageSubresource.baseArrayLayer, nl},
                           .dstOffsets = {{x0, y0, 0}, {x1, y1, 1}}};
-        bool linear = format_supports(b->format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+        bool linear = tex_scaled(b) && format_supports(b->format, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
         vkCmdBlitImage(cb, tmp, VK_IMAGE_LAYOUT_GENERAL, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
                        linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
         vk_full_barrier(cb);

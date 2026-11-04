@@ -1,0 +1,906 @@
+{
+  "description": "Allowlist of unmodified redistributable runtime/tool files from the upstream Windows 0.2.0 distribution. Never enumerate an installed game at packaging time. Source and notices: licenses/README.txt and CREDITS.md.",
+  "upstream": "https://gitlab.com/zzzarathustra-dev/power-moon-recomp/-/releases/v0.2.0",
+  "files": [
+    {
+      "path": "avcodec-63.dll",
+      "sha256": "0cb8b7ff38e5efda46e1c104cc35bd850a3f08502c4d9655fa140d8c9ff2585d",
+      "size": 4209152
+    },
+    {
+      "path": "avformat-63.dll",
+      "sha256": "e837de03c4f2f3c386a179e370c9060c3b3846e01a6a88ebbca13186f6cf85b5",
+      "size": 535552
+    },
+    {
+      "path": "avutil-61.dll",
+      "sha256": "de68dbae777e2770f6e83b32703e41f199e4292fba41c7f91dc056831ffddacb",
+      "size": 883712
+    },
+    {
+      "path": "libgcc_s_seh-1.dll",
+      "sha256": "791ebf66e99c7c1b4ed3666468cec45a0172b4c8942ac6c84c3e9cab3e1b5270",
+      "size": 150537
+    },
+    {
+      "path": "libiconv-2.dll",
+      "sha256": "94ec68fb8d342b6c91b6b48a8d95092819cdcd006a7166e0b68062f946afd08a",
+      "size": 1141951
+    },
+    {
+      "path": "libshaderc_shared.dll",
+      "sha256": "331df8a45983735b823c893a9b872c3414af6eadca9fa189d0b6dfe97960b3cf",
+      "size": 10657197
+    },
+    {
+      "path": "libstdc++-6.dll",
+      "sha256": "4e4822dc4aaa99383f581dae7ab9464ae89346c5ca742f7efbcdebe20b0fe7b5",
+      "size": 2659194
+    },
+    {
+      "path": "libwinpthread-1.dll",
+      "sha256": "817e5b2636f532666e8f255e225af75e9d0c41b141512fde45264070a65b1c92",
+      "size": 68731
+    },
+    {
+      "path": "licenses/AMD-FSR1-MIT.txt",
+      "sha256": "55c161ad1d814a4694e80a107cf9eddf98f7cf5954c45815792915588b5a24a7",
+      "size": 1258
+    },
+    {
+      "path": "licenses/Apache-2.0.txt",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "size": 11357
+    },
+    {
+      "path": "licenses/Capstone-BSD.txt",
+      "sha256": "404bd0cb0137ffb797258f844f53e5273f9b6d5781a1a359a2880411f49a4f30",
+      "size": 1718
+    },
+    {
+      "path": "licenses/Dear-ImGui-MIT.txt",
+      "sha256": "c80c5789748d955c4a650562baa0d750494e2c7128c2ca66aaebe2e3c4e198bf",
+      "size": 1083
+    },
+    {
+      "path": "licenses/FFmpeg-LGPL-2.1.txt",
+      "sha256": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30",
+      "size": 26517
+    },
+    {
+      "path": "licenses/GCC-runtime-library-exception.txt",
+      "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
+      "size": 3324
+    },
+    {
+      "path": "licenses/GPL-2.0.txt",
+      "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+      "size": 18092
+    },
+    {
+      "path": "licenses/GPL-3.0.txt",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+      "size": 35147
+    },
+    {
+      "path": "licenses/libiconv-LGPL-2.1.txt",
+      "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95",
+      "size": 26419
+    },
+    {
+      "path": "licenses/LLVM-Apache-2.0-with-LLVM-exception.txt",
+      "sha256": "8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee",
+      "size": 15141
+    },
+    {
+      "path": "licenses/python-lz4-BSD.txt",
+      "sha256": "a7d65d1dd4dcc86dca5d17d46aa4a1c77669c9b72f55f298e9e2212f2905c0cf",
+      "size": 1523
+    },
+    {
+      "path": "licenses/Python-PSF.txt",
+      "sha256": "e502c6b880ff58d614901495a9009c136539cd0b1e2a2abb8fc00b934c203419",
+      "size": 36874
+    },
+    {
+      "path": "licenses/README.txt",
+      "sha256": "d4c740c4f1d186af1fdea6bfedb331b3ce94f308cfe5cf24958091cc67a1c94f",
+      "size": 2365
+    },
+    {
+      "path": "licenses/Ryujinx-MIT.txt",
+      "sha256": "3e34a7cf70adef2b404c29c769cd1b3ae2a95aeca44cef278861fddc7325426d",
+      "size": 1081
+    },
+    {
+      "path": "licenses/SDL3-zlib.txt",
+      "sha256": "1c040b8271b37e5076359f8fd54240e371114112924d2df81ef87c7d6a1dfdfd",
+      "size": 884
+    },
+    {
+      "path": "licenses/SMAA-MIT.txt",
+      "sha256": "2b848b67ba50ac40b53e11cf1ccdaee2a190ca83b4652cba695a5f1ce81f52ae",
+      "size": 1470
+    },
+    {
+      "path": "licenses/VulkanMemoryAllocator-MIT.txt",
+      "sha256": "52df2c03d6cfc9ffec13c9d3626c530fc9ce0cbe41d5ea3d10cd46edeb1aeb38",
+      "size": 1099
+    },
+    {
+      "path": "licenses/winpthreads.txt",
+      "sha256": "63263614cdd29f2f93cba85e992f041b31f9fc7b4033692f31269489a8a1b177",
+      "size": 2883
+    },
+    {
+      "path": "licenses/Zig-MIT.txt",
+      "sha256": "5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177",
+      "size": 1080
+    },
+    {
+      "path": "odysseygen/_asyncio.pyd",
+      "sha256": "c77de90cad749087a0c5dc5e19d78d24f6ef44e7e5ac19b8420cfc0cea62395d",
+      "size": 74096
+    },
+    {
+      "path": "odysseygen/_bz2.pyd",
+      "sha256": "65f610646d10d5babea080e060d244b546ec52c54012e5e937dc72dcc2e2e7bc",
+      "size": 86896
+    },
+    {
+      "path": "odysseygen/_ctypes.pyd",
+      "sha256": "0e56107a891100535f2da79d85a5ae65ff1227b4765bd108f8593ac1a1110d81",
+      "size": 127480
+    },
+    {
+      "path": "odysseygen/_decimal.pyd",
+      "sha256": "aeacfead2befcc0768063a037bb64bd32109ae09cb144e5f571b04dd7965db9d",
+      "size": 262000
+    },
+    {
+      "path": "odysseygen/_elementtree.pyd",
+      "sha256": "5009a9a53c03ef8387443b5cf6ce08e5c3a79727466a0b931c5bbca915bf89ca",
+      "size": 135160
+    },
+    {
+      "path": "odysseygen/_lzma.pyd",
+      "sha256": "e3deecc1f59a3b811c608861decd84de1e8df8bafd5e2b39188861318c5a38cf",
+      "size": 161136
+    },
+    {
+      "path": "odysseygen/_multiprocessing.pyd",
+      "sha256": "2c636df7059cb0dd7e978dd735c7c5c8ddb09cf94754cf9e232296b96c5c545a",
+      "size": 37368
+    },
+    {
+      "path": "odysseygen/_overlapped.pyd",
+      "sha256": "662126ff80c3a1b4cedf74074029c12ae4743e6d3b37376e39ac70aacb7d4d3c",
+      "size": 57336
+    },
+    {
+      "path": "odysseygen/_queue.pyd",
+      "sha256": "48e76e0ad63f6932b4a77b5819f41c1e7595636ca8d9e824f0943a14b8bb5035",
+      "size": 33784
+    },
+    {
+      "path": "odysseygen/_socket.pyd",
+      "sha256": "3efa4636cf9e350856f6927d67a4c2564bf9bd2758a00bbf17d3aece5b60016d",
+      "size": 85496
+    },
+    {
+      "path": "odysseygen/_uuid.pyd",
+      "sha256": "acce4f281d7ffb2dec0997527faf25b1df62ad7bd3032c568ddcf65c90edc867",
+      "size": 27128
+    },
+    {
+      "path": "odysseygen/_zoneinfo.pyd",
+      "sha256": "76f1439cda82ab6976df6ba505c4079444703f6d44d8b0259ce59c0ff4279fb4",
+      "size": 49656
+    },
+    {
+      "path": "odysseygen/libffi-8.dll",
+      "sha256": "eff52743773eb550fcc6ce3efc37c85724502233b6b002a35496d828bd7b280a",
+      "size": 39696
+    },
+    {
+      "path": "odysseygen/LICENSE.txt",
+      "sha256": "e502c6b880ff58d614901495a9009c136539cd0b1e2a2abb8fc00b934c203419",
+      "size": 36874
+    },
+    {
+      "path": "odysseygen/pyexpat.pyd",
+      "sha256": "d615e193d1affcdbfe504e90d3621cbdcff94bf72b79d899126534507fd6d27a",
+      "size": 205304
+    },
+    {
+      "path": "odysseygen/python.exe",
+      "sha256": "4d6f5f81a4bca11191c4c7c6b43632694d0a4ce74e068619d8fdc161d469859a",
+      "size": 104952
+    },
+    {
+      "path": "odysseygen/python3.dll",
+      "sha256": "fb975a606e7fbf74f64260e3f60c3490b4f74a183c0926fd6ed1ac4c52ac7b1c",
+      "size": 70376
+    },
+    {
+      "path": "odysseygen/python312._pth",
+      "sha256": "b5fc06bb2b9053a4a1aae0652ef7c1f8a9e1bb3449b3e59ca3e286b5eee1899a",
+      "size": 36
+    },
+    {
+      "path": "odysseygen/python312.dll",
+      "sha256": "9a0e3435aaa680d868150f87ab3e388ad2eebc22f87e036155c7b4eda8cd2120",
+      "size": 6945272
+    },
+    {
+      "path": "odysseygen/python312.zip",
+      "sha256": "98068e18525ca51ae1d0515177a347c83da148224dc4ef676f2b8ece07ef813a",
+      "size": 2469923
+    },
+    {
+      "path": "odysseygen/select.pyd",
+      "sha256": "d4d7181b11db0bd22a6cd5cda6f8583d1f5c77615fd0a6ca33350619d6e0438a",
+      "size": 33136
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/__init__.py",
+      "sha256": "94571d1314355e261aff0ddfc94985fe8761232ddff6874181fd21efa9fab47f",
+      "size": 43853
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/arm.py",
+      "sha256": "00ea7442a1496d84aca469bfa3542290eafe22898b5be0dece9294865b9508ba",
+      "size": 2154
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/arm64.py",
+      "sha256": "834979e887315fae9a447698502f6866c246cb99b65c84b8b6fdef8087181284",
+      "size": 2428
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/arm64_const.py",
+      "sha256": "f358d461b1f45a8d91d8e308ca82e5b35c5d2e5c135d8ed07d8cdc86456a5418",
+      "size": 81768
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/arm_const.py",
+      "sha256": "1b00d7b48be4b72b730272486d4fd2057cb8019e67f1bd145bcabb1b988d1c67",
+      "size": 17295
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/bpf.py",
+      "sha256": "f879595fbc413bfa74600b4cbaa7a2cdd7200b2f92e718ad31fb36844e7c0f9d",
+      "size": 1438
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/bpf_const.py",
+      "sha256": "070717e28a68ee7e1e8b29cb9a299f5e462be81d9ad6c83dccce5f771fe22e7e",
+      "size": 2160
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/evm.py",
+      "sha256": "29f35d3953b2eeb976e02af3cdbf3a78066d4d5a750588da0672e48bc5aa0385",
+      "size": 383
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/evm_const.py",
+      "sha256": "b3a60498c0ac455098d884574829875deb83a4176a052480249a9d3e93f42b6d",
+      "size": 3292
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/lib/capstone.dll",
+      "sha256": "76958e18380023a68fd1714fa2e01c594cc6db1955a07ad6937b66e66dc5d6c3",
+      "size": 7576576
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/m680x.py",
+      "sha256": "24d56b8f6e9c12d73f830f26de36d02461e4d73a3091943e6c90884181efe41d",
+      "size": 2065
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/m680x_const.py",
+      "sha256": "a8ceebe6e6213da834406e7a56c1f808fad554c5ed85a986b0ef8647db3718da",
+      "size": 8885
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/m68k.py",
+      "sha256": "0567bf26e32a274b086d296fdcc078dcbda2c66280f941e5986b30eecc647bc8",
+      "size": 2438
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/m68k_const.py",
+      "sha256": "79de0ea42977ad2875fd73a34ddb55fc2ace58dac45b0ee8aff0ae138c7a8faa",
+      "size": 10489
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/mips.py",
+      "sha256": "c23b6e5d5df2be6f728dda2da2a8f805d4d1500e383aebf555da1fa9650639e8",
+      "size": 1001
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/mips_const.py",
+      "sha256": "80a325c59a8a88918d1ebc55268e07461841ddde50d034a545d31cdf44668324",
+      "size": 18592
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/mos65xx.py",
+      "sha256": "f9b525569fcae4768ac4b2230a46468a571e934717f14d52910e243d0b279e9a",
+      "size": 998
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/mos65xx_const.py",
+      "sha256": "22762e23dec6d011f75068cac995f4c05f6cf5c93c207502eeb11d0cd4a136f3",
+      "size": 3393
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/ppc.py",
+      "sha256": "1ee21161d21902744379624d87048138272a99c6bd98623256baa065038bf03d",
+      "size": 1384
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/ppc_const.py",
+      "sha256": "4284db74b7db3a0e3eda043970096c047df81d9b0a81c13b3b5b70ca623d4b0b",
+      "size": 45023
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/riscv.py",
+      "sha256": "c40beee7bd99d3f1cc329203020def06140a786d17e2ec963feefb12e0c8e872",
+      "size": 1104
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/riscv_const.py",
+      "sha256": "6ac81243404207d74b3190c37180b6353a001191c7df5d04fd25f89b624abdd1",
+      "size": 10953
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/sh.py",
+      "sha256": "d50212075a918e94b41f1e67f838a3b70bc44d19941f33b6d502e5359c967592",
+      "size": 1478
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/sh_const.py",
+      "sha256": "a19a1837892a0eaa9bc3e5cd3638625471d705a35b08aa26994ad108928125be",
+      "size": 7154
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/sparc.py",
+      "sha256": "389867d194a7bef779466a5283953cb2b30d2e84368e80112677cfaa0334097c",
+      "size": 1127
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/sparc_const.py",
+      "sha256": "aef73803efe9a2e0e109fe05e0b791f33e62d41c54ed32cd2773837960d1ddae",
+      "size": 9738
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/systemz.py",
+      "sha256": "9e75611fb8930ef665b04a80e14ca0735953f69d2f0fdb608f96ea172cef7f2d",
+      "size": 1115
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/sysz_const.py",
+      "sha256": "98ad76240b48eff060f96fc0986933c904cbdfd654866eb49e7ee5879db2908e",
+      "size": 56291
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/tms320c64x.py",
+      "sha256": "597bf661d25e283c007c9ee76defb422f41e4279aae5bbd8b5736400109cf6b3",
+      "size": 1672
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/tms320c64x_const.py",
+      "sha256": "643aeb59e96e2eb10f6ca4e9d27db9c00d83195cf442dea453418ac2df0cb94b",
+      "size": 7257
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/tricore.py",
+      "sha256": "6716ed4579dadec5c476a0a704c35421860cdaaf20796c7d9c5ebfceb5c4e3cb",
+      "size": 1123
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/tricore_const.py",
+      "sha256": "95d640cfc8d698f162edc68646c4829cd25289ee47d2869815b33b7839d32bae",
+      "size": 12010
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/wasm.py",
+      "sha256": "8fb19dfb59cd7175ab0e55b8b7c2d37e150c237ed6060862be6ec3e98bf21d6d",
+      "size": 1627
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/wasm_const.py",
+      "sha256": "e03e231892153456070055f39a53ed3205feeb24e7d768a2b193adcbe26cffc5",
+      "size": 5132
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/x86.py",
+      "sha256": "08cbb0a02ff152bcf1fbd7c4f8850b3ade38c25b9f0a6a9b900a55ee75e87c67",
+      "size": 2816
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/x86_const.py",
+      "sha256": "83cf4550d9256f5f9b8e218b9b732e46d83ef602b463a01d6eeb778deb28e040",
+      "size": 45756
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/xcore.py",
+      "sha256": "67a3bab5ec77998bf88f320b61be7110318454be2252ff2a02f42ca4aab56a8c",
+      "size": 1082
+    },
+    {
+      "path": "odysseygen/site-packages/capstone/xcore_const.py",
+      "sha256": "34367710ee0501621fb8b325890cae740ff38075d3ef66b36de9b8b4dcec227f",
+      "size": 3424
+    },
+    {
+      "path": "odysseygen/site-packages/lz4/__init__.py",
+      "sha256": "7bff23f8ae13271dfca9c3cd8e864ffe9343a3c2291380f6656978a79d2257ff",
+      "size": 646
+    },
+    {
+      "path": "odysseygen/site-packages/lz4/_version.cp312-win_amd64.pyd",
+      "sha256": "a1d8664efed26257b07acfe77640db0a35389d17a5a70d7c623cae0db74dabc7",
+      "size": 11264
+    },
+    {
+      "path": "odysseygen/site-packages/lz4/block/__init__.py",
+      "sha256": "0d251b4bbccc94a29e2ecf093bdae23813b943f955a1207e9f08237e105e5edd",
+      "size": 71
+    },
+    {
+      "path": "odysseygen/site-packages/lz4/block/_block.cp312-win_amd64.pyd",
+      "sha256": "d8c5d519e80ec7b517a1a6fa4b6cf905cfd9332ddc311b8f82adaaf0b9982372",
+      "size": 76288
+    },
+    {
+      "path": "odysseygen/site-packages/lz4/frame/__init__.py",
+      "sha256": "64bfdf11fb38e0c9e35c5ad9ecf117393f6a68fab89d25f494685c7d69c2d3cb",
+      "size": 32059
+    },
+    {
+      "path": "odysseygen/site-packages/lz4/frame/_frame.cp312-win_amd64.pyd",
+      "sha256": "6515db4ebf899e20e0090460165cb0a01d0589aa1c67c61b1af9b150bd7e877a",
+      "size": 115712
+    },
+    {
+      "path": "odysseygen/site-packages/lz4/version.py",
+      "sha256": "3791d96d63d972292cad57759b3c6efd91a7eb0b37799fbbfaccc1d5bdfd51d7",
+      "size": 746
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/__init__.py",
+      "sha256": "0e8ac7115c755994a968fa865bd1b2f2075edea715c17e91d62af2cc52c13392",
+      "size": 305
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/arm64_const.py",
+      "sha256": "ddadd814eccd0a312bb43da7b4f2298690660bd5698c27edc306b1d981cff972",
+      "size": 7873
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/arm_const.py",
+      "sha256": "ace0c3e49f61649034a1bec4279576b67e064df146ea8062c67e68dc14e6eb7b",
+      "size": 4284
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/lib/unicorn.dll",
+      "sha256": "010d85dce84b8f6ffaec3d5420f1b5f7768f859eb831be574c7da23e656ee8f1",
+      "size": 9598976
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/m68k_const.py",
+      "sha256": "af95f32f2810fe19888ac723db70c74c7fb1df2bc8ba3578ede0a28b8eca94a7",
+      "size": 1144
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/mips_const.py",
+      "sha256": "087925a25a128662e095bb861af3c38a2a6c522fc21e222e31b71aeacaaa63d3",
+      "size": 5160
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/ppc_const.py",
+      "sha256": "11e0c52a1c137874352119fb3d1621639079feda6574ee575271ef683a0a8f17",
+      "size": 10880
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/py.typed",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/riscv_const.py",
+      "sha256": "86e08d5f6327d154306d5d02899331892de6f44020ff86900a84d2b212205925",
+      "size": 7270
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/s390x_const.py",
+      "sha256": "4f6194d1697d8684921782a81f494458dc859f8ebf2f78e30f673bd5f7cd590f",
+      "size": 4101
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/sparc_const.py",
+      "sha256": "9dd58fa5aeab225a0f8186f653f5c8fc5fd161b75ccc6a541e5af79f36af2698",
+      "size": 3381
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/tricore_const.py",
+      "sha256": "88310f61e12b731b2550031eb6423fbf815e66428b483132d3df47614c9d53ae",
+      "size": 3199
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/unicorn.py",
+      "sha256": "2aed71e6d5bc60807198cdcc3ed43a485a7acae1f41f08d986137afc55df2029",
+      "size": 321
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/unicorn_const.py",
+      "sha256": "c21d7c49f62296591a5f09ed0119ef95083b82f5f3f66b829578784c7b164368",
+      "size": 3258
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/unicorn_py2.py",
+      "sha256": "b82ccc7c00762e10f0326e8d8ad4381872cf531799d5e003ad52c9d7ac61ae42",
+      "size": 39639
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/unicorn_py3/__init__.py",
+      "sha256": "2cd4a0d95ef236b5b9e3efb68b20fb6a6d1fb4190db2e9cc0a6447eb2c0aa755",
+      "size": 24
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/unicorn_py3/arch/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/unicorn_py3/arch/arm.py",
+      "sha256": "d486ff4a9c3f797e5e57a5201a1e2304b97a54b6bc61e320062f1290f4e3dc33",
+      "size": 4108
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/unicorn_py3/arch/arm64.py",
+      "sha256": "2e393f3f863da1576619e03abcbda2a2e2e54d673aac98979cf0b6caed8926b4",
+      "size": 5040
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/unicorn_py3/arch/intel.py",
+      "sha256": "b3b8338a85ac74623e7a67dfb4f44dc9933786a329e64d772987490dbf751637",
+      "size": 5453
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/unicorn_py3/arch/types.py",
+      "sha256": "525ed179db874a13291f9469bd6243e7293aba17454de9b10a9227106d093787",
+      "size": 2774
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/unicorn_py3/unicorn.py",
+      "sha256": "b4de7d560790a587157b17edd71c83b4f2d2bade2447d1a5433c497468ac8aeb",
+      "size": 54301
+    },
+    {
+      "path": "odysseygen/site-packages/unicorn/x86_const.py",
+      "sha256": "d7663db6425f52838f3e79e45a8fe22b6c02be7edb44367ea2118aec04ee5728",
+      "size": 41605
+    },
+    {
+      "path": "odysseygen/unicodedata.pyd",
+      "sha256": "208ee1cd3cbad0828433ca7246b05be2b1ff5569983d27d296c0b38888585488",
+      "size": 1140592
+    },
+    {
+      "path": "odysseygen/vcruntime140.dll",
+      "sha256": "052ad6a20d375957e82aa6a3c441ea548d89be0981516ca7eb306e063d5027f4",
+      "size": 120400
+    },
+    {
+      "path": "odysseygen/vcruntime140_1.dll",
+      "sha256": "6a99bc0128e0c7d6cbbf615fcc26909565e17d4ca3451b97f8987f9c6acbc6c8",
+      "size": 49776
+    },
+    {
+      "path": "Roboto-Medium.ttf",
+      "sha256": "8559132c89ad51d8a2ba5b171887a44a7ba93776e205f553573de228e64b45f8",
+      "size": 162588
+    },
+    {
+      "path": "SDL3.dll",
+      "sha256": "7c856cc78c474d4b6463502ecfcfdf2b5f331c6aab14309fcca374a73009305a",
+      "size": 4033450
+    },
+    {
+      "path": "swscale-10.dll",
+      "sha256": "7f4b86ecdb9776dc671ad9cc743e3841f1c4a3fd863d55b38bc0e0704014e925",
+      "size": 1754624
+    },
+    {
+      "path": "zig/lib/include/__float_float.h",
+      "sha256": "bde8d423099e3bba501018bdde141cf2edea549ba528733d43dc534694181935",
+      "size": 5890
+    },
+    {
+      "path": "zig/lib/include/__float_header_macro.h",
+      "sha256": "7ee2302b023d41fd787a326059980800594c6e2cbac134b3167947d0025a72d7",
+      "size": 449
+    },
+    {
+      "path": "zig/lib/include/__float_infinity_nan.h",
+      "sha256": "544272ca97c2ba51fd362d5f35c8d7287e57001e9a8f29d51896b82be253ef72",
+      "size": 613
+    },
+    {
+      "path": "zig/lib/include/__stddef_header_macro.h",
+      "sha256": "4cf46e8fbb809df048eecbbd63686fa741da27afa8db4245bd1f61c1fb1611dc",
+      "size": 417
+    },
+    {
+      "path": "zig/lib/include/__stddef_max_align_t.h",
+      "sha256": "3c1e4de47f4f06b35e2c5890d670052e84f716760505ff51b022fc8b21a9400f",
+      "size": 857
+    },
+    {
+      "path": "zig/lib/include/__stddef_null.h",
+      "sha256": "b1d71b08563ab3d2c22a1e4f8ddf4d9a1111c89e9404b859a45c307e8ebc6c69",
+      "size": 875
+    },
+    {
+      "path": "zig/lib/include/__stddef_offsetof.h",
+      "sha256": "e5f0f4ff8ff5fc6a1cc8b535f5065f1728eadd2bf1e1401f021f803ec7b4222f",
+      "size": 708
+    },
+    {
+      "path": "zig/lib/include/__stddef_ptrdiff_t.h",
+      "sha256": "b4178a57f3711b7013cba747a72a2f178c29fa9364e77d75b2159754072ced43",
+      "size": 717
+    },
+    {
+      "path": "zig/lib/include/__stddef_size_t.h",
+      "sha256": "d86ddc0238da09b385846ebef814ffc50a44e40cf85d4e3793f485952b7e73ad",
+      "size": 708
+    },
+    {
+      "path": "zig/lib/include/__stddef_wchar_t.h",
+      "sha256": "1900d4998aef3698b06399ed686db0c21e26509b08638a25734fb97ae89b1001",
+      "size": 853
+    },
+    {
+      "path": "zig/lib/include/__stddef_wint_t.h",
+      "sha256": "f2ededa38c5454397242aceaefa65b42b292a1b3cc258e7ca6e216f146e51f0d",
+      "size": 443
+    },
+    {
+      "path": "zig/lib/include/float.h",
+      "sha256": "0242ed0a0c17fb6c24ef6953c51d02d28eadb067dfa41d7ef59fe230caee3a10",
+      "size": 1416
+    },
+    {
+      "path": "zig/lib/include/stdbool.h",
+      "sha256": "48655faf4ebd4ca0af26a1ee8e3e16f8dc68385c9cd550ffb3629320681305b3",
+      "size": 1172
+    },
+    {
+      "path": "zig/lib/include/stddef.h",
+      "sha256": "b3e62a046ddf28d09eedebe6eb9461cb7060e47cad2c69964b222c4eea10347e",
+      "size": 5053
+    },
+    {
+      "path": "zig/lib/include/stdint.h",
+      "sha256": "f43783466c93f77a6464274ebf18f9e4cc46f0d90770ddee2993c6cf39f7514f",
+      "size": 27519
+    },
+    {
+      "path": "zig/lib/include/vadefs.h",
+      "sha256": "e338a8bbdbc40a9662d76a0a395313cf17a9541a0fadf3cf8bfa6ee6fa3db4ec",
+      "size": 1420
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/_mingw.h",
+      "sha256": "4e4d069fa5a207e191700bbcf2ce4331ac1e3f8a5a2c83e90c18224847ac360c",
+      "size": 19157
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/_mingw_mac.h",
+      "sha256": "a23e0228c8b760492cd7e150221f75d1888fcb59eefaabf71b7296d903533eb1",
+      "size": 12934
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/_mingw_secapi.h",
+      "sha256": "f7c73504b479a86e9323056d7785d7ebfdd224f2136a18c5388b100daa6484e9",
+      "size": 3466
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/corecrt.h",
+      "sha256": "efc8fae1f0f9eb81e6cdfb4bd7e982a5ddd5cdec9642f21447e843225e8727a0",
+      "size": 20893
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/corecrt_memory.h",
+      "sha256": "175eb2cb8f8cc1ddd502c71a9903810e4bbd1583d6510c1bb3a771891404f3e0",
+      "size": 2122
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/crtdefs.h",
+      "sha256": "c42926e8ce132a3152121c0cf1a379e0053c18ae8d6b13f9471134c63abd76ed",
+      "size": 308
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/fenv.h",
+      "sha256": "fd31b1add623611839156fb62f66138607713b6e78f19ccd7ec2bb0bf26ba279",
+      "size": 3173
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/float.h",
+      "sha256": "29a93f0227e5f76accc79ec8314f1445cd8f9fd7fca3519154c04710c68a7f56",
+      "size": 11056
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/math.h",
+      "sha256": "78c02aba46623338ff401fc63bf7f9a0473e3dd7e204b43e0a8104d1b1957e9c",
+      "size": 50709
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/sec_api/string_s.h",
+      "sha256": "b2e3027a2b26c5e766738cd9b447601833116baeea16cfad5b5f952c852f9bd8",
+      "size": 7063
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/stddef.h",
+      "sha256": "d3e472d7d74b835f2298346a460de1050896893cc9be46962f0707ae0a425357",
+      "size": 12574
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/stdint.h",
+      "sha256": "d622b8a9acd4a6ff0d0ab33b4d77d83af31f46035660bdcb9c2aa6e56308b95d",
+      "size": 6412
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/string.h",
+      "sha256": "6e17135a9e3df74537a1fcd5419478a46cfbd16a8bc7715d9854ab2c726437ae",
+      "size": 14812
+    },
+    {
+      "path": "zig/lib/libc/include/any-windows-any/vadefs.h",
+      "sha256": "abbcc279d0a64730caa533f2df975f4fa10ce9768783b6d98c420e48d8820458",
+      "size": 2768
+    },
+    {
+      "path": "zig/lib/std/std.zig",
+      "sha256": "053cdeca0cb3632a98117ddbef4ffa1a65cf30bcc6555af9437dc3ee3781d12e",
+      "size": 11021
+    },
+    {
+      "path": "zig/LICENSE",
+      "sha256": "5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177",
+      "size": 1080
+    },
+    {
+      "path": "zig/rt/advapi32.lib",
+      "sha256": "25af7787cd9a365f6485900f0f39ce42b40e90561e41843e3e13cb77a5273270",
+      "size": 200914
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-conio-l1-1-0.lib",
+      "sha256": "4f622e477c115668c79f6e6a59405f9e968a9d49b216284a4d59b6b6032d2583",
+      "size": 9950
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-convert-l1-1-0.lib",
+      "sha256": "c7ff9ce66c93356f8dac41cdea59831472e93230677a5d734dba4e22e646f775",
+      "size": 26322
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-environment-l1-1-0.lib",
+      "sha256": "3e56bfb907966c4cea53981e31f0c5b484d9be715c18110e1e2ed4aee4e672aa",
+      "size": 6156
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-filesystem-l1-1-0.lib",
+      "sha256": "3ddbfbe4406d3593e9227bf169624070078da7de5520c2495ca7ece438be172a",
+      "size": 33694
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-heap-l1-1-0.lib",
+      "sha256": "ac735a341f01505188b14a9da0ade5bb9ba2aa7eb98f11336387e2de69424fb6",
+      "size": 7520
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-locale-l1-1-0.lib",
+      "sha256": "4508f2770537ab244ab4df7c13e567f188ed45932c079f1bc4f36705031f0d1c",
+      "size": 6564
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-math-l1-1-0.lib",
+      "sha256": "f8f75ebecae1f8e63dc982b5819cb7448900490beb35ed48ed6ae26aff576f2f",
+      "size": 46678
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-multibyte-l1-1-0.lib",
+      "sha256": "cb1a193ab293ba2b50444cec260d8aff857c12bbaab3eff2da425aaba8789a37",
+      "size": 41706
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-private-l1-1-0.lib",
+      "sha256": "9110120ee3c2deb3c60f14e1ebc41006b5f2ef4db778b1f2d39e56af5781f543",
+      "size": 235478
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-process-l1-1-0.lib",
+      "sha256": "dff307227edc18b416ac3e4f89f3e8085c20b9afbcdcff748a04334e5a854769",
+      "size": 17274
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-runtime-l1-1-0.lib",
+      "sha256": "7a464dbbe4a5bff135f4bbd3f30d095b5c3a3f93282e66c5a32e2548e61f58c3",
+      "size": 25478
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-stdio-l1-1-0.lib",
+      "sha256": "014a2ee1ab432d39534af8436476299048e64f8915ee1ba1f49dfb985bdab39f",
+      "size": 56376
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-string-l1-1-0.lib",
+      "sha256": "4f4d42cfd8d37a219c450f6038c8264681cb68c9b6f598c81b332bb40b535d51",
+      "size": 50296
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-time-l1-1-0.lib",
+      "sha256": "1776ad4e494c3d301a220e6550d9d1538ee9d1dda2b28671ff7b030b839df371",
+      "size": 25766
+    },
+    {
+      "path": "zig/rt/api-ms-win-crt-utility-l1-1-0.lib",
+      "sha256": "a42e8bad0513b24d3ebde13bf29ff17d51f3ddb35205f287f172b75272392c0d",
+      "size": 8476
+    },
+    {
+      "path": "zig/rt/compiler_rt.lib",
+      "sha256": "008337b22e4ba6ab9310de65eaadd506e986638c430283d8275b78e7243e83b4",
+      "size": 1206856
+    },
+    {
+      "path": "zig/rt/dllcrt2.obj",
+      "sha256": "1028f46fbac59972ae91b3601eb7723d222243b3053d738b85f4e0405da52bbc",
+      "size": 21666
+    },
+    {
+      "path": "zig/rt/kernel32.lib",
+      "sha256": "af30436069084e37ff46de216318cafdf13e860440a5d8852b82b463ba4586ee",
+      "size": 376510
+    },
+    {
+      "path": "zig/rt/libmingw32.lib",
+      "sha256": "63e90e9f809f8b3563ad10c7594cc4c34fcebcf67b65edd7478abfc5af03ebbf",
+      "size": 10347134
+    },
+    {
+      "path": "zig/rt/link.rsp",
+      "sha256": "f0fc614f08579a02d454d46f0663dab9c0f002dc998656cf4d3456a1fc119111",
+      "size": 778
+    },
+    {
+      "path": "zig/rt/ntdll.lib",
+      "sha256": "a9e9a4eacaff6d5c186c514a8f27840df9de44c86de4dfbfe38dab0cae907cea",
+      "size": 545270
+    },
+    {
+      "path": "zig/rt/shell32.lib",
+      "sha256": "e6dd0ef7efbfbc1793ae892dcd84a4403d1dfca72addd069547b0e0fef4d4589",
+      "size": 85524
+    },
+    {
+      "path": "zig/rt/user32.lib",
+      "sha256": "6b2bea0a02e6a95bcbb684ff4ede16a4a51c8bd0a55e7e15b81255c4467190bb",
+      "size": 207984
+    },
+    {
+      "path": "zig/rt/zigc.lib",
+      "sha256": "b75e6bf6a391eb22e65f6600583c57fd6b0d75c74f5ef946d91002dea70d601c",
+      "size": 52474
+    },
+    {
+      "path": "zig/zig.exe",
+      "sha256": "f54b14f02a4d7d8ac62a94a0663486eb166bba3745d85b466238c1b93e723d46",
+      "size": 190064128
+    }
+  ]
+}

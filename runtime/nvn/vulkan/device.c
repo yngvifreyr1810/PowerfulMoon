@@ -13,6 +13,9 @@
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
+#include "../interp.h"
+#include "../../present_policy.h"
+#include "../../controller_bootstrap.h"
 #include "../output_scale.h"
 #include "../renderer.h"
 
@@ -352,14 +355,16 @@ static VkPresentModeKHR present_mode(void) {
     // a throttled / captured / busy compositor slowed the whole game (4-21 fps with the GPU mostly idle; mailbox:
     // 60). No tearing. ODYSSEY_VK_PRESENT=fifo|immediate|mailbox to choose.
     const char *e = getenv("ODYSSEY_VK_PRESENT");
-    VkPresentModeKHR want = !e || !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
+    if (!e) e=g_settings.vsync==1 ? "fifo" : g_settings.vsync==2 ? "immediate" : "mailbox";
+    VkPresentModeKHR want = !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
                           : !strcmp(e, "immediate") ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
     uint32_t n = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(g_vk.phys, g_vk.surface, &n, NULL);
     VkPresentModeKHR m[16];
     if (n > 16) n = 16;
     vkGetPhysicalDeviceSurfacePresentModesKHR(g_vk.phys, g_vk.surface, &n, m);
-    for (uint32_t i = 0; i < n; i++) if (m[i] == want) return want;
+    for (uint32_t i = 0; i < n; i++) if (m[i] == want) { LOG("[present] mode=%s (host only; game stays at 60 Hz)\n",e); return want; }
+    LOG("[present] requested %s unavailable; using FIFO\n",e);
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
@@ -405,8 +410,11 @@ static void create_swapchain(void) {
     }
 }
 
+void vk_queue_lock(void), vk_queue_unlock(void);
 static void recreate_swapchain(void) {
+    vk_queue_lock();  // (vkDeviceWaitIdle: no submission on the queue meanwhile - exec.c, the presenter)
     vkDeviceWaitIdle(g_vk.dev);
+    vk_queue_unlock();
     create_swapchain();
 }
 
@@ -438,16 +446,39 @@ static void image_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, V
 
 typedef struct { uint32_t image; VkSemaphore acquired; bool ok; } Frame;
 static Frame cur_frame;
+// One present at a time (the swapchain, its semaphores, cur_frame): vk_frame_begin .. vk_frame_end, and frame
+// interpolation's presenter (present_fast), which presents without the render lock. Lock order: render, present, queue.
+static pthread_mutex_t g_present_lock;
+static void present_lock_init(void) {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_present_lock, &a);
+}
+static void present_lock(void) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, present_lock_init);
+    pthread_mutex_lock(&g_present_lock);
+}
+static void present_unlock(void) { pthread_mutex_unlock(&g_present_lock); }
+static bool g_need_recreate;  // (present lock) the presenter saw the swapchain out of date: the next vk_frame_begin remakes it
+// Composing a window image ahead (frame interpolation, compose below): vk_present_draw renders into it as into the
+// window's (its post passes suspend and resume that rendering: vk_frame_suspend / vk_frame_resume)
+static struct { bool on; VkImageView view; VkExtent2D ext; } comp;
 
 // Acquire the next window image and begin rendering into it (cleared to `clear`). Returns false when there is
 // nothing to draw into (minimised window).
 bool vk_frame_begin(const float clear[4]) {
+    present_lock();  // (until vk_frame_end)
     cur_frame.ok = false;
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
-    if (!w || !h) return false;  // minimised
-    if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) recreate_swapchain();
-    if (!g_vk.swapchain) return false;
+    if (!w || !h) { present_unlock(); return false; }  // minimised
+    if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height || g_need_recreate) {
+        g_need_recreate = false;
+        recreate_swapchain();
+    }
+    if (!g_vk.swapchain) { present_unlock(); return false; }
     static int trace = -1;
     if (trace < 0) trace = getenv("ODYSSEY_VK_TRACE") != NULL;
     if (trace) LOG("[vk] frame begin %dx%d (swapchain %ux%u)\n", w, h, g_vk.sc_extent.width, g_vk.sc_extent.height);
@@ -462,6 +493,7 @@ bool vk_frame_begin(const float clear[4]) {
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {  // (out of date again: the window is being resized / restored)
         static uint64_t nfail;
         if (nfail++ % 600 == 0) LOG("[vk] acquire failed: %d (%llu times)\n", r, (unsigned long long)nfail);
+        present_unlock();
         return false;
     }
     cur_frame.acquired = acquire_sem[slot];
@@ -486,19 +518,21 @@ bool vk_frame_begin(const float clear[4]) {
 // Passes of their own between vk_frame_begin and vk_frame_end (exec.c post passes): end the window image's
 // rendering, and begin it again keeping what was drawn.
 void vk_frame_suspend(void) {
-    if (cur_frame.ok) vkCmdEndRendering(vk_cmd());
+    if (cur_frame.ok || comp.on) vkCmdEndRendering(vk_cmd());
 }
 void vk_frame_resume(void) {
-    if (!cur_frame.ok) return;
+    if (!cur_frame.ok && !comp.on) return;
     VkCommandBuffer cb = vk_cmd();
-    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[cur_frame.image],
-                                    .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    VkExtent2D ext = comp.on ? comp.ext : g_vk.sc_extent;
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                    .imageView = comp.on ? comp.view : g_vk.sc_views[cur_frame.image],
+                                    .imageLayout = comp.on ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                     .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
-    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, g_vk.sc_extent}, .layerCount = 1,
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, ext}, .layerCount = 1,
                           .colorAttachmentCount = 1, .pColorAttachments = &ca};
     vkCmdBeginRendering(cb, &ri);
-    VkViewport vp = {0, 0, (float)g_vk.sc_extent.width, (float)g_vk.sc_extent.height, 0, 1};
-    VkRect2D sc = {{0, 0}, g_vk.sc_extent};
+    VkViewport vp = {0, 0, (float)ext.width, (float)ext.height, 0, 1};
+    VkRect2D sc = {{0, 0}, ext};
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
 }
@@ -531,7 +565,9 @@ void vk_frame_end(const char *shot_path) {
     vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
+    vk_queue_lock();
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
+    vk_queue_unlock();
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     cur_frame.ok = false;
     if (shot_path) {
@@ -543,6 +579,7 @@ void vk_frame_end(const char *shot_path) {
         for (uint64_t i = 0; i < (uint64_t)w * h; i++) px[i * 4 + 3] = 255;
         vk_save_png(shot_path, px, w, h);
     }
+    present_unlock();  // (vk_frame_begin's)
 }
 
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h) {
@@ -575,61 +612,650 @@ void backend_represent(void) {
     else SDL_Delay(16);
 }
 
-static void backend_present_locked(NvnTexture *t);
-void backend_present(NvnTexture *t) {
-    plat_heap_check("present");
+// ---- frame interpolation (runtime/nvn/interp.c): images between the game's frames
+// One of our images made like a texture's (2D, one level), for a copy of it.
+static void hold_make(const TexBackend *src, TexBackend *dst) {
+    if (dst->image && dst->width == src->width && dst->height == src->height && dst->format == src->format) return;
+    if (dst->image) { vk_views_forget(dst); vk_defer_image(dst->image, dst->mem); }
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
+                            .imageType = VK_IMAGE_TYPE_2D, .format = src->format, .extent = {src->width, src->height, 1},
+                            .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    *dst = (TexBackend){.format = src->format, .base_type = VK_IMAGE_VIEW_TYPE_2D, .width = src->width, .height = src->height,
+                        .depth = 1, .layers = 1, .levels = 1, .samples = 1, .aspect = VK_IMAGE_ASPECT_COLOR_BIT, .scalable = src->scalable,
+                        .sx = src->sx, .sy = src->sy, .gpu_owned = true, .uploaded = true};
+    VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &dst->image, &dst->mem, NULL));
+    vk_image_init_layout(vk_cmd(), dst->image, VK_IMAGE_ASPECT_COLOR_BIT);
+}
+static void image_copy(const TexBackend *src, const TexBackend *dst) {
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                     .extent = {src->width, src->height, 1}};
+    vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    vk_full_barrier(cb);
+}
+
+// The display's refresh rate (0: unknown): in-betweens only pay off at twice the game's 60 or more - at 60 Hz they
+// would replace each other before the display shows them.
+static float display_hz(void) {
+    SDL_DisplayID d = window ? SDL_GetDisplayForWindow(window) : 0;
+    const SDL_DisplayMode *m=d ? SDL_GetCurrentDisplayMode(d) : NULL;
+    const SDL_DisplayMode *desktop=d ? SDL_GetDesktopDisplayMode(d) : NULL;
+    float current=m ? m->refresh_rate : 0, nominal=desktop ? desktop->refresh_rate : 0;
+    float supported=current>nominal ? current : nominal;
+    // Query the supported nominal mode once per display/size, never on each frame.
+    static SDL_DisplayID last_display;
+    static int last_w,last_h;
+    static float max_hz;
+    if (d && m && (d!=last_display || m->w!=last_w || m->h!=last_h)) {
+        int count=0;
+        SDL_DisplayMode **modes=SDL_GetFullscreenDisplayModes(d,&count);
+        max_hz=0;
+        if (modes) {
+            for (int i=0;i<count;i++) if (modes[i]->w==m->w && modes[i]->h==m->h && modes[i]->refresh_rate>max_hz)
+                max_hz=modes[i]->refresh_rate;
+            SDL_free(modes);
+        }
+        last_display=d; last_w=m->w; last_h=m->h;
+    }
+    if (max_hz>supported) supported=max_hz;
+    float chosen=pm_interp_hz(current,nominal,supported,g_settings.interpolation_output);
+    static int last_target=-1;
+    if (last_target!=g_settings.interpolation_output) {
+        LOG("[present] refresh current=%.2f desktop=%.2f supported=%.2f interpolation=%s effective=%.2f Hz\n",
+            current,nominal,supported,g_settings.interpolation_output==120 ? "120 (VRR)" : "auto",chosen);
+        last_target=g_settings.interpolation_output;
+    }
+    return chosen;
+}
+
+// The presenter: shows queued images at their times, in order. They are window images composed ahead (compose: the
+// game's image placed, post-processed and letterboxed at the window's size, as a present draws it), which the presenter
+// copies into the swapchain's and presents with command buffers of its own (present_fast) - without the render lock,
+// which the game holds ~4.5 ms a frame for its command list and a replay ~3.5 ms: waiting for it, presents came up to
+// 6 ms late (17% of them over 1 ms), unevenly spaced. With the menu open (it takes input and runs its actions under the
+// render lock) or the swapchain to remake, a present goes the usual way (present_full). An image older than the latest
+// present is dropped (never a step back: the game thread presents itself again when interpolation stops or skips a
+// frame). Order: 2 x the game's frame for its own image, one less for the in-between before it.
+// ODYSSEY_LOG_PRESENTS=1: each present, how late it was and how long it waited for the locks (ms; "slow": the usual way).
+typedef struct { TexBackend *img; uint64_t at, order; const char *what; } PJob;
+static PJob pjobs[8];
+static int npjobs;
+static pthread_mutex_t pres_mx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t pres_cv = PTHREAD_COND_INITIALIZER;
+static uint64_t g_present_order;  // (present lock) the latest present's order
+
+// (render lock) one of our window images: the swapchain's format and size, in the general layout like the game's
+static bool winimg_make(TexBackend *w) {
+    VkExtent2D e = g_vk.sc_extent;
+    if (!g_vk.swapchain || !e.width || !e.height) return false;
+    if (w->image && w->width == e.width && w->height == e.height && w->format == g_vk.sc_format) return true;
+    if (w->image) { vk_views_forget(w); vk_defer_image(w->image, w->mem); }
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = g_vk.sc_format,
+                            .extent = {e.width, e.height, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                            .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    *w = (TexBackend){.format = g_vk.sc_format, .base_type = VK_IMAGE_VIEW_TYPE_2D, .width = e.width, .height = e.height,
+                      .depth = 1, .layers = 1, .levels = 1, .samples = 1, .aspect = VK_IMAGE_ASPECT_COLOR_BIT, .sx = 1, .sy = 1,
+                      .gpu_owned = true, .uploaded = true};
+    VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &w->image, &w->mem, NULL));
+    vk_image_init_layout(vk_cmd(), w->image, VK_IMAGE_ASPECT_COLOR_BIT);
+    return true;
+}
+
+// (render lock) src as a present draws it into the window (placement v, parameters pv: vk_present_draw), into the window
+// image w - what the presenter copies into the swapchain's
+static bool compose(TexBackend *w, TexBackend *src, const float v[4], const float pv[8]) {
+    if (!src || !src->image || !winimg_make(w)) return false;
+    vk_end_pass();
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    VkImageView view = vk_image_view(w, VK_IMAGE_VIEW_TYPE_2D, w->format, 0, 1, 0, 1, (VkComponentMapping){0}, VK_IMAGE_ASPECT_COLOR_BIT);
+    VkExtent2D ext = {w->width, w->height};
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = view,
+                                    .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue.color.float32 = {0, 0, 0, 1}};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, ext}, .layerCount = 1,
+                          .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    vkCmdBeginRendering(cb, &ri);
+    VkViewport vp = {0, 0, (float)ext.width, (float)ext.height, 0, 1};
+    VkRect2D sc = {{0, 0}, ext};
+    vkCmdSetViewport(cb, 0, 1, &vp);
+    vkCmdSetScissor(cb, 0, 1, &sc);
+    comp.on = true, comp.view = view, comp.ext = ext;
+    vk_present_draw(cb, src, v[0], v[1], v[2], v[3], pv);
+    comp.on = false;
+    cb = vk_cmd();
+    vkCmdEndRendering(cb);
+    vk_full_barrier(cb);
+    return true;
+}
+
+// (render lock) the usual way: a window image over the whole window, the overlay (the menu) over it
+static bool present_full(TexBackend *w) {
+    static const float black[4] = {0, 0, 0, 1}, pv[8] = {0, 0, 0, 0, 0, 0, 1, 1};  // (composed: no flip, no crop)
+    vk_end_pass();
+    if (!vk_frame_begin(black)) return false;
+    VkCommandBuffer cb = vk_cmd();
+    vk_present_draw(cb, w, 0, 0, (float)g_vk.sc_extent.width, (float)g_vk.sc_extent.height, pv);
+    vk_queue_lock();  // (ImGui's first frame uploads its fonts through the queue)
+    menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
+    vk_queue_unlock();
+    vk_frame_end(NULL);
+    return true;
+}
+
+// (present lock) the presenter's own submission: the window image copied into the swapchain's, the FPS counter over it
+// (menu_overlay_lockfree: nothing else open), presented. false: the usual way instead.
+#define FAST_N 4
+static VkCommandPool fast_pool;
+static VkCommandBuffer fast_cb[FAST_N];
+static VkFence fast_fence[FAST_N];
+static VkSemaphore fast_acq[FAST_N];
+static int fast_i;
+static bool present_fast(TexBackend *w) {
+    if (!menu_overlay_lockfree() || g_need_recreate || !g_vk.swapchain) return false;
+    int ww, wh;
+    SDL_GetWindowSizeInPixels(window, &ww, &wh);
+    VkExtent2D e = g_vk.sc_extent;
+    if (!ww || !wh || (uint32_t)ww != e.width || (uint32_t)wh != e.height) return false;
+    if (!fast_pool) {
+        VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                                      .queueFamilyIndex = g_vk.qfam};
+        VK_CHECK(vkCreateCommandPool(g_vk.dev, &pi, NULL, &fast_pool));
+        VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = fast_pool,
+                                          .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = FAST_N};
+        VK_CHECK(vkAllocateCommandBuffers(g_vk.dev, &ai, fast_cb));
+        for (int i = 0; i < FAST_N; i++) {
+            VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
+            VK_CHECK(vkCreateFence(g_vk.dev, &fi, NULL, &fast_fence[i]));
+            fast_acq[i] = binary_semaphore();
+        }
+    }
+    int k = fast_i = (fast_i + 1) % FAST_N;
+    vkWaitForFences(g_vk.dev, 1, &fast_fence[k], VK_TRUE, UINT64_MAX);  // (its semaphore and command buffer free again)
+    uint32_t img;
+    VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, fast_acq[k], VK_NULL_HANDLE, &img);
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { g_need_recreate = true; return false; }
+    if (r == VK_SUBOPTIMAL_KHR) g_need_recreate = true;  // (this one still goes out)
+    vkResetFences(g_vk.dev, 1, &fast_fence[k]);
+    VkCommandBuffer cb = fast_cb[k];
+    vkResetCommandBuffer(cb, 0);
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    VK_CHECK(vkBeginCommandBuffer(cb, &bi));
+    vk_full_barrier(cb);  // (after the compose, submitted before)
+    VkImage si_ = g_vk.sc_images[img];
+    image_barrier(cb, si_, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    if (w->width == e.width && w->height == e.height) {
+        VkImageCopy c = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                         .extent = {e.width, e.height, 1}};
+        vkCmdCopyImage(cb, w->image, VK_IMAGE_LAYOUT_GENERAL, si_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    } else {  // (composed before the window changed size)
+        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)w->width, (int32_t)w->height, 1}},
+                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)e.width, (int32_t)e.height, 1}}};
+        vkCmdBlitImage(cb, w->image, VK_IMAGE_LAYOUT_GENERAL, si_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_LINEAR);
+    }
+    if (g_settings.show_fps) {
+        image_barrier(cb, si_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[img],
+                                        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+        VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, e}, .layerCount = 1,
+                              .colorAttachmentCount = 1, .pColorAttachments = &ca};
+        vkCmdBeginRendering(cb, &ri);
+        VkViewport vp = {0, 0, (float)e.width, (float)e.height, 0, 1};
+        VkRect2D sc = {{0, 0}, e};
+        vkCmdSetViewport(cb, 0, 1, &vp);
+        vkCmdSetScissor(cb, 0, 1, &sc);
+        vk_queue_lock();
+        menu_render((void *)cb, e.width, e.height);
+        vk_queue_unlock();
+        vkCmdEndRendering(cb);
+    }
+    VkImageLayout lay = g_settings.show_fps ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    // ODYSSEY_WINDOW_SHOT=<frame>[:<n>] (tests): what the first n presents from that frame on put into the window ->
+    // build/window.png (n > 1: build/window_<i>.png), as a direct present does (backend_present_locked)
+    static long ws_at = -1, ws_n;
+    static int ws_i;
+    if (ws_at < 0) {
+        const char *ev = getenv("ODYSSEY_WINDOW_SHOT");
+        ws_at = ev ? atol(ev) : 0;
+        ws_n = ev && strchr(ev, ':') ? atol(strchr(ev, ':') + 1) : 1;
+    }
+    VkBuffer sbuf = VK_NULL_HANDLE;
+    VmaAllocation smem = NULL;
+    VmaAllocationInfo sinfo = {0};
+    if (ws_at && (long)total_frames + 1 >= ws_at && ws_i < ws_n) {
+        VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)e.width * e.height * 4,
+                                  .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                       .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        if (vmaCreateBuffer(g_vk.vma, &bci, &aci, &sbuf, &smem, &sinfo) == VK_SUCCESS) {
+            image_barrier(cb, si_, lay, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy rg = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {e.width, e.height, 1}};
+            vkCmdCopyImageToBuffer(cb, si_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sbuf, 1, &rg);
+            lay = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        } else sbuf = VK_NULL_HANDLE;
+    }
+    image_barrier(cb, si_, lay, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    VK_CHECK(vkEndCommandBuffer(cb));
+    if (!done_sem[img]) done_sem[img] = binary_semaphore();
+    VkCommandBufferSubmitInfo cbi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = cb};
+    VkSemaphoreSubmitInfo wt = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = fast_acq[k],
+                                .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+    VkSemaphoreSubmitInfo sg = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = done_sem[img],
+                                .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+    VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = 1, .pWaitSemaphoreInfos = &wt,
+                        .commandBufferInfoCount = 1, .pCommandBufferInfos = &cbi, .signalSemaphoreInfoCount = 1, .pSignalSemaphoreInfos = &sg};
+    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
+                           .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
+    vk_queue_lock();
+    VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, fast_fence[k]);
+    VkResult pr = sr == VK_SUCCESS ? vkQueuePresentKHR(g_vk.queue, &pi) : sr;
+    vk_queue_unlock();
+    VK_CHECK(sr);
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) g_need_recreate = true;
+    if (sbuf) {
+        vkWaitForFences(g_vk.dev, 1, &fast_fence[k], VK_TRUE, UINT64_MAX);
+        uint8_t *px = sinfo.pMappedData;
+        bool bgr = g_vk.sc_format == VK_FORMAT_B8G8R8A8_UNORM || g_vk.sc_format == VK_FORMAT_B8G8R8A8_SRGB;
+        for (uint64_t i = 0; i < (uint64_t)e.width * e.height; i++) {
+            if (bgr) { uint8_t t = px[i * 4]; px[i * 4] = px[i * 4 + 2]; px[i * 4 + 2] = t; }
+            px[i * 4 + 3] = 255;
+        }
+        char path[64];
+        if (ws_n > 1) snprintf(path, sizeof path, "build/window_%02d.png", ws_i);
+        else snprintf(path, sizeof path, "build/window.png");
+        vk_save_png(path, px, e.width, e.height);
+        vmaDestroyBuffer(g_vk.vma, sbuf, smem);
+        if (++ws_i == ws_n && getenv("ODYSSEY_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+    }
+    return true;
+}
+
+extern __thread const char *g_lock_role;  // (exec.c: ODYSSEY_LOG_LOCKS)
+static void *presenter_thread(void *arg) {
+    (void)arg;
+    g_lock_role = "presenter";
+    plat_thread_realtime(0);  // (on time: the images' spacing is the point)
+    for (;;) {
+        pthread_mutex_lock(&pres_mx);
+        while (!npjobs) pthread_cond_wait(&pres_cv, &pres_mx);
+        PJob j = pjobs[0];
+        memmove(pjobs, pjobs + 1, (size_t)--npjobs * sizeof pjobs[0]);
+        pthread_mutex_unlock(&pres_mx);
+        plat_sleep_until_ns(j.at);
+        uint64_t t0 = plat_now_ns();
+        present_lock();
+        uint64_t t1 = plat_now_ns();
+        bool stale = j.order <= g_present_order, fast = !stale && present_fast(j.img), slow = false;
+        if (fast) g_present_order = j.order;
+        present_unlock();
+        if (!stale && !fast) {
+            vk_render_lock();
+            t1 = plat_now_ns();
+            present_lock();
+            if (j.order > g_present_order && present_full(j.img)) g_present_order = j.order, slow = true;
+            present_unlock();
+            vk_render_unlock();
+        }
+        if ((fast || slow) && getenv("ODYSSEY_LOG_PRESENTS")) {
+            uint64_t t2 = plat_now_ns();
+            LOG("[present] %.3f %s late %.2f lock %.2f%s\n", t2 / 1e6, j.what, ((int64_t)t2 - (int64_t)j.at) / 1e6, (t1 - t0) / 1e6,
+                slow ? " slow" : "");
+        }
+    }
+    return NULL;
+}
+static void presenter_queue(TexBackend *img, uint64_t at, uint64_t order, const char *what) {
+    static bool started;
+    if (!started) {
+        started = true;
+        pthread_t th;
+        if (pthread_create(&th, NULL, presenter_thread, NULL) == 0) pthread_detach(th);
+    }
+    pthread_mutex_lock(&pres_mx);
+    if (npjobs < 8) pjobs[npjobs++] = (PJob){.img = img, .at = at, .order = order, .what = what};
+    pthread_cond_signal(&pres_cv);
+    pthread_mutex_unlock(&pres_mx);
+}
+
+// The interpolation thread (runtime/nvn/interp.c): a frame's matching, its replay and the presents of its images run
+// here. The game hands a frame over as soon as it is complete - its present call, before the wait for the vsync that
+// paces it (backend_frame_done) - with its own image composed for the window; this thread matches it against the
+// frames before (no locks), replays it with blended uniforms into the game's targets (the render lock; lists the game
+// submits meanwhile wait for it - interp_wait_replay - so two frames' draws never interleave), composes the in-between
+// too (the game's next frame may draw into the presented texture before the presenter shows it) and queues both: the
+// in-between at a delay from the time the game's present is due - the recent replays' latest finish + 1.5 ms, at
+// least half a game frame early (the game's own image never shows before its time) - and the game's image half a game
+// frame after it: evenly spaced whatever a replay took. In busy views the game thread works ~5 ms of its 16.7 and
+// waits for the vsync the rest; the matching and the replay (~7 ms with ~1700 draws) fit in that wait. Started after
+// the present instead, they held up the game's next frame (~5 ms a frame): it missed vsyncs and the brake turned
+// in-betweens off nearly everywhere.
+typedef struct {
+    InterpFrame *f;
+    NvnTexture *t;          // the presented texture: the replay draws the in-between into it
+    TexBackend *game;       // the game's own image (a window image, composed); NULL: the game thread presents it (matching only)
+    float v[4], pv[8];
+    uint64_t at, frame;     // when the game's present is due, and its number
+    double period;          // the game's frame period (ns)
+} IJob;
+static IJob ijobs[2];
+static int nijobs, replay_pending;  // (ij_mx) handed-over frames whose replay hasn't run: the game's next lists wait
+static pthread_mutex_t ij_mx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ij_cv = PTHREAD_COND_INITIALIZER, ij_done_cv = PTHREAD_COND_INITIALIZER;
+static _Atomic uint64_t g_interp_waited_ns;  // (stats) the game's waits for a replay
+static _Atomic int replay_waiters;  // game threads waiting for one now: the replay not started yet is left out
+
+void interp_wait_replay(void) {
+    if (!__atomic_load_n(&replay_pending, __ATOMIC_ACQUIRE)) return;
+    uint64_t t0 = plat_now_ns();
+    atomic_fetch_add(&replay_waiters, 1);
+    pthread_mutex_lock(&ij_mx);
+    while (replay_pending) pthread_cond_wait(&ij_done_cv, &ij_mx);
+    pthread_mutex_unlock(&ij_mx);
+    atomic_fetch_sub(&replay_waiters, 1);
+    atomic_fetch_add(&g_interp_waited_ns, plat_now_ns() - t0);
+}
+static void replay_done(void) {
+    pthread_mutex_lock(&ij_mx);
+    if (replay_pending) __atomic_store_n(&replay_pending, replay_pending - 1, __ATOMIC_RELEASE);
+    pthread_cond_broadcast(&ij_done_cv);
+    pthread_mutex_unlock(&ij_mx);
+}
+
+static void *interp_thread(void *arg) {
+    (void)arg;
+    extern void renderer_interp_replay(void);
+    g_lock_role = "interp";
+    double done[64], delay = 0;  // when recent replays were done, from their frame's present (ns; < 0: before it)
+    int nd = 0;
+    uint64_t last_log = 0, njobs = 0, nskipped = 0;
+    double done_sum = 0;
+    // ODYSSEY_INTERP_SHOT=<frame>[:<n>] (tests, videos): the in-betweens before frames frame .. frame + n - 1 ->
+    // build/frames/frame_<n>_mid.png (numbered as ODYSSEY_SHOT_AT numbers the frame it precedes); none is left out then
+    const char *se = getenv("ODYSSEY_INTERP_SHOT");
+    long shot = se ? atol(se) : 0, shot_n = se && strchr(se, ':') ? atol(strchr(se, ':') + 1) : 1;
+    for (;;) {
+        pthread_mutex_lock(&ij_mx);
+        while (!nijobs) pthread_cond_wait(&ij_cv, &ij_mx);
+        IJob j = ijobs[0];
+        memmove(ijobs, ijobs + 1, (size_t)--nijobs * sizeof ijobs[0]);
+        pthread_mutex_unlock(&ij_mx);
+        bool blend = interp_frame_begin(j.f);
+        if (j.game) {
+            TexBackend *mid = NULL;
+            // (the game's present is past and it already waits to draw its next frame - a busy scene, a cutscene: this
+            // in-between is left out rather than cost the game its vsync; before the present only the game's other
+            // threads can wait - a list of theirs, off the frame's path)
+            bool waited = blend && !shot && atomic_load(&replay_waiters) > 0 && plat_now_ns() > j.at;
+            nskipped += waited;
+            if (blend && !waited && interp_replays_allowed(j.frame, total_frames) && interp_prepare(0.5f) && interp_replay_lock()) {
+                renderer_interp_replay();
+                interp_replay_unlock();
+                vk_render_lock();
+                TexBackend *b = vk_tex(j.t, true);
+                static TexBackend mids[3];
+                static int mi;
+                mid = &mids[mi = (mi + 1) % 3];
+                if (shot && (long)j.frame + 1 >= shot && (long)j.frame + 1 < shot + shot_n) {
+                    char path[256];
+                    mkdir("build/frames", 0755);
+                    snprintf(path, sizeof path, "build/frames/frame_%05llu_mid.png", (unsigned long long)j.frame + 1);
+                    renderer_save_texture_tex(b, path);
+                }
+                if (!compose(mid, b, j.v, j.pv)) mid = NULL;
+                vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE);  // (the GPU starts on it)
+                vk_render_unlock();
+            } else {
+                renderer_submit();  // (the game image's compose: on the GPU before the presenter's copy of it)
+            }
+            replay_done();
+            double fin = (double)((int64_t)plat_now_ns() - (int64_t)j.at);
+            done[nd++ % 64] = fin;
+            done_sum += fin, njobs++;
+            double w = -1e18;
+            for (int i = 0; i < 64 && i < nd; i++) if (done[i] > w) w = done[i];
+            // (up at once when a replay finished later; down slowly - a step back in the images' timeline is a stutter)
+            double want = w + 1.5e6;
+            if (want < -j.period / 2) want = -j.period / 2;
+            if (want > 14e6) want = 14e6;
+            delay = want > delay ? want : delay - fmin(delay - want, 0.05e6);
+            int64_t due = (int64_t)j.at + (int64_t)delay;
+            uint64_t order = 2 * (j.frame + 1);
+            if (mid) presenter_queue(mid, (uint64_t)due, order - 1, "in-between");
+            presenter_queue(j.game, (uint64_t)(due + (int64_t)(j.period / 2)), order, "game image");
+        }
+        interp_frame_rotate();
+        interp_log_stats();
+        uint64_t now = plat_now_ns();
+        if (getenv("ODYSSEY_INTERP_LOG") && now - last_log > 2000000000ull && njobs) {
+            LOG("[interp-thread] replays done %.1f ms after (- before) the game's present was due; in-betweens shown %.1f ms after it; "
+                "the game waited %.2f ms a frame for replays; %llu left out for it\n", done_sum / njobs / 1e6, delay / 1e6,
+                atomic_exchange(&g_interp_waited_ns, 0) / 1e6 / (double)njobs, (unsigned long long)nskipped);
+            last_log = now, njobs = 0, done_sum = 0, nskipped = 0;
+        }
+    }
+    return NULL;
+}
+// (game thread) a closed frame to the interpolation thread; false: its queue is full (the frame is the caller's to drop)
+static bool interp_hand_over(const IJob *job) {
+    static bool started;
+    if (!started) {
+        started = true;
+        pthread_t th;
+        if (pthread_create(&th, NULL, interp_thread, NULL) == 0) pthread_detach(th);
+    }
+    pthread_mutex_lock(&ij_mx);
+    bool ok = nijobs < 2;
+    if (ok) {
+        ijobs[nijobs++] = *job;
+        if (job->game) __atomic_store_n(&replay_pending, replay_pending + 1, __ATOMIC_RELEASE);
+        pthread_cond_signal(&ij_cv);
+    }
+    pthread_mutex_unlock(&ij_mx);
+    return ok;
+}
+
+// The game's frame: what is shown and how, decided once - when the game hands it over complete (backend_frame_done,
+// before its vsync wait) or else at its present.
+static struct {
+    bool done;             // for frame `frame`
+    uint64_t frame;
+    bool skip, placed;     // not shown (a full-screen pass still building) / the window has a size
+    float v[4], pv[8];     // where in the window (runtime/nvn/output_scale.c), the present pass's parameters
+    TexBackend *b;         // the presented texture's image
+    TexBackend *game_w;    // with in-betweens: the game's image composed for the window - the interpolation thread presents it
+    TexBackend *game_img;  // (screenshots: ODYSSEY_SHOT_AT, ODYSSEY_SCREENSHOT_EVERY) a copy of the game's image - b gets the in-between
+} fd;
+static double game_period = 16.67e6;  // the game's frame period (present to present, smoothed): the images' spacing
+static uint64_t brake_until;          // the brake (present_brake): no in-betweens before this frame
+
+// Render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution"), from the window
+// image's size (vk_frame_begin remakes it when the window changed); no GPU timer here (-1): dynamic resolution goes by
+// the frame time. The image is 16:9 (bars in other window shapes), or fills a wider window when "Aspect ratio" says so:
+// the game widens its view by the factor in effect (runtime/hle/odyssey_wide.c; it takes the window's between game
+// frames). ODYSSEY_WIDE_TEST=<f>[@<frame>]: that factor whatever the window (from that frame on: a change while playing).
+static bool frame_placement(float v[4], float pv[8]) {
+    double dw = g_vk.sc_extent.width, dh = g_vk.sc_extent.height;
+    memset(v, 0, 4 * sizeof *v);
+    memset(pv, 0, 8 * sizeof *pv);
+    if (dw <= 0 || dh <= 0) return false;
+    static double wide_test = -1;
+    static long wide_from;
+    if (wide_test < 0) {
+        const char *e = getenv("ODYSSEY_WIDE_TEST");
+        wide_test = e ? atof(e) : 0;
+        wide_from = e && strchr(e, '@') ? atol(strchr(e, '@') + 1) : 0;
+    }
+    double win = (dw / dh) / (16.0 / 9.0);
+    extern void odyssey_wide_want(float k);
+    extern float odyssey_wide(void);
+    if (wide_test > 0) odyssey_wide_want((long)total_frames >= wide_from ? (float)wide_test : 1.0f);
+    else odyssey_wide_want(g_settings.aspect == ASPECT_FILL && win > 1.005 ? (float)win : 1.0f);
+    OutScale os;
+    output_scale(dw, dh, odyssey_wide(), SDL_GetTicksNS() / 1e9, -1, &os);
+    float crop[4] = {0, 0, 1, 1};  // uv origin and size: all of it
+    renderer_set_scale((float)os.sx, (float)os.sy);
+    v[0] = (float)os.vx, v[1] = (float)os.vy, v[2] = (float)os.vw, v[3] = (float)os.vh;
+    pv[0] = renderer_origin_lower_left() ? 1.0f : 0.0f;
+    memcpy(pv + 4, crop, sizeof crop);
+    memcpy(g_shot_crop, crop, sizeof crop);
+    return true;
+}
+
+// (render lock) Frame interpolation (runtime/nvn/interp.c): the frame logged while its lists ran is closed and handed to
+// the interpolation thread (above) - with its image when it makes in-betweens; ODYSSEY_INTERP=measure only matches it
+// (stats). present_at: when its present is due (host ns).
+static void frame_decide(NvnTexture *t, uint64_t present_at) {
+    TexBackend *b = vk_tex(t, true);
+    vk_end_pass();
+    g_interp_present_frame = total_frames;
+    int interp_want = interp_wanted();
+    if (interp_want == INTERP_ON && total_frames < brake_until) interp_want = INTERP_OFF;
+    // (in-betweens need a display at 90 Hz or more - ODYSSEY_INTERP=on: any; below, not even the logging)
+    bool hz_ok = display_hz() >= 90 || getenv("ODYSSEY_INTERP");
+    if (interp_want == INTERP_ON && !hz_ok) {
+        static bool said;
+        if (!said) { said = true; LOG("[interp] the display runs at %.0f Hz: no in-betweens (they need 90 Hz or more)\n", display_hz()); }
+        interp_want = INTERP_OFF;
+    }
+    InterpFrame *closed = interp_frame_close(interp_want != INTERP_OFF, total_frames);
+    extern bool renderer_take_frame_incomplete(void);
+    fd.skip = renderer_take_frame_incomplete();  // (a full-screen pass still building: the window keeps the last frame)
+    if (fd.skip && getenv("ODYSSEY_LOG_SHADER_TIME"))
+        LOG("[shtime] frame %llu not shown (a full-screen pass is building)\n", (unsigned long long)total_frames);
+    fd.placed = frame_placement(fd.v, fd.pv);
+    fd.b = b;
+    fd.game_w = fd.game_img = NULL;
+    // With in-betweens the game's image is composed for the window now (the replay draws the in-between into b) and the
+    // interpolation thread presents both; three of each, as the presenter may still show an earlier one.
+    if (closed && interp_want == INTERP_ON && !fd.skip && fd.placed) {
+        static TexBackend wins[3], hold[3];
+        static int wi;
+        TexBackend *w = &wins[wi = (wi + 1) % 3];
+        if (compose(w, b, fd.v, fd.pv)) {
+            if (getenv("ODYSSEY_SHOT_AT") || getenv("ODYSSEY_SCREENSHOT_EVERY")) {
+                hold_make(b, &hold[wi]);
+                image_copy(b, &hold[wi]);
+                fd.game_img = &hold[wi];
+            }
+            IJob job = {.f = closed, .t = t, .game = w, .at = present_at, .frame = total_frames, .period = game_period};
+            memcpy(job.v, fd.v, sizeof job.v);
+            memcpy(job.pv, fd.pv, sizeof job.pv);
+            if (interp_hand_over(&job)) fd.game_w = w, closed = NULL;
+            else fd.game_img = NULL;
+        }
+    }
+    if (closed) {  // (matching only - measure mode, a frame not shown - or the interpolation thread's queue was full)
+        IJob job = {.f = closed, .frame = total_frames};
+        if (!interp_hand_over(&job)) interp_frame_drop(closed);
+    }
+    fd.done = true, fd.frame = total_frames;
+}
+
+// (game thread) its frame is complete: the in-between starts while it waits for its present's vsync
+void backend_frame_done(NvnTexture *t, uint64_t present_at) {
     vk_render_lock();
-    backend_present_locked(t);
+    frame_decide(t, present_at);
     vk_render_unlock();
 }
-static void backend_present_locked(NvnTexture *t) {
+
+// The game's frame period, and the brake: when the game misses its vsync too often with in-betweens - 12 of its last 120
+// frames over 18 ms (a hitch counts once) - they pause (the game's own frames at full speed instead) for 2 s, longer
+// each time in a row (up to 20 s), and come back; 30 s without: short pauses again. (A smoothed period over 17.4 ms was
+// the rule: one late frame pushed it over - the game catching up right after it doesn't pull it back - and the brake
+// held in-betweens off in busy views at 60 fps.)
+static void present_brake(uint64_t now, bool interp) {
+    static uint64_t last, last_brake;
+    static uint8_t slow[120];
+    static int n, nslow, backoff = 120;
+    if (last && now > last) {
+        double d = (double)(now - last);
+        game_period += ((d < 8e6 ? 8e6 : d > 50e6 ? 50e6 : d) - game_period) * 0.05;
+        if (interp) {
+            int k = n++ % 120;
+            nslow += (d > 18e6) - slow[k];
+            slow[k] = d > 18e6;
+            if (nslow >= 12) {
+                brake_until = total_frames + (uint64_t)backoff;
+                LOG("[interp] the game missed its vsync in %d of its last %d frames with in-betweens: paused for %d frames\n",
+                    nslow, n < 120 ? n : 120, backoff);
+                backoff = backoff * 2 > 1200 ? 1200 : backoff * 2;
+                memset(slow, 0, sizeof slow);
+                n = nslow = 0;
+                last_brake = total_frames;
+            }
+        }
+    }
+    last = now;
+    if (backoff > 120 && total_frames > last_brake + 1800) backoff = 120;
+}
+
+static void backend_present_locked(NvnTexture *t, bool handed);
+void backend_present(NvnTexture *t) {
+    plat_heap_check("present");
+    // (a frame the interpolation thread presents needs no render lock here: its replay may hold it, and the game's
+    // next frame starts without waiting for that - lists it submits meanwhile wait, interp_wait_replay)
+    bool handed = fd.done && fd.frame == total_frames && fd.game_w;
+    if (!handed) vk_render_lock();
+    backend_present_locked(t, handed);
+    if (!handed) vk_render_unlock();
+}
+static void backend_present_locked(NvnTexture *t, bool handed) {
     extern void debug_tex_trace(const char *what);
-    debug_tex_trace("present");  // (ODYSSEY_TEX_TRACE: exec.c)
+    if (!handed) debug_tex_trace("present");  // (ODYSSEY_TEX_TRACE: exec.c)
     g_last_presented = t;
-    TexBackend *b = vk_tex(t, true);
+    uint64_t present_ns = plat_now_ns();
+    if (!handed) {
+        vk_tex(t, true);
+        vk_end_pass();
+        if (!fd.done || fd.frame != total_frames) frame_decide(t, present_ns);
+    }
+    fd.done = false;
+    TexBackend *b = fd.b, *game_img = fd.game_img;
     b->presented = true;
-    vk_end_pass();
+    present_brake(present_ns, fd.game_w != NULL);
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
-    extern bool renderer_take_frame_incomplete(void);
     pcache_autosave();
     extern void vk_prepare_poll(void);
     vk_prepare_poll();
-    bool skip = renderer_take_frame_incomplete();  // (a full-screen pass still building: the window keeps the last frame)
-    if (skip && getenv("ODYSSEY_LOG_SHADER_TIME"))
-        LOG("[shtime] frame %llu not shown (a full-screen pass is building)\n", (unsigned long long)total_frames);
-    bool have = !skip && vk_frame_begin(black);
-    uint64_t nd = SDL_GetTicksNS() - t0;
-    if (nd > 30000000) {
-        static int warned;
-        if (warned++ < 20) LOG("[vk] acquire blocked %llums\n", (unsigned long long)(nd / 1000000));
+    float v[4], pv[8];
+    memcpy(v, fd.v, sizeof v);
+    memcpy(pv, fd.pv, sizeof pv);
+    static long menu_at = -1;  // ODYSSEY_MENU_AT=<frame> (tests): the menu opens there
+    if (menu_at < 0) menu_at = getenv("ODYSSEY_MENU_AT") ? atol(getenv("ODYSSEY_MENU_AT")) : 0;
+    if (menu_at && (long)total_frames + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
+    bool have = false;
+    if (!fd.game_w && !fd.skip && fd.placed) {
+        have = vk_frame_begin(black);
+        uint64_t nd = SDL_GetTicksNS() - t0;
+        if (nd > 30000000) {
+            static int warned;
+            if (warned++ < 20) LOG("[vk] acquire blocked %llums\n", (unsigned long long)(nd / 1000000));
+        }
     }
     if (have) {
-        double dw = g_vk.sc_extent.width, dh = g_vk.sc_extent.height;
-        // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution");
-        // no GPU timer here (-1): dynamic resolution goes by the frame time. The game's 16:9 image keeps its shape in
-        // other window shapes (bars): Odyssey's camera isn't widened.
-        OutScale os;
-        output_scale(dw, dh, false, SDL_GetTicksNS() / 1e9, -1, &os);
-        double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh;
-        float crop[4] = {0, 0, 1, 1};  // uv origin and size: all of it
-        renderer_set_scale((float)sx, (float)sy);
         VkCommandBuffer cb = vk_cmd();
-        float pv[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
-        memcpy(g_shot_crop, crop, sizeof crop);
-        vk_checkpoint(cb, "present draw %p %ux%u -> window %.0fx%.0f", (void *)b->image, b->width, b->height, vw, vh);
-        vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
+        vk_checkpoint(cb, "present draw %p %ux%u -> window %.0fx%.0f", (void *)b->image, b->width, b->height, v[2], v[3]);
+        vk_present_draw(cb, b, v[0], v[1], v[2], v[3], pv);
         vk_checkpoint(cb, "menu overlay");
-        static long menu_at = -1;
-        if (menu_at < 0) menu_at = getenv("ODYSSEY_MENU_AT") ? atol(getenv("ODYSSEY_MENU_AT")) : 0;
-        if (menu_at && (long)total_frames + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
+        vk_queue_lock();  // (ImGui's first frame uploads its fonts through the queue)
         menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
+        vk_queue_unlock();
         static long win_shot = -1;
         if (win_shot < 0) win_shot = getenv("ODYSSEY_WINDOW_SHOT") ? atol(getenv("ODYSSEY_WINDOW_SHOT")) : 0;
         bool shot = win_shot && (long)total_frames + 1 == win_shot;
+        g_present_order = 2 * (total_frames + 1);  // (the present lock: vk_frame_begin's, until vk_frame_end)
         vk_frame_end(shot ? "build/window.png" : NULL);
+        if (getenv("ODYSSEY_LOG_PRESENTS")) LOG("[present] %.3f game image (direct)\n", plat_now_ns() / 1e6);
         if (shot && getenv("ODYSSEY_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
-    } else {
+    } else if (!handed) {
         renderer_submit();
     }
     extern void vk_prof_frame(uint64_t frame, uint64_t present_ns);
@@ -683,7 +1309,9 @@ static void backend_present_locked(NvnTexture *t) {
             if ((long)total_frames == at) {
                 char path[256];
                 snprintf(path, sizeof path, "build/frames/frame_%05llu.png", (unsigned long long)total_frames);
-                renderer_save_texture_tex(b, path);
+                vk_render_lock();  // (a frame the interpolation thread presents comes here without it)
+                renderer_save_texture_tex(game_img ? game_img : b, path);
+                vk_render_unlock();
             }
             if (*next == ',') next++;
         }
@@ -695,7 +1323,9 @@ static void backend_present_locked(NvnTexture *t) {
         if (shot_from) mkdir("build/frames", 0755);
         snprintf(path, sizeof path, shot_from ? "build/frames/frame_%05llu.png" : "build/frame_%05llu.png",
                  (unsigned long long)total_frames);
-        renderer_save_texture_tex(b, path);
+        vk_render_lock();  // (a frame the interpolation thread presents comes here without it)
+        renderer_save_texture_tex(game_img ? game_img : b, path);
+        vk_render_unlock();
         // a series (SCREENSHOT_FROM) runs on until ODYSSEY_WINDOW_SHOT exits
         if (getenv("ODYSSEY_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
     }
@@ -731,7 +1361,9 @@ static void quick_exit_handler(void) {
     if (trace < 0) trace = getenv("ODYSSEY_VK_TRACE") != NULL;
     if (trace) LOG("[vk] exit: waiting for the GPU\n");
     if (g_vk.dev) {
+        vk_queue_lock();
         vkDeviceWaitIdle(g_vk.dev);
+        vk_queue_unlock();
         if (trace) LOG("[vk] exit: saving the pipeline cache\n");
         vk_pipeline_cache_save();
         extern void vk_drawn_programs_save(void);
@@ -752,6 +1384,7 @@ void ui_window_init(void) {
     atexit(quick_exit_handler);
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     settings_load();
+    pm_start_bundled_bridge();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     int win_w = 1280, win_h = 720;
     if (getenv("ODYSSEY_WINDOW")) sscanf(getenv("ODYSSEY_WINDOW"), "%dx%d", &win_w, &win_h);
@@ -848,6 +1481,7 @@ void vk_prepare_before_start(void) {
 // only fit those - on a hidden window, without a swapchain.
 void vk_headless_init(void) {
     settings_load();
+    pm_start_bundled_bridge();
     if (!SDL_Init(SDL_INIT_VIDEO)) FATAL("SDL_Init: %s\n", SDL_GetError());
     window = SDL_CreateWindow(RT_APP_NAME, 64, 64, SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
@@ -896,5 +1530,18 @@ int ui_run(void) {
             input_handle_event(&e);
         }
         menu_apply_window_requests(window);
+        {   // ODYSSEY_RESIZE_TEST=<frame>:<w>x<h>[,<frame>:<w>x<h>...] (tests): the window changes size at those frames
+            static const char *next;
+            static bool init;
+            if (!init) { init = true; next = getenv("ODYSSEY_RESIZE_TEST"); }
+            long at;
+            int w, h, n = 0;
+            if (next && *next && sscanf(next, "%ld:%dx%d%n", &at, &w, &h, &n) == 3 && (long)total_frames >= at) {
+                LOG("[vk] resize test: %dx%d at frame %llu\n", w, h, (unsigned long long)total_frames);
+                SDL_SetWindowSize(window, w, h);
+                next += n;
+                if (*next == ',') next++;
+            }
+        }
     }
 }

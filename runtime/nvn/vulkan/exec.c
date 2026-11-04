@@ -14,6 +14,7 @@
 #include "../../paths.h"
 #include "shaders.h"
 #include "vk.h"
+#include "../interp.h"
 #include "../renderer.h"
 #include "../../settings.h"
 
@@ -122,14 +123,44 @@ static void render_lock_init(void) {
     pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&g_render_lock, &a);
 }
+// The queue: submissions and presents come from the render lock's holder and from frame interpolation's presenter
+// (device.c), which presents without the render lock; ImGui's font upload submits too (menu_render, first frame).
+static pthread_mutex_t g_queue_lock;
+static void queue_lock_init(void) {
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_queue_lock, &a);
+}
+void vk_queue_lock(void) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, queue_lock_init);
+    pthread_mutex_lock(&g_queue_lock);
+}
+void vk_queue_unlock(void) { pthread_mutex_unlock(&g_queue_lock); }
+
+// ODYSSEY_LOG_LOCKS=1 (research: what holds up a present): each hold over 0.3 ms, with the holder's role
+__thread const char *g_lock_role;  // (the interpolation thread and the presenter name themselves; else "game")
+static __thread int lock_depth;
+static __thread uint64_t lock_t0;
+static int log_locks = -1;
 void vk_render_lock(void) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
     pthread_once(&once, render_lock_init);
-    if (pthread_mutex_trylock(&g_render_lock) == 0) return;
-    kernel_block_begin();  // (busy: a guest thread lets its core's other threads run while it waits - audio on core 1)
-    pthread_mutex_lock(&g_render_lock);
+    if (pthread_mutex_trylock(&g_render_lock) != 0) {
+        kernel_block_begin();  // (busy: a guest thread lets its core's other threads run while it waits - audio on core 1)
+        pthread_mutex_lock(&g_render_lock);
+    }
+    if (log_locks < 0) log_locks = getenv("ODYSSEY_LOG_LOCKS") != NULL;
+    if (log_locks && lock_depth++ == 0) lock_t0 = plat_now_ns();
 }
-void vk_render_unlock(void) { pthread_mutex_unlock(&g_render_lock); }
+void vk_render_unlock(void) {
+    if (log_locks > 0 && --lock_depth == 0) {
+        uint64_t now = plat_now_ns();
+        if (now - lock_t0 > 300000) LOG("[lockhold] %.3f %.3f %s\n", lock_t0 / 1e6, now / 1e6, g_lock_role ? g_lock_role : "game");
+    }
+    pthread_mutex_unlock(&g_render_lock);
+}
 
 // ---- the game's GPU timing counters (nvnCommandBufferReportCounter, two per frame)
 // The game times its GPU work with these and drops to 30 fps when frames look slow. They used to get the host clock
@@ -443,7 +474,9 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     {
         PROF_T0();
         dl_note("submit %llu", (unsigned long long)submit_seq + 1);
+        vk_queue_lock();
         VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE);
+        vk_queue_unlock();
         if (sr == VK_ERROR_DEVICE_LOST) vk_devlost_dump();
         VK_CHECK(sr);
         PROF_ADD(prof_submit);
@@ -3407,10 +3440,14 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     if ((si->cbuf_dynamic & (1u << k)) && r.size) size = r.size > 0x10000 ? 0x10000 : r.size;
     if (size > r.size && r.size) size = r.size;
     if (size < 16) size = 16;
+    // (frame interpolation, runtime/nvn/interp.c: the frame's copy is logged; a replay binds the logged / blended one -
+    // compared over the bytes the shader reads)
+    uint64_t src = r.addr;
+    if (g_interp_log && stage < 2) src = (uint64_t)(uintptr_t)interp_cbuf(stage, k, idx, (const void *)(uintptr_t)r.addr, size, si->cbuf_size[k]);
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
     // and drops the shared copies).
-    return ubo_span(guest_copy(r.addr, size), size);
+    return ubo_span(guest_copy(src, size), size);
 }
 
 // Global memory (shader LDG/STG, maxwell_gmem_base = HEAP_BASE): the guest heap imported as a GPU buffer
@@ -3823,6 +3860,8 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     wh[0] = wh[1] = 0;
     if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
         NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+        // (frame interpolation: the frame's entry - the game rewrites the pool while replays run)
+        if (g_interp_log && stage < 2) e = (NvnTexEntry *)interp_texentry(stage, i, e, sizeof *e);
         if (e->tex) {
             // Per-frame memo: ~2400 lookups per overworld frame recomputed the view (format / range math, cache
             // probe). The first lookup of a frame still runs vk_view (upload check); a view that may have been
@@ -4081,6 +4120,26 @@ static void draw(CmdRec *r, bool indexed) {
     PROF_ADD(prof_draw);
 }
 static uint64_t prof_tp_;
+
+// (wide screen, draw_) A layout pane that covers the screen: its ui2d vertex uniforms (560 bytes: the projection in
+// floats 0-15, the pane's model-view rows 16-27, its rect 132-135: width, height, left, top; y up) put it across all
+// of the 16:9 screen's -640..640 (a background band, a dimmer, a fade, a captured image), or magnify it 2.5 times or
+// more: the scene transitions' masks (a hole and the black around it, 5 panes scaled about 3 times: stretched
+// together, each alone wouldn't cover the sides; the HUD itself is never above 1).
+static bool ui2d_covers_screen(const float *u, uint64_t size) {
+    if (!u || size != 560) return false;
+    if (!(u[0] > 0) || u[1] != 0 || u[2] != 0 || u[14] != -1 || u[12] != 0 || u[13] != 0) return false;  // (layouts' perspective)
+    float w = u[132], h = u[133], l = u[134], t = u[135];
+    if (!(w > 0) || !(h > 0) || !(w < 1e5f) || !(h < 1e5f)) return false;
+    if (hypotf(u[16], u[20]) >= 2.5f || hypotf(u[17], u[21]) >= 2.5f) return true;
+    float lo = 1e9f, hi = -1e9f;
+    for (int i = 0; i < 4; i++) {
+        float x = l + (i & 1 ? w : 0), y = t - (i & 2 ? h : 0), X = u[16] * x + u[17] * y + u[19];
+        lo = fminf(lo, X), hi = fmaxf(hi, X);
+    }
+    return lo <= -639.0f && hi >= 639.0f;
+}
+
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     g_draw_relaxed = false;
@@ -4097,6 +4156,16 @@ static void draw_(CmdRec *r, bool indexed) {
     ShaderKey vkey, fkey;
     base_keys(&vkey, &fkey);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
+    {   // the game's last copy of its picture into the window (through an 8-bit sRGB view): dithered (translate.c
+        // rt_kind 3; the picture before it has half floats: textures.c "Banding")
+        bool deband = vk_deband();
+        for (int i = 0; deband && i < st.rt.ncolor; i++) {
+            NvnTexture *t = st.rt.color[i];
+            VkFormat vf = t && st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4) ? vk_format(st.rt.cview[i].format) : VK_FORMAT_UNDEFINED;
+            if (t && t->window && fkey.rt_kind[i] == 0 && (vf == VK_FORMAT_R8G8B8A8_SRGB || vf == VK_FORMAT_B8G8R8A8_SRGB))
+                fkey.rt_kind[i] = 3;
+        }
+    }
     Prog *pr = get_program(st.program, &vkey, &fkey);
     if (!pr || !(pr->huge ? atomic_load(&pr->state) == 1 : built(&pr->state))) {  // (a huge one never waits)
         stat_skipped++;
@@ -4139,6 +4208,17 @@ static void draw_(CmdRec *r, bool indexed) {
         for (int i = 0; i < nskip_vs; i++) if (st.program->stages[0].code_addr == skip_vs[i]) { stat_skipped++; return; }
         if (g_debug_frame && getenv("ODYSSEY_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
+    }
+    if (g_interp_log) {  // (frame interpolation, runtime/nvn/interp.c: the draw's identity across frames)
+        // the draw arguments (not the index buffer's address: dynamic geometry's buffers move every frame), the programs
+        // and the target's class (format, depth-only, shape - not its size: the game's dynamic resolution changes it)
+        uint64_t args[7];
+        memcpy(args, r->x, sizeof args);
+        if (indexed) args[3] = 0;
+        NvnTexture *kt = st.rt.ncolor ? st.rt.color[0] : st.rt.depth;
+        uint64_t ids[3] = {st.program->stages[0].code_addr, st.program->stages[1].code_addr,
+                           kt ? (uint64_t)kt->format << 32 | (st.rt.ncolor ? 0 : 1u << 31) | (kt->height ? kt->width * 16 / kt->height : 0) : 0};
+        interp_draw(hmix(hmix(1469598103934665603ull, args, sizeof args), ids, sizeof ids), st.rt.ncolor == 0);
     }
     debug_raw_before(pr);  // (ODYSSEY_RAW_AT_FS: in any frame, the first draw of that program)
     if (g_debug_frame) debug_draw(pr, r, indexed);
@@ -4372,8 +4452,14 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
     {
-        float k = 1.0f;  // (stretch: effects widened with a wider view; none for Odyssey's 16:9)
+        // wide screen (runtime/hle/odyssey_wide.c): the layouts' projection shows the 16:9 screen (-640..640) in the
+        // middle of a wider target. A pane that covers it (ui2d_covers_screen) gets the viewport stretched by the
+        // target's shape about the centre: it covers the whole width again.
+        float k = 1.0f;
+        if (pass_sx > pass_sy * 1.01f && ui2d_covers_screen((const float *)(uintptr_t)st.ubuf[0][0].addr, st.ubuf[0][0].size))
+            k = pass_sx / pass_sy;
         float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
+        if (k > 1.0f) { vx -= vw * (k - 1) / 2; vw *= k; }
         set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
         if (g_debug_frame) {
             VkRect2D sr = scissor_rect();
@@ -4815,9 +4901,10 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     vk_full_barrier(cb);
     VkImage srcimg = b->image;
     VmaAllocation small_mem = NULL;
-    if ((tsx != 1 || tsy != 1) && level == 0 && !renderer_format_is_depth(t->format)) {
-        // the CPU expects guest-sized texels: filter the scaled allocation down first
-        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = b->format,
+    if (((tsx != 1 || tsy != 1) && level == 0 && !renderer_format_is_depth(t->format)) || (b->guest_format && level == 0)) {
+        // the CPU expects guest-sized texels in the game's format: filter the scaled allocation down / convert first
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                                .format = b->guest_format ? b->guest_format : b->format,
                                 .extent = {t->width, t->height, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
                                 .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
@@ -4825,7 +4912,8 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
         vk_image_init_layout(cb, srcimg, VK_IMAGE_ASPECT_COLOR_BIT);
         VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)b->width, (int32_t)b->height, 1}},
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)t->width, (int32_t)t->height, 1}}};
-        vkCmdBlitImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, srcimg, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        vkCmdBlitImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, srcimg, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
+                       tsx != 1 || tsy != 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
         vk_full_barrier(cb);
     }
     bool array = b->layers > 1 && b->depth == 1;
@@ -5433,14 +5521,19 @@ static void exec_list(uint64_t handle, int depth) {
                 clear(-1, 0, NULL, 0, r->x[0] != 0, r->f[0], has_stencil && r->x[2] != 0, (uint32_t)r->x[1], (uint32_t)r->x[2]);
             }
             break;
-        case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); debug_tex_trace("dispatch"); break;
+        case CMD_DISPATCH:
+            if (g_interp_replaying) break;  // (frame interpolation: the frame's compute results are there already)
+            if (g_interp_log) for (int i = 0; i < 16; i++) if (st.sbuf[5][i].addr) interp_dispatch_output(st.sbuf[5][i].addr, st.sbuf[5][i].size);
+            dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); debug_tex_trace("dispatch"); break;
         case CMD_DRAW_ARRAYS: draw(r, false); break;
         case CMD_DRAW_ELEMENTS: draw(r, true); break;
         case CMD_UPDATE_UNIFORM_BUFFER:
+            if (g_interp_replaying) break;  // (a replay's draws read their logged / blended uniforms)
             memcpy((void *)(uintptr_t)(r->x[0] + r->x[2]), x, r->x[3]);
             guest_copy_flush();  // (cbuf copies shared within the submission are stale now)
             break;
         case CMD_FENCE_SYNC: {
+            if (g_interp_replaying) break;  // (replays leave the game's fences, counters and memory alone)
             static int fence_flush = -1;
             if (fence_flush < 0) fence_flush = getenv("ODYSSEY_FENCE_FLUSH") ? 1 : 0;
             if (fence_flush) renderer_flush();
@@ -5449,6 +5542,7 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_REPORT_COUNTER: {
+            if (g_interp_replaying) break;
             // The game times its GPU work with these (two per frame) and drops to 30 fps when that looks slow: the
             // host clock now, replaced by the GPU's time at this point once the submission is done (cq_resolve).
             uint64_t *out = (uint64_t *)(uintptr_t)r->x[1];
@@ -5492,8 +5586,9 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_COPY_TEXTURE_TO_TEXTURE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], r->x[6]); debug_tex_trace("copy"); break; }
         case CMD_DOWNSAMPLE: { const TexRefRec *t = x; copy_texture(&t[0], &t[1], 1); break; }
         case CMD_COPY_BUFFER_TO_TEXTURE: copy_buffer_to_texture(r->x[0], x); debug_tex_trace("upload copy"); break;
-        case CMD_COPY_TEXTURE_TO_BUFFER: copy_texture_to_buffer(x, r->x[3]); break;
+        case CMD_COPY_TEXTURE_TO_BUFFER: if (!g_interp_replaying) copy_texture_to_buffer(x, r->x[3]); break;
         case CMD_COPY_BUFFER_TO_BUFFER:
+            if (g_interp_replaying) break;
             wait_why = "buffer -> buffer copy";
             renderer_flush();
             memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);
@@ -5536,8 +5631,37 @@ static void prefetch_programs(uint64_t handle, int depth) {
     }
 }
 
-void backend_execute(uint64_t handle) {
+// Frame interpolation (runtime/nvn/interp.c): a replay of the frame's lists with the logged (blended) uniforms, from the
+// executor's state at the frame's first list (saved with the frame: the interpolation thread replays frame N while the
+// game logs N + 1) - the game's own state is restored after it.
+void renderer_interp_replay(void) {
+    const uint64_t *h;
+    uint32_t n = interp_handles(&h);
+    size_t sn;
+    const void *s0 = interp_frame_state(&sn);
+    if (!s0 || sn != sizeof st) return;
     vk_render_lock();
+    __typeof__(st) st_end = st;
+    bool log = g_interp_log;
+    memcpy(&st, s0, sizeof st);
+    st.rt_dirty = true;
+    g_interp_log = true;
+    interp_replay_begin();
+    for (uint32_t i = 0; i < n; i++) exec_list(h[i], 0);
+    vk_end_pass();
+    renderer_submit();
+    interp_replay_end();
+    g_interp_log = log;
+    st = st_end;
+    st.rt_dirty = true;
+    vk_render_unlock();
+}
+
+void backend_execute(uint64_t handle) {
+    extern void interp_wait_replay(void);
+    interp_wait_replay();  // (device.c: the previous frame's replay first - its draws must not interleave with these)
+    vk_render_lock();
+    if (interp_list_submitted(handle)) interp_frame_state_save(&st, sizeof st);
     PROF_T0();
     static int prefetch = -1;  // ODYSSEY_PREFETCH=0: off
     if (prefetch < 0) { const char *e = getenv("ODYSSEY_PREFETCH"); prefetch = !e || atoi(e) != 0; }

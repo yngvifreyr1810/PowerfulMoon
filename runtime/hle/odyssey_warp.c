@@ -218,7 +218,11 @@ void odyssey_boot(void) {
     static bool hooked;  // (always: the scene warm-up needs it too)
     if (hooked) return;
     hooked = true;
-    uint64_t control = guest_sym("_ZN10StageScene7controlEv"), init = guest_sym("_ZN10StageScene4initERKN2al13SceneInitInfoE");
+    uint64_t control = loader_find_symbol("_ZN10StageScene7controlEv"), init = loader_find_symbol("_ZN10StageScene4initERKN2al13SceneInitInfoE");
+    if (!control || !init) {  // (a version without names: no warps, and every scene is warmed up as the title is)
+        LOG("[warp] StageScene::control / init not found: no stage hooks\n");
+        return;
+    }
     g_control = dispatch_lookup(control);
     g_init = dispatch_lookup(init);
     hle_override(control, stage_scene_control, "StageScene::control (hooks)");

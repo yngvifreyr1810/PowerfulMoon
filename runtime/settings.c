@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "hle.h"
 #include "input_bind.h"
@@ -23,6 +26,8 @@ Settings g_settings = {
     .show_fps = false,
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
     .motion = true, .rumble = true, .hd_rumble = true, .rumble_strength = 1.0f,
+    .deband = true,
+    .interpolation_output = 120,
 };
 
 // The game's own text languages: its RomFS carries these per region (regionUS/USen|USes|USfr, regionEU/EUen|EUes|...,
@@ -87,6 +92,53 @@ void settings_set_mod_off(const char *id, bool off) {
     g_mod_off[g_nmod_off++] = strdup(id);
 }
 
+// Keep controller preferences outside the upstream settings writer. A stock upstream
+// update can rewrite powermoon.ini without erasing this fork's motion/rumble choices.
+static const char *controller_file(void) {
+    static char path[1200];
+    snprintf(path, sizeof path, "%s.controller.ini", settings_file());
+    return path;
+}
+
+static bool controller_setting(const char *key, const char *val) {
+    if (!strcmp(key,"motion")) g_settings.motion=atoi(val)!=0;
+    else if (!strcmp(key,"rumble")) g_settings.rumble=atoi(val)!=0;
+    else if (!strcmp(key,"hd_rumble")) g_settings.hd_rumble=atoi(val)!=0;
+    else if (!strcmp(key,"rumble_strength")) {
+        float v=(float)atof(val); g_settings.rumble_strength=v>=0 && v<=2?v:1;
+    } else if (!bind_settings_load(key,val)) return false;
+    return true;
+}
+
+static void controller_load(void) {
+    FILE *f=fopen(controller_file(),"r");
+    if (!f) return;
+    char line[700],key[64],val[600];
+    while (fgets(line,sizeof line,f)) {
+        if (sscanf(line," %63[^= ] = %599[^\n]",key,val)<2) continue;
+        for (size_t n=strlen(val); n && (val[n-1]==' ' || val[n-1]=='\r'); n--) val[n-1]=0;
+        controller_setting(key,val);
+    }
+    fclose(f);
+}
+
+static void controller_save(void) {
+    char temp[1250]; snprintf(temp,sizeof temp,"%s.tmp",controller_file());
+    FILE *f=fopen(temp,"w");
+    if (!f) { LOG("[settings] cannot save controller profile\n"); return; }
+    fprintf(f,"# PowerMoon-Switch2Pro controller profile; survives stock upstream settings saves\n");
+    fprintf(f,"motion = %d\nrumble = %d\nhd_rumble = %d\nrumble_strength = %.6g\n",
+            g_settings.motion,g_settings.rumble,g_settings.hd_rumble,g_settings.rumble_strength);
+    bind_settings_save(f);
+    if (fclose(f)!=0) { remove(temp); return; }
+#ifdef _WIN32
+    if (!MoveFileExA(temp,controller_file(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
+        LOG("[settings] cannot replace controller profile\n");
+#else
+    if (rename(temp,controller_file())!=0) LOG("[settings] cannot replace controller profile\n");
+#endif
+}
+
 void settings_load(void) {
     static bool loaded;
     if (loaded) return;
@@ -94,7 +146,7 @@ void settings_load(void) {
     FILE *f = fopen(SETTINGS_FILE, "r");
     if (!f && !getenv("ODYSSEY_SETTINGS")) f = fopen("odyssey.ini", "r");  // (the settings of the earlier builds)
     if (!f && !getenv("ODYSSEY_SETTINGS")) f = fopen("larecomp.ini", "r");
-    if (!f) return;
+    if (!f) { controller_load(); controller_save(); return; }
     char line[700];
     while (fgets(line, sizeof line, f)) {
         char key[64];
@@ -119,6 +171,11 @@ void settings_load(void) {
         }
         else if (!strcmp(key, "upscaler")) g_settings.upscaler = !strcmp(val, "bilinear") ? UPSCALE_BILINEAR : UPSCALE_SHARP;  // (metalfx / fsr1: this OS's)
         else if (!strcmp(key, "antialias")) g_settings.antialias = !strcmp(val, "off") ? AA_OFF : AA_SMAA;
+        else if (!strcmp(key, "deband")) g_settings.deband = atoi(val) != 0;
+        else if (!strcmp(key, "aspect")) g_settings.aspect = !strcmp(val, "fill") ? ASPECT_FILL : ASPECT_16_9;
+        else if (!strcmp(key,"interpolation_output")) g_settings.interpolation_output=!strcmp(val,"120") ? 120 : 0;
+        else if (!strcmp(key,"vsync")) g_settings.vsync=!strcmp(val,"on") ? 1 : !strcmp(val,"off") ? 2 : 0;
+        else if (!strcmp(key, "frame_interp")) g_settings.frame_interp = atoi(val) != 0;
         else if (!strcmp(key, "language")) {  // ("auto" or one of the game's codes; anything else: auto)
             g_settings.language = LANG_AUTO;
             for (int i = 1; i < N_LANGUAGES; i++)
@@ -129,10 +186,13 @@ void settings_load(void) {
     fclose(f);
     if (g_settings.volume < 0) g_settings.volume = 0;
     if (g_settings.volume > 2) g_settings.volume = 2;
-    LOG("[settings] loaded\n");
+    controller_load();
+    controller_save();
+    LOG("[settings] loaded; controller profile retained\n");
 }
 
 void settings_save(void) {
+    controller_save();
     FILE *f = fopen(SETTINGS_FILE, "w");
     if (!f) { LOG("[settings] cannot write %s\n", SETTINGS_FILE); return; }
     fprintf(f, "# Power Moon Recomp settings (edited from the in-game menu: F1, Esc, or the controller's Home button)\n");
@@ -145,6 +205,11 @@ void settings_save(void) {
     fprintf(f, "hd_rumble = %d\n",g_settings.hd_rumble);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_METALFX ? "metalfx" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
     fprintf(f, "antialias = %s\n", g_settings.antialias == AA_SMAA ? "smaa" : "off");
+    fprintf(f, "deband = %d\n", g_settings.deband);
+    fprintf(f, "aspect = %s\n", g_settings.aspect == ASPECT_FILL ? "fill" : "16:9");
+    fprintf(f, "frame_interp = %d\n", g_settings.frame_interp);
+    fprintf(f,"interpolation_output = %s\n",g_settings.interpolation_output==120 ? "120" : "auto");
+    fprintf(f,"vsync = %s\n",g_settings.vsync==1 ? "on" : g_settings.vsync==2 ? "off" : "auto");
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
     else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");
     else if (g_settings.res_mode == RES_Q25) fprintf(f, "resolution = 25%%\n");

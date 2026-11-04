@@ -220,9 +220,8 @@ bool bind_settings_load(const char *key, const char *val) {
 
 void bind_settings_save(FILE *f) {
     for (int i = 0; i < BIND_PAD_COUNT; i++)
-        if (g_bind_pad[i] != k_def_pad[i] && g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT)
+        if (g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT)
             fprintf(f, "bind_pad_%s = %s\n", k_ini[i], k_pad_ini[g_bind_pad[i]]);
     for (int i = 0; i < BIND_KEY_COUNT; i++)
-        if (g_bind_key[i] != k_def_key[i])
-            fprintf(f, "bind_key_%s = %s\n", k_ini[i], g_bind_key[i] ? SDL_GetScancodeName((SDL_Scancode)g_bind_key[i]) : "none");
+        fprintf(f, "bind_key_%s = %s\n", k_ini[i], g_bind_key[i] ? SDL_GetScancodeName((SDL_Scancode)g_bind_key[i]) : "none");
 }
