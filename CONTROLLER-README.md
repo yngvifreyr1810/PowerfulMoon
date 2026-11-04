@@ -15,13 +15,13 @@ The project executable is unsigned; antivirus protection should remain enabled.
 ## Easy Windows update
 
 1. Set up [ProCon2Bridge](https://github.com/yngvifreyr1810/ProCon2Bridge/releases) once:
-   extract its Windows ZIP, double-click START.cmd, then hold SYNC on the controller.
-2. Download **PowerMoon-Switch2Pro-0.1.6-s2pc.1-windows-x64-update.zip** from
+   extract its Windows ZIP, double-click ProCon2Bridge-Start.cmd, then hold SYNC on the controller.
+2. Download **PowerMoon-Switch2Pro-0.1.6-s2pc.2-windows-x64-update.zip** from
    [Releases](https://github.com/yngvifreyr1810/PowerMoon-Switch2Pro/releases), and extract.
 3. Save and close your existing **Power Moon Recomp 0.1.6**. Double-click
-   **INSTALL.cmd**, select its PowerMoonRecomp.exe. The installer verifies the supported
+   **PowerMoon-Switch2Pro-Install.cmd**, select its PowerMoonRecomp.exe. The installer verifies the supported
    runtime, backs up the two affected program files and installs the update.
-4. Use **PLAY.cmd** in the update folder thereafter. It remembers your selected game
+4. Use **PowerMoon-Switch2Pro-Play.cmd** in the update folder thereafter. It remembers your selected game
    folder, asks for the bridge folder once if needed, starts the bridge and launches
    the game. No Python, compiler or manual settings editing is needed.
 
@@ -41,8 +41,8 @@ HD Rumble / HD Rumble 2**. See [CONTROLLER-NOTES.md](CONTROLLER-NOTES.md).
 
 ## Restore
 
-Close the game, run **RESTORE.cmd** from this update folder and choose the same
-PowerMoonRecomp.exe. It restores the most recent complete backup made by INSTALL.cmd.
+Close the game, run **PowerMoon-Switch2Pro-Restore.cmd** from this update folder and choose the same
+PowerMoonRecomp.exe. It restores the most recent complete backup made by PowerMoon-Switch2Pro-Install.cmd.
 Your save, settings, cache and own game files are not part of this update.
 
 ## Source, licenses and content policy

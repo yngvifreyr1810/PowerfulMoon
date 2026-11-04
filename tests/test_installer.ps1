@@ -4,8 +4,8 @@ $env:PSModulePath=(Join-Path $PSHOME 'Modules')+[IO.Path]::PathSeparator+$env:PS
 $scratch=Join-Path $env:TEMP ('PowerMoon-installer-test-'+[guid]::NewGuid().ToString('N'))
 $package=Join-Path $scratch 'package';$game=Join-Path $scratch 'game'
 New-Item -ItemType Directory -Path $package,$game,(Join-Path $package 'payload') -Force | Out-Null
-$installer=Join-Path $package 'Controller-Setup.ps1'
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../tools/windows/Controller-Setup.ps1') -Destination $installer
+$installer=Join-Path $package 'PowerMoon-Switch2Pro-Setup.ps1'
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../tools/windows/PowerMoon-Switch2Pro-Setup.ps1') -Destination $installer
 $exe=Join-Path $game 'PowerMoonRecomp.exe'
 Set-Content -LiteralPath $exe -Value 'synthetic original host'
 $original=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash

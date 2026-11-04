@@ -63,13 +63,13 @@ Known issues:
 
 ## Building from source
 
-Needs MSYS2 (clang, SDL3, FFmpeg, shaderc) and Python 3.12 - `tools\setup_windows.ps1` installs them.
+Needs MSYS2 (clang, SDL3, FFmpeg, shaderc) and Python 3.12 - `tools\PowerMoon-Switch2Pro-Setup-Build-Environment.ps1` installs them.
 
 1. Put the game files into `extracted\` in this folder: `extracted\exefs\` (main, sdk, subsdk0, rtld, main.npdm) and
    `extracted\romfs\`. Disable updates and mods when dumping: `main` must be 1.0.0 (build id `3ca12dfaaf9c82da`).
 2. One-time toolchain setup, in PowerShell from this folder:
 
-       powershell -ExecutionPolicy Bypass -File tools\setup_windows.ps1
+       powershell -ExecutionPolicy Bypass -File tools\PowerMoon-Switch2Pro-Setup-Build-Environment.ps1
 
 3. Build, from Git Bash (or an MSYS2 UCRT64 shell) with MSYS2 first on PATH:
 

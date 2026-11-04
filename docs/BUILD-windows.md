@@ -3,7 +3,7 @@
 ## One-time setup
 Run in PowerShell from the repo root:
 
-    powershell -ExecutionPolicy Bypass -File tools\setup_windows.ps1
+    powershell -ExecutionPolicy Bypass -File tools\PowerMoon-Switch2Pro-Setup-Build-Environment.ps1
 
 This installs MSYS2 (UCRT64: clang, lld, make, SDL3, FFmpeg, Vulkan loader + headers, shaderc, Vulkan Memory
 Allocator, validation layers), Python 3.12 for the tools (`tools\venv`: unicorn, capstone, lz4) and switches the clone

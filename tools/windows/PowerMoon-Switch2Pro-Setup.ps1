@@ -36,15 +36,15 @@ try {
     if ($Mode -eq 'Play') {
         if (-not (Test-BridgeRunning)) {
             if (-not $BridgeDirectory) { $BridgeDirectory=$local.bridge }
-            if (-not $BridgeDirectory -or -not (Test-Path -LiteralPath (Join-Path $BridgeDirectory 'START.cmd'))) {
+            if (-not $BridgeDirectory -or -not (Test-Path -LiteralPath (Join-Path $BridgeDirectory 'ProCon2Bridge-Start.cmd'))) {
                 $bridgeExe=Select-Program 'Choose ProCon2Bridge.exe from the extracted bridge download' 'ProCon2Bridge.exe'
                 $BridgeDirectory=[IO.Path]::GetDirectoryName($bridgeExe)
             }
             $local.bridge=$BridgeDirectory
-            # START.cmd handles the first signed-driver setup and clear status messages.
-            Start-Process -FilePath (Join-Path $BridgeDirectory 'START.cmd') -WorkingDirectory $BridgeDirectory -WindowStyle Hidden
+            # ProCon2Bridge-Start.cmd handles the first signed-driver setup and clear status messages.
+            Start-Process -FilePath (Join-Path $BridgeDirectory 'ProCon2Bridge-Start.cmd') -WorkingDirectory $BridgeDirectory -WindowStyle Hidden
             for ($attempt=0;$attempt -lt 30 -and -not (Test-BridgeRunning);$attempt++) { Start-Sleep -Milliseconds 500 }
-            if (-not (Test-BridgeRunning)) { throw 'Bridge not ready. Run its START.cmd once and finish driver setup, then use PLAY.cmd again.' }
+            if (-not (Test-BridgeRunning)) { throw 'Bridge not ready. Run its ProCon2Bridge-Start.cmd once and finish driver setup, then use PowerMoon-Switch2Pro-Play.cmd again.' }
         }
         $local | ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UTF8
         Start-Process -FilePath $ExecutablePath -WorkingDirectory $gameRoot -WindowStyle Normal
@@ -79,10 +79,10 @@ try {
     if ($current -eq $manifest.files[0].sha256) {
         foreach ($file in $manifest.files) {
             $target=Join-Path $gameRoot $file.name
-            if (-not (Test-Path -LiteralPath $target) -or (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $file.sha256) { throw 'The installed update is incomplete. Run RESTORE.cmd, then INSTALL.cmd again.' }
+            if (-not (Test-Path -LiteralPath $target) -or (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $file.sha256) { throw 'The installed update is incomplete. Run PowerMoon-Switch2Pro-Restore.cmd, then PowerMoon-Switch2Pro-Install.cmd again.' }
         }
         $local | ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UTF8
-        Write-Host 'This controller update is already installed. Use PLAY.cmd.'
+        Write-Host 'This controller update is already installed. Use PowerMoon-Switch2Pro-Play.cmd.'
         exit 0
     }
     if ($current -notin $manifest.supportedOriginalHashes) { throw 'Unsupported program version. This update supports the original Windows Power Moon Recomp 0.1.6 runtime only.' }
@@ -108,7 +108,7 @@ try {
         throw
     }
     $local | ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UTF8
-    Write-Host 'Installed. Use PLAY.cmd to start. RESTORE.cmd returns to the backed-up program.'
+    Write-Host 'Installed. Use PowerMoon-Switch2Pro-Play.cmd to start. PowerMoon-Switch2Pro-Restore.cmd returns to the backed-up program.'
 } catch {
     Write-Host $_.Exception.Message -ForegroundColor Red
     exit 1

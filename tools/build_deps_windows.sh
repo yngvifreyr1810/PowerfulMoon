@@ -4,7 +4,7 @@
 # release uses an LGPL-only FFmpeg with just what the game's movies need - Odyssey's are MP4 (H.264 + AAC), plus
 # VP9 / VP8 / Vorbis / Opus in WebM or MP4 - and swscale.
 # SDL3 (zlib licence) and the compiler runtime DLLs still come from MSYS2.
-# Needs: the packages from tools/setup_windows.ps1 (clang, make, nasm). Skipped when its output exists
+# Needs: the packages from tools/PowerMoon-Switch2Pro-Setup-Build-Environment.ps1 (clang, make, nasm). Skipped when its output exists
 # (delete build/deps-win to redo).
 set -euo pipefail
 cd "$(dirname "$0")/.."
