@@ -162,6 +162,16 @@ uint64_t plat_private_bytes(void) {
     return K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&m, sizeof m) ? m.PrivateUsage : 0;
 }
 
+uint64_t plat_resident_bytes(void) {
+    PROCESS_MEMORY_COUNTERS m = {.cb = sizeof m};
+    return K32GetProcessMemoryInfo(GetCurrentProcess(), &m, sizeof m) ? m.WorkingSetSize : 0;
+}
+
+uint64_t plat_total_ram(void) {
+    MEMORYSTATUSEX m = {.dwLength = sizeof m};
+    return GlobalMemoryStatusEx(&m) ? m.ullTotalPhys : 0;
+}
+
 uint64_t plat_heap_bytes(void) {  // (committed in the process's heaps: malloc, and drivers' own heaps)
     HANDLE h[64];
     DWORD n = GetProcessHeaps(64, h);
@@ -275,7 +285,13 @@ void plat_init(void) {
     _setmode(_fileno(stderr), _O_BINARY);
     SetConsoleOutputCP(CP_UTF8);
     // ODYSSEY_AFFINITY=<mask> (tests): only these logical processors, as on a CPU with fewer cores (0x55: 4 cores, 0x5: 2)
-    if (getenv("ODYSSEY_AFFINITY")) SetProcessAffinityMask(GetCurrentProcess(), (DWORD_PTR)strtoull(getenv("ODYSSEY_AFFINITY"), NULL, 0));
+    const char *affinity = getenv("ODYSSEY_AFFINITY");
+    if (affinity) {
+        DWORD_PTR mask = (DWORD_PTR)strtoull(affinity, NULL, 0);
+        if (!SetProcessAffinityMask(GetCurrentProcess(), mask))
+            fprintf(stderr, "[cpu] could not set affinity %s (Windows error %lu)\n", affinity, (unsigned long)GetLastError());
+        else fprintf(stderr, "[cpu] affinity 0x%llx\n", (unsigned long long)mask);
+    }
     timeBeginPeriod(1);  // 1 ms Sleep / condition-variable timeouts (default 15.6 ms)
     // Opt out of EcoQoS and of Windows 11 ignoring the timer resolution while the window is occluded.
     PROCESS_POWER_THROTTLING_STATE pt = {
@@ -321,28 +337,50 @@ static void append_arg(char *out, size_t cap, const char *a) {
 // No exec() on Windows: start the new process with the same console / standard handles and stand in for it until it
 // ends (its exit code becomes ours). A job object takes it down with this process: whoever started us (a script's
 // kill, a closed console) stops the game, not just this stand-in - exiting at once left the game running unseen.
+// (The job is given at creation, not by starting the process suspended and assigning it: see spawn_child.)
+#ifndef PROC_THREAD_ATTRIBUTE_JOB_LIST
+#define PROC_THREAD_ATTRIBUTE_JOB_LIST 0x0002000D
+#endif
 void plat_exec(char *const argv[]) {
-    STARTUPINFOW si = {.cb = sizeof si};
     PROCESS_INFORMATION pi;
-    BOOL ok;
+    BOOL ok = FALSE;
     fflush(stdout);
     fflush(stderr);
+    static wchar_t wcmd[32768];
     if (!argv) {
-        ok = CreateProcessW(NULL, GetCommandLineW(), NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &si, &pi);
+        wcsncpy(wcmd, GetCommandLineW(), 32767);
+        wcmd[32767] = 0;
     } else {
         static char cmd[32768];
         cmd[0] = 0;
         for (int i = 0; argv[i]; i++) append_arg(cmd, sizeof cmd, argv[i]);
-        static wchar_t wcmd[32768];
         MultiByteToWideChar(CP_UTF8, 0, cmd, -1, wcmd, 32768);
-        ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &si, &pi);
     }
-    if (!ok) return;
     HANDLE job = CreateJobObjectW(NULL, NULL);  // (kept open until we exit: closing it kills the job's processes)
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = {.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
-    if (job && SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li))
-        AssignProcessToJobObject(job, pi.hProcess);
-    ResumeThread(pi.hThread);
+    if (job && !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li)) { CloseHandle(job); job = NULL; }
+    STARTUPINFOEXW six = {.StartupInfo = {.cb = sizeof six}};
+    SIZE_T size = 0;
+    if (job) {
+        InitializeProcThreadAttributeList(NULL, 1, 0, &size);
+        six.lpAttributeList = size ? (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(size) : NULL;
+        if (!six.lpAttributeList || !InitializeProcThreadAttributeList(six.lpAttributeList, 1, 0, &size) ||
+            !UpdateProcThreadAttribute(six.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &job, sizeof job, NULL, NULL)) {
+            free(six.lpAttributeList);
+            six.lpAttributeList = NULL;
+        }
+    }
+    if (six.lpAttributeList)
+        ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &six.StartupInfo, &pi);
+    if (!ok) {
+        STARTUPINFOW si = {.cb = sizeof si};
+        ok = CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    }
+    if (six.lpAttributeList) {
+        DeleteProcThreadAttributeList(six.lpAttributeList);
+        free(six.lpAttributeList);
+    }
+    if (!ok) return;
     CloseHandle(pi.hThread);
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD code = 0;
@@ -452,6 +490,9 @@ ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) { return prw(fd, (v
 #ifndef PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY
 #define PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY 0x00020007
 #endif
+#ifndef PROC_THREAD_ATTRIBUTE_JOB_LIST
+#define PROC_THREAD_ATTRIBUTE_JOB_LIST 0x0002000D
+#endif
 #ifndef PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF
 #define PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF (0x00000002ull << 40)
 #endif
@@ -490,45 +531,54 @@ static PlatProc spawn_child(const char *const argv[], const char *log_path, bool
     MultiByteToWideChar(CP_UTF8, 0, argv[0], -1, wprog, MAX_PATH);
     for (wchar_t *p = wprog; *p; p++) if (*p == L'/') *p = L'\\';
     const wchar_t *app = GetFullPathNameW(wprog, MAX_PATH, wfull, NULL) ? wfull : NULL;
-    BOOL ok = FALSE;
-    if (no_cfg) {
-        *no_cfg = ERROR_NOT_SUPPORTED;
-        STARTUPINFOEXW six = {.StartupInfo = si};
-        six.StartupInfo.cb = sizeof six;
-        DWORD64 policy[2] = {PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF, 0};
-        SIZE_T size = 0;
-        InitializeProcThreadAttributeList(NULL, 1, 0, &size);
-        six.lpAttributeList = size ? (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(size) : NULL;
-        if (!six.lpAttributeList || !InitializeProcThreadAttributeList(six.lpAttributeList, 1, 0, &size)) {
-            *no_cfg = six.lpAttributeList ? GetLastError() : ERROR_NOT_ENOUGH_MEMORY;
-            free(six.lpAttributeList);
-            six.lpAttributeList = NULL;
-        } else if (!UpdateProcThreadAttribute(six.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, policy,
-                                              sizeof policy, NULL, NULL)) {
-            *no_cfg = GetLastError();
-        } else {
-            ok = CreateProcessW(app, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
-                                NULL, NULL, &six.StartupInfo, &pi);
-            *no_cfg = ok ? 0 : GetLastError();  // (older Windows: ERROR_INVALID_PARAMETER; or a policy refuses it)
-        }
-        if (six.lpAttributeList) {
-            DeleteProcThreadAttributeList(six.lpAttributeList);
-            free(six.lpAttributeList);
-        }
-    }
-    if (!ok) ok = CreateProcessW(app, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, NULL, &si, &pi);
-    if (!ok) fprintf(stderr, "[plat] could not start %s (error %lu)\n", argv[0], GetLastError());
-    CloseHandle(log);
-    if (!ok) return 0;
-    // every child in one job that ends with this process (a compiler's own children too: no leftovers on quit)
+    // Every child in one job that ends with this process (a compiler's own children too: no leftovers on quit). The job
+    // is given at creation (PROC_THREAD_ATTRIBUTE_JOB_LIST), so the child starts running normally: creating children
+    // suspended and resuming them later - with a mitigation policy changed - is what Windows Defender's behaviour
+    // model takes for process injection (Trojan:Win32/Bearfoos.A!ml on the shader preparation's start, 2026-11-11).
     static HANDLE job;
     if (!job && (job = CreateJobObjectW(NULL, NULL))) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = {0};
         li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li);
     }
-    if (job) AssignProcessToJobObject(job, pi.hProcess);
-    ResumeThread(pi.hThread);
+    BOOL ok = FALSE;
+    if (no_cfg) *no_cfg = ERROR_NOT_SUPPORTED;
+    for (int attempt = 0; !ok && attempt < 3; attempt++) {
+        // attempt 0: the job (and CFG off where asked); 1: the job only; 2: neither (older Windows)
+        bool with_job = job && attempt < 2, with_policy = no_cfg && attempt == 0;
+        if (attempt == 1 && !no_cfg) continue;  // (the same as attempt 0)
+        STARTUPINFOEXW six = {.StartupInfo = si};
+        six.StartupInfo.cb = sizeof six;
+        DWORD64 policy[2] = {PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF, 0};
+        int nattr = with_job + with_policy;
+        SIZE_T size = 0;
+        if (nattr) {
+            InitializeProcThreadAttributeList(NULL, nattr, 0, &size);
+            six.lpAttributeList = size ? (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(size) : NULL;
+            bool set = six.lpAttributeList && InitializeProcThreadAttributeList(six.lpAttributeList, nattr, 0, &size);
+            if (set && with_job)
+                set = UpdateProcThreadAttribute(six.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &job, sizeof job, NULL, NULL);
+            if (set && with_policy)
+                set = UpdateProcThreadAttribute(six.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, policy,
+                                                sizeof policy, NULL, NULL);
+            if (!set) {
+                if (with_policy) *no_cfg = GetLastError();
+                if (six.lpAttributeList) DeleteProcThreadAttributeList(six.lpAttributeList);
+                free(six.lpAttributeList);
+                continue;
+            }
+        }
+        ok = CreateProcessW(app, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW | (nattr ? EXTENDED_STARTUPINFO_PRESENT : 0),
+                            NULL, NULL, &six.StartupInfo, &pi);
+        if (with_policy) *no_cfg = ok ? 0 : GetLastError();  // (older Windows: ERROR_INVALID_PARAMETER; or a policy refuses it)
+        if (six.lpAttributeList) {
+            DeleteProcThreadAttributeList(six.lpAttributeList);
+            free(six.lpAttributeList);
+        }
+    }
+    if (!ok) fprintf(stderr, "[plat] could not start %s (error %lu)\n", argv[0], GetLastError());
+    CloseHandle(log);
+    if (!ok) return 0;
     CloseHandle(pi.hThread);
     return (PlatProc)pi.hProcess;
 }

@@ -19,7 +19,7 @@
 
 static mach_timebase_info_data_t tb;
 
-// Started from Finder there is no terminal: stdout / stderr go to PowerMoonRecomp.log in the data folder
+// Started from Finder there is no terminal: stdout / stderr go to PowerfulMoon.log in the data folder
 // (~/Library/Application Support/<bundle id>, runtime/paths.h; rt_paths_init runs later, so the same rule is applied
 // here). Processes started by this one (the re-exec for a fresh address layout) append to the same log.
 #include <sys/stat.h>
@@ -37,7 +37,7 @@ static void log_to_file_without_terminal(void) {
     for (char *c = dir + 1; *c; c++)
         if (*c == '/') { *c = 0; mkdir(dir, 0755); *c = '/'; }
     mkdir(dir, 0755);
-    snprintf(path, sizeof path, "%s/PowerMoonRecomp.log", dir);
+    snprintf(path, sizeof path, "%s/PowerfulMoon.log", dir);
     bool append = getenv("ODYSSEY_LOG_APPEND") != NULL;
     if (!freopen(path, append ? "a" : "w", stderr)) return;
     snprintf(g_log_path, sizeof g_log_path, "%s", path);
@@ -118,6 +118,8 @@ const char *plat_symbol(uint64_t pc, uint64_t *offset) {
 }
 
 uint64_t plat_private_bytes(void) { return 0; }
+uint64_t plat_resident_bytes(void) { return 0; }
+uint64_t plat_total_ram(void) { return 0; }
 uint64_t plat_guest_bytes(void) { return 0; }
 uint64_t plat_heap_bytes(void) { return 0; }
 void plat_heap_histogram(void) {}
