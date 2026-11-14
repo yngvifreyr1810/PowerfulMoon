@@ -140,4 +140,6 @@ void settings_save(void);
 void settings_battery_saver(void);
 const char *settings_language(void);
 const char *settings_language_name(void);
+bool settings_mod_off(const char *id);
+void settings_set_mod_off(const char *id, bool off);
 int settings_aniso_at_start(void);

@@ -360,7 +360,6 @@ void input_handle_event(const SDL_Event *e) {
         recompute_pad();
         break;
     case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
-        motion_event(&e->gsensor);
         break;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
         if (!pad || SDL_GetGamepadID(pad) != e->gbutton.which) use_pad(SDL_GetGamepadFromID(e->gbutton.which));
