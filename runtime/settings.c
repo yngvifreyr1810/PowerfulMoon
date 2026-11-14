@@ -12,7 +12,15 @@
 #include "input_bind.h"
 #include "platform.h"
 
-#define SETTINGS_FILE settings_file()
+#ifdef __has_include
+#if __has_include(<SDL3/SDL.h>)
+#include <SDL3/SDL.h>
+#else
+int SDL_GetSystemRAM(void);
+#endif
+#else
+int SDL_GetSystemRAM(void);
+#endif
 
 // ODYSSEY_SETTINGS=<path>: another settings file (test runs never touch the player's powermoon.ini)
 static const char *settings_file(void) {
