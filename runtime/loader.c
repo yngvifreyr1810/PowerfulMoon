@@ -3,6 +3,8 @@
 #include <string.h>
 
 #include "rt.h"
+#include "romfs_read.h"
+#include "odyssey_v141.h"
 
 Module g_modules[4];
 int g_nmodules;
@@ -13,7 +15,7 @@ Game g_game;
 // 1.0.0" instead of a crash)
 static const struct { Game game; const char *name; uint8_t id[8]; bool dev; } KNOWN_GAMES[] = {
     {GAME_ODYSSEY, "Super Mario Odyssey v1.0.0", {0x3c, 0xa1, 0x2d, 0xfa, 0xaf, 0x9c, 0x82, 0xda}, false},
-    {GAME_ODYSSEY, "Super Mario Odyssey v1.4.1", {0xb4, 0x24, 0xbe, 0x15, 0x0a, 0x8e, 0x7d, 0x78}, true},
+    {GAME_ODYSSEY, "Super Mario Odyssey v1.4.1", {0xb4, 0x24, 0xbe, 0x15, 0x0a, 0x8e, 0x7d, 0x78}, false},
 };
 static bool known(unsigned i) { return !KNOWN_GAMES[i].dev || getenv("ODYSSEY_DEV_VERSIONS"); }
 
@@ -30,18 +32,25 @@ static size_t lz4_decompress(const uint8_t *src, size_t srclen, uint8_t *dst, si
     while (s < se) {
         uint8_t tok = *s++;
         size_t lit = tok >> 4;
-        if (lit == 15) { uint8_t b; do { b = *s++; lit += b; } while (b == 255); }
-        if (d + lit > de || s + lit > se) break;
+        if (lit == 15) {
+            uint8_t b;
+            do { if (s == se) return 0; b = *s++; lit += b; } while (b == 255);
+        }
+        if (lit > (size_t)(de - d) || lit > (size_t)(se - s)) return 0;
         memcpy(d, s, lit);
         d += lit; s += lit;
         if (s >= se) break;
+        if (se - s < 2) return 0;
         size_t off = s[0] | (s[1] << 8);
         s += 2;
         size_t ml = tok & 15;
-        if (ml == 15) { uint8_t b; do { b = *s++; ml += b; } while (b == 255); }
+        if (ml == 15) {
+            uint8_t b;
+            do { if (s == se) return 0; b = *s++; ml += b; } while (b == 255);
+        }
         ml += 4;
+        if (!off || off > (size_t)(d - dst) || ml > (size_t)(de - d)) return 0;
         uint8_t *m = d - off;
-        if (m < dst || d + ml > de) break;
         while (ml--) *d++ = *m++;
     }
     return d - dst;
@@ -50,13 +59,38 @@ static size_t lz4_decompress(const uint8_t *src, size_t srclen, uint8_t *dst, si
 static uint8_t *read_file(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    *len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    uint8_t *p = malloc(*len);
-    fread(p, 1, *len, f);
+    long size = fseek(f, 0, SEEK_END) == 0 ? ftell(f) : -1;
+    uint8_t *p = size > 0 && fseek(f, 0, SEEK_SET) == 0 ? malloc((size_t)size) : NULL;
+    if (p && fread(p, 1, (size_t)size, f) != (size_t)size) { free(p); p = NULL; }
     fclose(f);
+    if (p) *len = (size_t)size;
     return p;
+}
+
+bool nso_visit_segments(const char *path, RomfsFileVisitor visit, void *arg) {
+    size_t size;
+    uint8_t *raw = read_file(path, &size);
+    if (!raw) return false;
+    bool ok = size >= 0x100 && !memcmp(raw, "NSO0", 4);
+    for (int i = 0; ok && i < 3; i++) {
+        uint32_t offset, length, stored;
+        memcpy(&offset, raw + 0x10 + 0x10 * i, sizeof offset);
+        memcpy(&length, raw + 0x18 + 0x10 * i, sizeof length);
+        bool compressed = (raw[0xc] & (1u << i)) != 0;
+        if (!length) continue;
+        stored = length;
+        if (compressed) memcpy(&stored, raw + 0x60 + 4 * i, sizeof stored);
+        if (offset > size || stored > size - offset || length > (512u << 20)) { ok = false; break; }
+        if (compressed) {
+            uint8_t *segment = malloc(length);
+            ok = segment && lz4_decompress(raw + offset, stored, segment, length) == length && visit(segment, length, arg);
+            free(segment);
+        } else {
+            ok = visit(raw + offset, length, arg);
+        }
+    }
+    free(raw);
+    return ok;
 }
 
 static void load_nso(Module *m, const char *path, uint64_t base) {
@@ -173,11 +207,25 @@ static void build_symbol_index(void) {
     }
 }
 
+bool loader_main_is_v141(void) {
+    static const uint8_t v141[8] = {0xb4, 0x24, 0xbe, 0x15, 0x0a, 0x8e, 0x7d, 0x78};
+    const Module *main = loader_module("main");
+    return main && !memcmp(main->build_id, v141, sizeof v141);
+}
+
+// 1.4.1's main has no symbols for the game's own functions: the matched addresses (runtime/odyssey_v141.h)
+static uint64_t v141_symbol(const char *name) {
+    if (!loader_main_is_v141()) return 0;
+    for (size_t i = 0; i < sizeof ODYSSEY_V141_SYMS / sizeof ODYSSEY_V141_SYMS[0]; i++)
+        if (!strcmp(ODYSSEY_V141_SYMS[i].name, name)) return ODYSSEY_V141_SYMS[i].addr;
+    return 0;
+}
+
 uint64_t loader_find_symbol(const char *name) {
     if (g_symindex) {
         for (uint64_t h = name_hash(name) & g_symmask; g_symindex[h].name; h = (h + 1) & g_symmask)
             if (!strcmp(g_symindex[h].name, name)) return g_symindex[h].addr;
-        return 0;
+        return v141_symbol(name);
     }
     for (int mi = 0; mi < g_nmodules; mi++) {
         Module *m = &g_modules[mi];
@@ -186,7 +234,7 @@ uint64_t loader_find_symbol(const char *name) {
             if (s->shndx && !strcmp(symname(m, s), name)) return m->base + s->value;
         }
     }
-    return 0;
+    return v141_symbol(name);
 }
 
 const char *loader_symbol_at(uint64_t addr, uint64_t *offset) {

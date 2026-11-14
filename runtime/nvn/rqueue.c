@@ -13,9 +13,13 @@
 
 #include "../hle.h"
 #include "../kernel.h"
+#include "../odyssey_pose.h"
 #include "../platform.h"
 #include "nvn.h"
 #include "rqueue.h"
+#ifdef _WIN32
+#include "vulkan/dlss_probe.h"
+#endif
 
 uint64_t renderer_fence_seq(void);  // (the backend: the GPU submission being recorded)
 
