@@ -72,10 +72,47 @@ done:
     return out;
 }
 
+bool romfs_visit_files(const char *image, RomfsFileVisitor visit, void *arg) {
+    FILE *f = fopen(image, "rb");
+    if (!f) return false;
+    uint8_t head[0x50], *table = NULL, *data = NULL;
+    bool ok = false;
+    if (!read_at(f, 0, head, sizeof head)) goto done;
+    uint64_t table_off = le64(head + 0x38), table_size = le64(head + 0x40), data_off = le64(head + 0x48);
+    if (table_size > (64u << 20) || !table_size) goto done;
+    table = malloc((size_t)table_size);
+    if (!table || !read_at(f, table_off, table, (size_t)table_size)) goto done;
+    size_t capacity = 0;
+    for (uint64_t i = 0; i < table_size;) {
+        if (table_size - i < 0x20) goto done;
+        const uint8_t *entry = table + i;
+        uint64_t name_size = le32(entry + 0x1c), next = i + 0x20 + ((name_size + 3) & ~3ull);
+        if (next > table_size) goto done;
+        i = next;
+        uint64_t offset = le64(entry + 8), size = le64(entry + 0x10);
+        if (size < 4) continue;
+        if (size > (512u << 20) || offset > UINT64_MAX - data_off) goto done;
+        if ((size_t)size > capacity) {
+            uint8_t *larger = realloc(data, (size_t)size);
+            if (!larger) goto done;
+            data = larger;
+            capacity = (size_t)size;
+        }
+        if (!read_at(f, data_off + offset, data, (size_t)size) || !visit(data, (size_t)size, arg)) goto done;
+    }
+    ok = true;
+done:
+    free(table);
+    free(data);
+    fclose(f);
+    return ok;
+}
+
 uint8_t *yaz0_decode(const uint8_t *in, size_t n, size_t *out_n) {
     if (n < 16 || memcmp(in, "Yaz0", 4)) return NULL;
     size_t size = (size_t)in[4] << 24 | (size_t)in[5] << 16 | (size_t)in[6] << 8 | in[7], i = 16, o = 0;
     uint8_t *out = malloc(size ? size : 1);
+    if (!out) return NULL;
     while (o < size && i < n) {
         uint8_t code = in[i++];
         for (int b = 0; b < 8 && o < size; b++) {
@@ -121,4 +158,18 @@ const uint8_t *sarc_find(const uint8_t *d, size_t n, const char *name, size_t *s
         if (!strncmp((const char *)d + no, name, n - no)) { *size = t - s; return d + data + s; }
     }
     return NULL;
+}
+
+bool sarc_visit_files(const uint8_t *d, size_t n, RomfsFileVisitor visit, void *arg) {
+    if (n < 0x20 || memcmp(d, "SARC", 4) || d[6] != 0xff || d[7] != 0xfe || memcmp(d + 0x14, "SFAT", 4)) return false;
+    uint32_t count = (uint32_t)d[0x1a] | (uint32_t)d[0x1b] << 8;
+    size_t data = le32(d + 0xc);
+    if (data < 0x20 + (size_t)count * 16 || data > n) return false;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t *entry = d + 0x20 + 16 * i;
+        size_t start = le32(entry + 8), end = le32(entry + 12);
+        if (start > end || end > n - data) return false;
+        if (!visit(d + data + start, end - start, arg)) return false;
+    }
+    return true;
 }
