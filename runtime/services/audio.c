@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <time.h>
+#include <stdatomic.h>
 
 #include <SDL3/SDL.h>
 
@@ -90,6 +91,10 @@ typedef struct {
     uint32_t wav_bytes;
     pthread_t thread;
     volatile bool quit;  // reboot (audio_reset)
+    // The game's updates answered (RequestUpdate) and the frames it was signalled for (renderer_tick): the renderer
+    // gives the game's audio thread its turn between two frames, as the DSP's fixed cadence does on the console
+    _Atomic uint64_t updates;
+    uint64_t signals;
 } Renderer;
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -542,6 +547,25 @@ static void aux_process(Effect *fx, Mix *m, uint32_t N) {
     uint32_t *sinfo = ok ? (uint32_t *)(uintptr_t)(fx->aux_send + 0x40) : NULL, *rinfo = ok ? (uint32_t *)(uintptr_t)(fx->aux_ret + 0x40) : NULL;
     int32_t *sdata = ok ? (int32_t *)(uintptr_t)(fx->aux_send + 0x80) : NULL, *rdata = ok ? (int32_t *)(uintptr_t)(fx->aux_ret + 0x80) : NULL;
     uint32_t w0 = ok ? sinfo[1] % cnt : 0, r0 = ok ? rinfo[0] % cnt : 0;
+    // The game's audio thread processes what it reads from the send ring and writes the result to the return ring
+    // (its CPU write offset @ return + 4). When that thread runs late - a hitch while shaders compile, a slower PC -
+    // this frame's return isn't there yet, and reading it anyway plays samples from one ring lap ago: the knocking
+    // and crackling of #15 (gone with ODYSSEY_NO_AUX=1). Then the frame passes the dry signal through and the read
+    // offset waits, so the return stays in step once the game catches up (as the DSP side's protocol allows: the
+    // game's writes stop at the DSP read offset).
+    static uint64_t late, frames;
+    bool waiting = false;
+    if (ok) {
+        uint32_t cpu_w = ((const uint32_t *)(uintptr_t)fx->aux_ret)[1] % cnt;
+        uint32_t avail = (cpu_w + cnt - r0) % cnt, need = (uint32_t)((uint64_t)ch * N % cnt);
+        frames++;
+        if (need && avail < need) { waiting = true; late++; }
+        static int log = -1;
+        if (log < 0) log = getenv("ODYSSEY_AUDIO_LOG") != NULL;
+        if (log && waiting && (late <= 8 || late % 100 == 0))
+            LOG("[audren] aux: return not written yet (%u of %u samples), dry for this frame (%llu of %llu frames)\n",
+                avail, need, (unsigned long long)late, (unsigned long long)frames);
+    }
     for (uint32_t c = 0; c < ch && c < 24; c++) {
         if (fx->aux_in[c] >= m->bufs || fx->aux_out[c] >= m->bufs) continue;
         float *in = m->buf + (fx->aux_in[c] % MIXBUF_MAX) * N, *out = m->buf + (fx->aux_out[c] % MIXBUF_MAX) * N;
@@ -555,6 +579,10 @@ static void aux_process(Effect *fx, Mix *m, uint32_t N) {
             sdata[w] = (int32_t)in[s];
             if (++w == cnt) w = 0;
         }
+        if (waiting) {  // (the game hasn't written this frame's return: the dry signal, not the last lap's)
+            if (in != out) memcpy(out, in, N * sizeof(float));
+            continue;
+        }
         for (uint32_t s = 0; s < N; s++) {
             out[s] = (float)rdata[rd];
             aux_so += (double)out[s] * out[s];
@@ -563,7 +591,7 @@ static void aux_process(Effect *fx, Mix *m, uint32_t N) {
     }
     if (ok) {
         sinfo[1] = (uint32_t)((w0 + (uint64_t)ch * N) % cnt);
-        rinfo[0] = (uint32_t)((r0 + (uint64_t)ch * N) % cnt);
+        if (!waiting) rinfo[0] = (uint32_t)((r0 + (uint64_t)ch * N) % cnt);
         static int log = -1;
         static uint32_t n;
         if (log < 0) log = getenv("ODYSSEY_AUDIO_LOG") != NULL;
@@ -821,8 +849,8 @@ static void *renderer_tick(void *arg) {
         if (SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(r->stream), &dev, &dev_frames) && dev_frames > 0) {
             int t = (2 * dev_frames * (int)r->sample_rate / (dev.freq ? dev.freq : 48000) + (int)N) * 2 * (int)sizeof(float);
             if (t > target) target = t;
-            LOG("[audren] device %d Hz, %d frames/period; queue target %d samples\n", dev.freq, dev_frames,
-                target / (2 * (int)sizeof(float)));
+            LOG("[audren] device %d Hz (%s), %d frames/period; queue target %d samples\n", dev.freq,
+                SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?", dev_frames, target / (2 * (int)sizeof(float)));
         }
     }
     while (!r->quit) {
@@ -837,6 +865,16 @@ static void *renderer_tick(void *arg) {
             if (!next) next = t;
             if (next > t) { struct timespec ts = {0, (long)(next - t)}; nanosleep(&ts, NULL); }
             next += (uint64_t)N * 1000000000ull / r->sample_rate;
+        }
+        // The game's audio thread answers each frame's signal (its aux processing, then RequestUpdate) before the next
+        // frame is mixed - a few ms at most; a frame mixed sooner, as when the device queue is being topped up, had its
+        // aux return played from the previous ring lap (#15). If the game stays away longer (a hitch), the frame goes
+        // ahead without it (aux_process then passes the dry signal through). ODYSSEY_AUDIO_NO_SYNC=1: as before.
+        static int nosync = -1;
+        if (nosync < 0) nosync = getenv("ODYSSEY_AUDIO_NO_SYNC") != NULL;
+        for (int i = 0; !nosync && i < 16 && r->state == 0 && atomic_load(&r->updates) < r->signals && !r->quit; i++) {
+            struct timespec ts = {0, 250000};
+            nanosleep(&ts, NULL);
         }
         pthread_mutex_lock(&r->lock);
         if (r->state == 0) {
@@ -855,6 +893,7 @@ static void *renderer_tick(void *arg) {
         pthread_mutex_lock(&g_klock);
         kernel_signal(r->event);
         pthread_mutex_unlock(&g_klock);
+        if (r->state == 0) r->signals = atomic_load(&r->updates) + 1;  // (the game answers this signal next)
     }
     return NULL;
 }
@@ -998,6 +1037,7 @@ static void update_mix(Renderer *r, const uint8_t *p, int id) {
 
 // RequestUpdate: input is an UpdateDataHeader + sections; write a matching output.
 static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
+    atomic_fetch_add(&r->updates, 1);
     IpcBuf *in = in_buf(req, 0), *out = out_buf(req, 0);
     if (!in || !out || !in->size || !out->size) return;
     const uint8_t *ip = (const uint8_t *)(uintptr_t)in->addr;

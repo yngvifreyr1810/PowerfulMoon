@@ -16,7 +16,9 @@
 #include "shaders.h"
 #include "vk.h"
 #include "../interp.h"
+#include "../rqueue.h"
 #include "../renderer.h"
+#include "../linear_texture.h"
 #include "../../romfs_read.h"
 #include "../../settings.h"
 
@@ -1300,6 +1302,51 @@ static void debug_raw_after(void) {
 
 // Debug frames, ODYSSEY_PROBE=x,y[,target]: after every draw, one texel of that color target read back; a change is
 // logged with the draw's programs (which draw paints a broken spot).
+// Debug frames, ODYSSEY_PROBE_RG16F=1: after every draw into an RG16F colour target (format 0x11: the fluid surfaces'
+// wave maps), the whole target read back; its largest |value| per channel and where, and how many texels aren't 0
+static float dbg_h2f(uint16_t h) {
+    uint32_t s = (uint32_t)(h & 0x8000) << 16, e = (h >> 10) & 0x1F, m = h & 0x3FF, u;
+    if (!e) { float d = m * 5.9604644775390625e-8f; return s ? -d : d; }
+    u = e == 31 ? (s | 0x7F800000u | (m << 13)) : (s | ((e + 112) << 23) | (m << 13));
+    float f;
+    memcpy(&f, &u, 4);
+    return f;
+}
+static void debug_rg16f_max(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("ODYSSEY_PROBE_RG16F") != NULL;
+    if (!on || !st.rt.ncolor || !st.rt.color[0] || st.rt.color[0]->format != 0x11 || !st.rt.color[0]->backend) return;
+    TexBackend *b = st.rt.color[0]->backend;
+    if ((b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT) || b->width > 1024 || b->height > 1024) return;
+    vk_end_pass();
+    st.rt_dirty = true;
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    uint64_t n = (uint64_t)b->width * b->height;
+    VkSpan out = vk_readback(n * 4);
+    VkBufferImageCopy cp = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                            .imageExtent = {b->width, b->height, 1}};
+    vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &cp);
+    renderer_flush();
+    const uint16_t *px = out.ptr;
+    float mx[2] = {0, 0};
+    uint64_t at[2] = {0, 0}, nonzero = 0;
+    for (uint64_t i = 0; i < n; i++)
+        for (int c = 0; c < 2; c++) {
+            float v = fabsf(dbg_h2f(px[i * 2 + c]));
+            if (v > mx[c]) mx[c] = v, at[c] = i;
+            if (c == 0 && (px[i * 2] | px[i * 2 + 1])) nonzero++;
+        }
+    LOG("[rg16f] flags %#x stride %llu addr %llx\n", st.rt.color[0]->flags, (unsigned long long)st.rt.color[0]->stride,
+        (unsigned long long)st.rt.color[0]->addr);
+    LOG("[rg16f] %ux%u %p after vs=%llx fs=%llx: max |r| %g (r %g g %g there) at (%llu,%llu), |g| %g at (%llu,%llu), %llu texels not 0\n",
+        b->width, b->height, (void *)st.rt.color[0], (unsigned long long)st.program->stages[0].code_addr,
+        (unsigned long long)st.program->stages[1].code_addr, mx[0], dbg_h2f(px[at[0] * 2]), dbg_h2f(px[at[0] * 2 + 1]),
+        (unsigned long long)(at[0] % b->width),
+        (unsigned long long)(at[0] / b->width), mx[1], (unsigned long long)(at[1] % b->width),
+        (unsigned long long)(at[1] / b->width), (unsigned long long)nonzero);
+}
+
 static void debug_probe(void) {
     static int px = -1, py, att;
     if (px == -1) { const char *e = getenv("ODYSSEY_PROBE"); px = -2; if (e) sscanf(e, "%d,%d,%d", &px, &py, &att); }
@@ -1331,11 +1378,15 @@ static int dbg_ncolor, dbg_draws;
 static void vk_end_pass_at(int line);
 void vk_end_pass(void) { vk_end_pass_at(0); }
 #define vk_end_pass() vk_end_pass_at(__LINE__)
+static NvnTexture *pass_lin[8];  // the open pass's linear colour targets (a pitch, in the guest heap): written back
+static int pass_nlin;
+static void linear_writeback(void);
 static void vk_end_pass_at(int line) {
     if (!in_pass) return;
     if (prof && line < 4096) prof_end_line[line]++;
     vkCmdEndRendering(vk_cmd());
     in_pass = false;
+    if (pass_nlin) linear_writeback();
     // (the pass's own attachments, from begin_pass: st.rt may already hold the next pass's targets; none while probing:
     // every draw ends its pass then)
     static int probing = -1;  // (ODYSSEY_DEBUG_NO_DUMPS=1: the log only, e.g. over many frames)
@@ -1398,6 +1449,12 @@ static void begin_pass(void) {
         pass_color[i] = VK_FORMAT_UNDEFINED;
         if (!t) continue;
         renderer_mark_gpu_owned(t);
+        if (((t->flags & 0x10) || t->stride) && log_linear()) {  // (a linear texture drawn into: the CPU may read it - PaintObj)
+            static int n;
+            if (n++ < 200) LOG("[linear] draw into linear %p addr %llx %ux%u f%#x stride %llu (frame %llu)\n", (void *)t,
+                               (unsigned long long)t->addr, t->width, t->height, t->format, (unsigned long long)t->stride,
+                               (unsigned long long)renderer_present_count());
+        }
         if ((t->target == 8 || t->target == 9) && getenv("ODYSSEY_LOG_CUBES")) {  // (who draws into cube maps)
             static int n;
             const NvnTextureView *cv = &st.rt.cview[i];
@@ -1469,6 +1526,12 @@ static void begin_pass(void) {
     vk_checkpoint(cb, "pass %d color, %ux%u, depth %p", pass_ncolor, minw, minh, (void *)st.rt.depth);
     vkCmdBeginRendering(cb, &ri);
     ss_forget();  // (whatever ran between the passes may have set its own state)
+    pass_nlin = 0;
+    for (int i = 0; i < st.rt.ncolor && i < 8; i++) {
+        NvnTexture *t = st.rt.color[i];
+        if (t && (t->flags & 0x10) && t->stride && t->addr >= HEAP_BASE && t->addr < HEAP_BASE + HEAP_MAX)
+            pass_lin[pass_nlin++] = t;
+    }
     if (g_debug_frame) {
         dbg_ncolor = st.rt.ncolor < 8 ? st.rt.ncolor : 8;
         for (int i = 0; i < dbg_ncolor; i++) dbg_color[i] = st.rt.color[i];
@@ -1733,6 +1796,40 @@ static void prog_failed(Prog *p) {
     atomic_store(&p->state, 2);
 }
 
+// A program's shader modules, made when its libraries or pipelines are built - not when it is set up. The game sets
+// up ~15,000 programs ahead (every material of every model a stage loads, every shader of an effect archive), most
+// never drawn; their modules alone held ~4.7 GB in the NVIDIA driver (2026-11-13, Cascade: 11.2 GB in RAM with them
+// made at set-up, 6.5 GB without setting programs up at all). The SPIR-V is in the cache on disk (cache/spirv), read
+// back here; if a write to it ever failed, modules are made at set-up as before. ODYSSEY_EAGER_MODULES=1: as before.
+extern _Atomic bool vk_spirv_cache_failed;
+static pthread_mutex_t prog_mod_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool prog_modules(Prog *p) {
+    pthread_mutex_lock(&prog_mod_lock);
+    if ((!p->vs || !p->fs) && p->spv_key[0] && p->spv_key[1]) {
+        size_t nv = 0, nf = 0;
+        uint32_t *sv = vk_spirv_by_key(p->spv_key[0], &nv), *sf = sv ? vk_spirv_by_key(p->spv_key[1], &nf) : NULL;
+        if (sv && sf) {
+            if (!p->vs) p->vs = vk_module(sv, nv);
+            if (!p->fs) p->fs = vk_module(sf, nf);
+        } else {
+            static int n;
+            if (n++ < 10) LOG("[shader] SPIR-V of vs=%llx fs=%llx not in the cache any more: program unavailable\n",
+                              (unsigned long long)p->code[0], (unsigned long long)p->code[1]);
+        }
+        free(sv);
+        free(sf);
+    }
+    bool ok = p->vs && p->fs;
+    pthread_mutex_unlock(&prog_mod_lock);
+    return ok;
+}
+static bool lazy_modules(void) {
+    static int eager = -1;
+    if (eager < 0) eager = getenv("ODYSSEY_EAGER_MODULES") || getenv("ODYSSEY_VK_NO_SPIRV_CACHE") || getenv("ODYSSEY_SHADER_SALT");
+    return !eager && !atomic_load(&vk_spirv_cache_failed);
+}
+
+static bool preload_room(void);
 static void compile_program(void *arg) {
     Prog *p = arg;
     int e = PSTEP_COMPILE;
@@ -1750,13 +1847,16 @@ static void compile_program(void *arg) {
     if (!sv || !sf) { free(sv); free(sf); prog_failed(p); return; }
     p->nbinds = vk_reflect(sv, nv, p->binds, MAX_BIND);
     p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
-    p->vs = vk_module(sv, nv);
-    p->fs = vk_module(sf, nf);
+    bool lazy = lazy_modules();
+    if (!lazy) {
+        p->vs = vk_module(sv, nv);
+        p->fs = vk_module(sf, nf);
+    }
     free(sv);
     free(sf);
     p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
     atomic_fetch_add(&stat_compiles, 1);
-    if (!p->vs || !p->fs) { prog_failed(p); return; }
+    if (!lazy && (!p->vs || !p->fs)) { prog_failed(p); return; }
     if (p->huge) {
         static int n;
         if (n++ < 8) LOG("[shader] huge program vs=%llx fs=%llx (SPIR-V %zu + %zu KB): compiled unoptimized when drawn\n",
@@ -1764,10 +1864,14 @@ static void compile_program(void *arg) {
     }
     // Set up ahead and no draw waits for it: the libraries (the driver's compile) wait for its first draw. NVIDIA keeps
     // ~17 MB per pair of libraries never linked, and also when they are destroyed (2026-10-27, driver 610.88): ~800
-    // programs set up ahead in a stage load, half of them drawn, cost +5 GB. Translation, SPIR-V and modules are cheap.
+    // programs set up ahead in a stage load, half of them drawn, cost +5 GB. Translation and SPIR-V are cheap; the modules
+    // aren't (prog_modules: made at the first build).
     static int huge_ahead = -1;  // (ODYSSEY_HUGE_AHEAD=1, tests: built ahead anyway, to time its compile)
     if (huge_ahead < 0) huge_ahead = getenv("ODYSSEY_HUGE_AHEAD") != NULL;
-    if (g_vk.gpl && p->ahead && (!atomic_load(&p->urgent) || (p->huge && !p->drawn && !huge_ahead))) {
+    // (menu, Video: Preload area shaders - the libraries of everything a stage sets up, right away: from the saved
+    // binaries a few ms each on the low-priority workers, so nothing is left to load at a first draw)
+    bool preload = g_settings.shader_preload && !settings_low_memory() && !g_vk.headless && preload_room();
+    if (g_vk.gpl && p->ahead && ((!atomic_load(&p->urgent) && !preload) || (p->huge && !p->drawn && !huge_ahead))) {
         atomic_store(&p->step, PSTEP_LIBS);
         return;
     }
@@ -1830,6 +1934,26 @@ static void translate_program(void *arg) {
         p->fi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], STAGE_FRAGMENT, &p->fkey);
     }
     shader_time_log("translate vs+fs", p->code[1], t0);
+    {   // ODYSSEY_LOG_GLSL=<code address, hex>: the GLSL a vertex or fragment shader at that address becomes
+        static uint64_t wants[8];
+        static int nwant = -1;
+        if (nwant < 0) {  // (several: comma separated)
+            nwant = 0;
+            const char *e = getenv("ODYSSEY_LOG_GLSL");
+            while (e && *e && nwant < 8) {
+                char *end;
+                wants[nwant++] = strtoull(e, &end, 16);
+                e = *end == ',' ? end + 1 : NULL;
+            }
+        }
+        for (int k = 0; k < nwant; k++) {
+            uint64_t want = wants[k];
+            if (!want || (p->code[0] != want && p->code[1] != want)) continue;
+            const ShaderInfo *si = p->code[0] == want ? p->vi : p->fi;
+            LOG("[glsl] %s %llx:\n%s\n", p->code[0] == want ? "vs" : "fs", (unsigned long long)want, si && si->msl ? si->msl : "(none)");
+            wants[k] = 0;  // (once)
+        }
+    }
     if (!p->vi->msl) {
         if (atomic_load(&p->urgent)) prog_tell_failure(p);
         prog_failed(p);
@@ -2071,6 +2195,9 @@ void renderer_program_hint(NvnProgram *np, bool bulk) {
     if (on < 0) { const char *e = getenv("ODYSSEY_PREWARM"); on = e ? atoi(e) : 1; }
     if (known_whole < 0) { const char *e = getenv("ODYSSEY_PREWARM_KNOWN"); known_whole = e ? atoi(e) != 0 : 1; }
     if (!on || !g_vk.dev || (np->stage_mask & 3) != 3) return;
+    // Low memory (settings: Memory use): nothing set up ahead - each program is translated and built at its first draw
+    // (from the driver's cache when it has it: a few ms; 6.5 GB in RAM instead of 9.4, Cascade, NVIDIA)
+    if (settings_low_memory() && !getenv("ODYSSEY_PREWARM")) return;
     bool warm = false;
     bool known = drawn_has(prog_code_hash(np->stages[0].code_addr, np->stages[0].const_offset ? np->stages[0].const_offset : 0x10000,
                                           np->stages[1].code_addr, np->stages[1].const_offset ? np->stages[1].const_offset : 0x10000),
@@ -2409,6 +2536,7 @@ static VkPrimitiveTopology topo_class_base(uint8_t c) {
 static void build_pipeline(void *arg) {
     Pipe *pp = arg;
     PipeKey *k = &pp->k;
+    prog_modules(k->prog);  // (made here when its set-up didn't: a null module fails this pipeline as any error does)
     VkPipelineShaderStageCreateInfo stages[2] = {
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = k->prog->vs, .pName = "main"},
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = k->prog->fs, .pName = "main"}};
@@ -2777,7 +2905,8 @@ static void lib_save_binary(const Prog *p, VkPipeline lib, bool frag, bool fill,
 
 // cached_only: only if the driver has it compiled already (otherwise VK_NULL_HANDLE right away)
 bool g_pcache_had_data;  // (device.c) cache/vk_pipelines.bin had data at the start
-static VkPipeline shader_lib_make(Prog *p, bool frag, bool fill, bool cached_only) {
+static VkPipeline shader_lib_make(Prog *p, bool frag, bool fill, bool cached_only, bool capture_only) {
+    if (!prog_modules(p)) return VK_NULL_HANDLE;
     VkPipelineShaderStageCreateInfo stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                              .stage = frag ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT,
                                              .module = frag ? p->fs : p->vs, .pName = "main"};
@@ -3362,6 +3491,474 @@ static bool link_pipeline(Pipe *pp) {
     return true;
 }
 
+// Persist the baked draw state and SPIR-V identities. Guest addresses are only valid during the run that recorded them.
+enum { PIPE_STATE_OFFSET = offsetof(PipeKey, color), PIPE_RECIPE_LIMIT = PIPE_TAB / 4 };
+typedef struct {
+    uint64_t spv[2];
+    uint32_t huge, reserved;
+    uint8_t state[sizeof(PipeKey) - PIPE_STATE_OFFSET];
+} PipeRecipe;
+typedef struct {
+    uint32_t version, size, count, reserved;
+    uint8_t uuid[VK_UUID_SIZE];
+    uint64_t checksum;
+} PipeRecipeHeader;
+
+static PipeRecipe pipe_recipes[PIPE_RECIPE_LIMIT];
+static uint64_t pipe_recipe_seen[PIPE_TAB];
+static uint32_t pipe_recipe_count, pipe_recipe_saved;
+static pthread_mutex_t pipe_recipe_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t pipe_recipe_io = PTHREAD_MUTEX_INITIALIZER;
+static bool pipe_prewarm_enabled;
+enum { FIRST_SCENE_PIPELINES = 1024 };
+#define FIRST_SCENE_CACHE "cache/first-scene-pipelines.bin"
+static uint64_t first_scene_keys[FIRST_SCENE_PIPELINES];
+static uint32_t first_scene_count;
+static _Atomic bool first_scene_ready;
+static bool first_scene_saved;
+static struct { uint64_t hash; Prog *prog; } warm_programs[PIPE_TAB];
+#define COMPUTE_WARM_SLOTS 4096
+static struct { uint64_t hash; VkPipeline pipe; Prog *prog; } compute_warm[COMPUTE_WARM_SLOTS];
+
+static PipeRecipe pipe_recipe(const PipeKey *k) {
+    PipeRecipe r;
+    memset(&r, 0, sizeof r);
+    memcpy(r.spv, k->prog->spv_key, sizeof r.spv);
+    r.huge = k->prog->huge;
+    memcpy(r.state, (const uint8_t *)k + PIPE_STATE_OFFSET, sizeof r.state);
+    return r;
+}
+
+static uint64_t pipe_recipe_hash(const PipeRecipe *r) {
+    uint64_t hash = hash_words(0xcbf29ce484222325ull, r, sizeof *r);
+    return hash ? hash : 1;
+}
+
+static uint32_t load_first_scene_keys(uint64_t keys[FIRST_SCENE_PIPELINES]) {
+    FILE *f = fopen(FIRST_SCENE_CACHE, "rb");
+    if (!f) return 0;
+    PipeRecipeHeader h;
+    bool ok = fread(&h, sizeof h, 1, f) == 1 && h.version == 1 && h.size == sizeof *keys &&
+              h.count <= FIRST_SCENE_PIPELINES && !memcmp(h.uuid, g_vk.props.pipelineCacheUUID, sizeof h.uuid) &&
+              fread(keys, sizeof *keys, h.count, f) == h.count && fgetc(f) == EOF &&
+              hash_words(0, keys, h.count * sizeof *keys) == h.checksum;
+    fclose(f);
+    return ok ? h.count : 0;
+}
+
+static void record_first_scene_pipeline(Pipe *pipe, uint64_t key) {
+    if (atomic_load_explicit(&first_scene_ready, memory_order_relaxed) || !game_is_odyssey()) return;
+    extern int odyssey_first_scene_warmup(void);
+    int phase = odyssey_first_scene_warmup();
+    if (phase == 1 && !pipe->first_scene) {
+        pipe->first_scene = true;
+        if (first_scene_count < FIRST_SCENE_PIPELINES) first_scene_keys[first_scene_count++] = key;
+    }
+    if (phase == 2 || first_scene_count == FIRST_SCENE_PIPELINES) {
+        atomic_store(&first_scene_ready, true);
+        extern _Atomic unsigned g_pcache_dirty;
+        if (first_scene_count) atomic_fetch_add(&g_pcache_dirty, 1);
+    }
+}
+
+// The renderer publishes the list once. The existing cache writer persists it off the render thread.
+static void save_first_scene_keys(void) {
+    if (first_scene_saved || !atomic_load(&first_scene_ready) || !first_scene_count) return;
+    uint64_t old[FIRST_SCENE_PIPELINES];
+    size_t bytes = first_scene_count * sizeof *first_scene_keys;
+    if (load_first_scene_keys(old) == first_scene_count && !memcmp(old, first_scene_keys, bytes)) {
+        first_scene_saved = true;
+        return;
+    }
+    PipeRecipeHeader h = {.version = 1, .size = sizeof *first_scene_keys, .count = first_scene_count,
+                          .checksum = hash_words(0, first_scene_keys, bytes)};
+    memcpy(h.uuid, g_vk.props.pipelineCacheUUID, sizeof h.uuid);
+    FILE *f = fopen(FIRST_SCENE_CACHE ".tmp", "wb");
+    if (!f) return;
+    bool ok = fwrite(&h, sizeof h, 1, f) == 1 && fwrite(first_scene_keys, 1, bytes, f) == bytes;
+    ok = fclose(f) == 0 && ok;
+    first_scene_saved = ok && SDL_RenamePath(FIRST_SCENE_CACHE ".tmp", FIRST_SCENE_CACHE);
+    if (!first_scene_saved) remove(FIRST_SCENE_CACHE ".tmp");
+    else LOG("[vk] saved %u first-scene pipeline priorities\n", first_scene_count);
+}
+
+static PipeRecipe compute_recipe(uint64_t spv, const uint32_t local[3]) {
+    PipeRecipe r = {0};
+    r.spv[0] = spv;
+    memcpy(r.state, local, 3 * sizeof *local);
+    return r;
+}
+
+static uint32_t pipe_slot(uint64_t hash) {
+    uint32_t slot = (uint32_t)(hash ^ (hash >> 29)) & (PIPE_TAB - 1);
+    for (uint32_t i = 0; i < PIPE_TAB; i++, slot = (slot + 1) & (PIPE_TAB - 1))
+        if (!pipe_tab[slot].key || pipe_tab[slot].key == hash) return slot;
+    return PIPE_TAB;
+}
+
+// Caller holds pipe_recipe_lock, or is starting the renderer before the guest can issue draws.
+static void pipe_recipe_add(const PipeRecipe *r) {
+    if (pipe_recipe_count >= PIPE_RECIPE_LIMIT) return;
+    uint64_t hash = pipe_recipe_hash(r);
+    uint32_t slot = (uint32_t)(hash ^ (hash >> 29)) & (PIPE_TAB - 1);
+    while (pipe_recipe_seen[slot] && pipe_recipe_seen[slot] != hash) slot = (slot + 1) & (PIPE_TAB - 1);
+    if (pipe_recipe_seen[slot]) return;
+    pipe_recipe_seen[slot] = hash;
+    pipe_recipes[pipe_recipe_count++] = *r;
+}
+
+static void pipe_recipe_remember(const PipeRecipe *r) {
+    pthread_mutex_lock(&pipe_recipe_lock);
+    uint32_t before = pipe_recipe_count;
+    pipe_recipe_add(r);
+    bool changed = pipe_recipe_count != before;
+    pthread_mutex_unlock(&pipe_recipe_lock);
+    extern _Atomic unsigned g_pcache_dirty;
+    if (changed) atomic_fetch_add(&g_pcache_dirty, 1);
+}
+
+static uint32_t compute_warm_slot(uint64_t hash) {
+    uint32_t slot = (uint32_t)(hash ^ (hash >> 29)) & (COMPUTE_WARM_SLOTS - 1);
+    for (uint32_t i = 0; i < COMPUTE_WARM_SLOTS; i++, slot = (slot + 1) & (COMPUTE_WARM_SLOTS - 1))
+        if (!compute_warm[slot].hash || compute_warm[slot].hash == hash) return slot;
+    return COMPUTE_WARM_SLOTS;
+}
+
+static VkPipeline create_compute_pipeline(VkShaderModule module, VkPipelineLayout layout, const uint32_t local[3]) {
+    VkSpecializationMapEntry entries[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
+    VkSpecializationInfo spec = {3, entries, 3 * sizeof *local, local};
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = module, .pName = "main",
+                                                .pSpecializationInfo = &spec},
+                                      .layout = layout};
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkResult result = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &pipeline);
+    if (result != VK_SUCCESS) LOG("[compute] pipeline failed: %d\n", result);
+    return result == VK_SUCCESS ? pipeline : VK_NULL_HANDLE;
+}
+
+static bool prewarm_compute(const PipeRecipe *r, uint64_t hash) {
+    uint32_t slot = compute_warm_slot(hash);
+    if (slot == COMPUTE_WARM_SLOTS || compute_warm[slot].pipe) return false;
+    uint32_t local[3];
+    memcpy(local, r->state, sizeof local);
+    if (!compute_local_supported(local)) return false;
+    size_t n = 0;
+    uint32_t *spv = vk_spirv_by_key(r->spv[0], &n);
+    if (!spv) return false;
+    Prog *p = calloc(1, sizeof *p);
+    if (!p) { free(spv); return false; }
+    p->nbinds = vk_reflect(spv, n, p->binds, MAX_BIND);
+    if (!compute_bindings_supported(p)) { free(spv); free(p); return false; }
+    VkShaderModule module = vk_module(spv, n);
+    free(spv);
+    if (!module) { free(p); return false; }
+    p->layout = make_layout(p, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0);
+    VkPipeline pipeline = create_compute_pipeline(module, p->layout, local);
+    vkDestroyShaderModule(g_vk.dev, module, NULL);
+    if (!pipeline) {
+        vkDestroyPipelineLayout(g_vk.dev, p->layout, NULL);
+        vkDestroyDescriptorSetLayout(g_vk.dev, p->set_layout[0], NULL);
+        free(p);
+        return false;
+    }
+    compute_warm[slot].hash = hash;
+    compute_warm[slot].pipe = pipeline;
+    compute_warm[slot].prog = p;
+    return true;
+}
+
+static void prewarm_prepared_compute(void) {
+    FILE *f = fopen(PREPARED_COMPUTE, "rb");
+    if (!f) return;
+    uint32_t warmed = 0, read = 0;
+    FullPrepItem item;
+    while (read < COMPUTE_WARM_SLOTS && fread(&item, sizeof item, 1, f) == 1) {
+        read++;
+        if (!item.program.spv[0] || item.program.spv[1] || !compute_local_supported(item.local)) continue;
+        PipeRecipe recipe = compute_recipe(item.program.spv[0], item.local);
+        warmed += prewarm_compute(&recipe, pipe_recipe_hash(&recipe));
+    }
+    fclose(f);
+    LOG("[vk] prewarmed %u of %u prepared compute pipelines\n", warmed, read);
+}
+
+void vk_pipeline_recipes_save(void) {
+    pthread_mutex_lock(&pipe_recipe_io);
+    save_first_scene_keys();
+    pthread_mutex_lock(&pipe_recipe_lock);
+    uint32_t count = pipe_recipe_count;
+    pthread_mutex_unlock(&pipe_recipe_lock);
+    // Published recipes are immutable, so the file write can run while the renderer appends new ones.
+    if (count == pipe_recipe_saved) { pthread_mutex_unlock(&pipe_recipe_io); return; }
+    PipeRecipeHeader h = {.version = 1, .size = sizeof(PipeRecipe), .count = count,
+                          .checksum = hash_words(0, pipe_recipes, count * sizeof(PipeRecipe))};
+    memcpy(h.uuid, g_vk.props.pipelineCacheUUID, sizeof h.uuid);
+    FILE *f = fopen("cache/graphics-pipelines.tmp", "wb");
+    if (f) {
+        bool ok = fwrite(&h, sizeof h, 1, f) == 1 && fwrite(pipe_recipes, sizeof(PipeRecipe), count, f) == count;
+        ok = fclose(f) == 0 && ok;
+        if (ok && SDL_RenamePath("cache/graphics-pipelines.tmp", "cache/graphics-pipelines.bin")) pipe_recipe_saved = count;
+        else remove("cache/graphics-pipelines.tmp");
+    }
+    pthread_mutex_unlock(&pipe_recipe_io);
+}
+
+static bool pipe_recipe_program(const PipeRecipe *r, Prog *p) {
+    size_t nv = 0, nf = 0;
+    uint32_t *sv = vk_spirv_by_key(r->spv[0], &nv);
+    uint32_t *sf = sv ? vk_spirv_by_key(r->spv[1], &nf) : NULL;
+    if (sf) {
+        p->spv_key[0] = r->spv[0];
+        p->spv_key[1] = r->spv[1];
+        p->huge = r->huge != 0;
+        p->nbinds = vk_reflect(sv, nv, p->binds, MAX_BIND);
+        p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
+        p->vs = vk_module(sv, nv);
+        p->fs = vk_module(sf, nf);
+    }
+    free(sv);
+    free(sf);
+    if (!p->vs || !p->fs) return false;
+    p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
+    return true;
+}
+
+static Prog *prewarm_program(const PipeRecipe *r, bool use_libraries) {
+    uint64_t hash = hash_words(r->huge, r->spv, sizeof r->spv) | 1;
+    uint32_t slot = (uint32_t)(hash ^ (hash >> 29)) & (PIPE_TAB - 1);
+    while (warm_programs[slot].hash && warm_programs[slot].hash != hash) slot = (slot + 1) & (PIPE_TAB - 1);
+    if (warm_programs[slot].prog) return warm_programs[slot].prog;
+    Prog *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
+    if (!pipe_recipe_program(r, p)) {
+        if (p->vs) vkDestroyShaderModule(g_vk.dev, p->vs, NULL);
+        if (p->fs) vkDestroyShaderModule(g_vk.dev, p->fs, NULL);
+        free(p);
+        return NULL;
+    }
+    if (use_libraries) make_shader_libs(p, false);
+    // Keep the program's Vulkan objects alive alongside the prewarmed pipelines, as for programs built in play.
+    warm_programs[slot].hash = hash;
+    warm_programs[slot].prog = p;
+    return p;
+}
+
+// A recipe from another GPU (the release's seed, see below) is only used where this GPU can build it: its attachment
+// and vertex formats supported here.
+static bool recipe_formats_ok(const PipeRecipe *r) {
+    PipeKey k;
+    memset(&k, 0, sizeof k);
+    memcpy((uint8_t *)&k + PIPE_STATE_OFFSET, r->state, sizeof r->state);
+    if (k.ncolor > 8) return false;
+    VkFormatProperties p;
+    for (uint32_t i = 0; i < k.ncolor; i++) {
+        if (!k.color[i]) continue;
+        vkGetPhysicalDeviceFormatProperties(g_vk.phys, k.color[i], &p);
+        if (!(p.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) return false;
+    }
+    VkFormat ds[2] = {k.depth, k.stencil};
+    for (int i = 0; i < 2; i++) {
+        if (!ds[i]) continue;
+        vkGetPhysicalDeviceFormatProperties(g_vk.phys, ds[i], &p);
+        if (!(p.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) return false;
+    }
+    for (int i = 0; i < 32; i++)
+        if ((k.attr_mask & (1u << i)) && vertex_format_supported((VkFormat)k.attr_fmt[i]) != (VkFormat)k.attr_fmt[i]) return false;
+    return true;
+}
+
+// cache/graphics-pipelines.bin: the pipelines this PC's runs recorded, for this GPU (its pipeline cache UUID). A file
+// whose UUID is all zero is the release's seed (data/pipeline-seed.bin, copied in by the setup: the pipeline states
+// recorded while playing on another PC): its recipes are kept where this GPU supports their formats.
+static PipeRecipe *load_pipeline_recipes(PipeRecipeHeader *h) {
+    FILE *f = fopen("cache/graphics-pipelines.bin", "rb");
+    if (!f) return NULL;
+    PipeRecipe *recipes = NULL;
+    static const uint8_t seed_uuid[VK_UUID_SIZE];
+    bool seed = false;
+    if (fread(h, sizeof *h, 1, f) == 1 && h->version == 1 && h->size == sizeof(PipeRecipe) &&
+        h->count && h->count <= PIPE_RECIPE_LIMIT &&
+        (!memcmp(h->uuid, g_vk.props.pipelineCacheUUID, sizeof h->uuid) || (seed = !memcmp(h->uuid, seed_uuid, sizeof h->uuid)))) {
+        recipes = malloc(h->count * sizeof *recipes);
+        if (recipes && (fread(recipes, sizeof *recipes, h->count, f) != h->count || fgetc(f) != EOF ||
+                        hash_words(0, recipes, h->count * sizeof *recipes) != h->checksum)) {
+            free(recipes);
+            recipes = NULL;
+        }
+    }
+    fclose(f);
+    if (recipes && seed) {
+        uint32_t kept = 0;
+        for (uint32_t i = 0; i < h->count; i++)
+            if (recipe_formats_ok(&recipes[i])) recipes[kept++] = recipes[i];
+        LOG("[vk] pipeline seed: %u of %u recipes fit this GPU\n", kept, h->count);
+        h->count = kept;
+        h->checksum = hash_words(0, recipes, kept * sizeof *recipes);
+        if (!kept) { free(recipes); recipes = NULL; }
+    }
+    return recipes;
+}
+
+static bool warm_graphics_pipeline(const PipeRecipe *r, uint64_t hash, bool use_libraries) {
+    uint32_t slot = pipe_slot(hash);
+    if (slot == PIPE_TAB || pipe_tab[slot].pipe) return false;
+    Pipe *pp = calloc(1, sizeof *pp);
+    if (!pp) return false;
+    memcpy((uint8_t *)&pp->k + PIPE_STATE_OFFSET, r->state, sizeof r->state);
+    if (r->spv[0] && pp->k.ncolor <= 8 && pp->k.poly_fill <= 1 && pp->k.topo_class <= 2)
+        pp->k.prog = prewarm_program(r, use_libraries);
+    if (pp->k.prog && (!use_libraries || !link_pipeline(pp))) build_pipeline(pp);
+    if (atomic_load(&pp->state) != 1) {
+        free(pp);
+        return false;
+    }
+    pp->recorded = true;
+    pipe_tab[slot].key = hash;
+    pipe_tab[slot].pipe = pp;
+    return true;
+}
+
+static bool warm_uses_libraries(void) {
+    const char *shared = getenv("ODYSSEY_SHARED_LIBS");
+    return g_vk.gpl && (!shared || atoi(shared) != 0);
+}
+
+static void prewarm_post_pipelines(void);
+
+static uint32_t *prioritize_first_scene(const PipeRecipe *recipes, uint32_t count, uint32_t recent) {
+    if (!game_is_odyssey()) return NULL;
+    uint64_t keys[FIRST_SCENE_PIPELINES];
+    uint32_t n = load_first_scene_keys(keys);
+    if (!n) return NULL;
+    uint32_t *order = malloc(count * sizeof *order);
+    uint64_t *hashes = malloc(count * sizeof *hashes);
+    if (!order || !hashes) { free(order); free(hashes); return NULL; }
+    for (uint32_t i = 0; i < count; i++) hashes[i] = pipe_recipe_hash(&recipes[i]);
+    uint32_t next = 0;
+    for (uint32_t j = 0; j < n; j++) {
+        if (!keys[j]) continue;
+        for (uint32_t i = 0; i < count; i++) {
+            if (hashes[i] != keys[j]) continue;
+            hashes[i] = 0;
+            order[next++] = i;
+            break;
+        }
+    }
+    LOG("[vk] prioritizing %u first-scene pipelines at startup\n", next);
+    for (uint32_t i = count - recent; i < count; i++) if (hashes[i]) order[next++] = i;
+    for (uint32_t i = 0; i < count - recent; i++) if (hashes[i]) order[next++] = i;
+    free(hashes);
+    return order;
+}
+
+#define RECORDED_NEXT "cache/prepare-pipelines.next"
+static int prepare_recorded_pipelines(void) {
+    extern void vk_headless_init(void);
+    extern void vk_pcache_load_headless(void);
+    extern void vk_pipeline_cache_save(void);
+    vk_headless_init();
+    vk_pcache_load_headless();
+    prewarm_post_pipelines();
+    PipeRecipeHeader h;
+    PipeRecipe *recipes = load_pipeline_recipes(&h);
+    if (!recipes) {
+        LOG("[prep] no compatible recorded pipeline states for this device\n");
+        remove(RECORDED_NEXT);
+        vk_pipeline_cache_save();
+        return 0;
+    }
+    bool libraries = warm_uses_libraries();
+    uint32_t start = 0;
+    unsigned long long checksum;
+    FILE *f = fopen(RECORDED_NEXT, "r");
+    if (f) {
+        if (fscanf(f, "%llx %u", &checksum, &start) != 2 || checksum != h.checksum || start >= h.count)
+            start = 0;
+        fclose(f);
+    }
+    const char *limit = getenv("ODYSSEY_PRECOMPILE_MEM_MB");
+    uint64_t budget = (limit ? strtoull(limit, NULL, 10) : 3072ull) * 1048576ull;
+    uint64_t baseline = plat_private_bytes();
+    uint32_t next = start, graphics = 0, compute = 0;
+    while (next < h.count) {
+        const PipeRecipe *r = &recipes[next++];
+        uint64_t hash = pipe_recipe_hash(r);
+        if (r->spv[1]) graphics += warm_graphics_pipeline(r, hash, libraries);
+        else compute += prewarm_compute(r, hash);
+        if ((next - start) % 16 == 0 || next == h.count) {
+            f = fopen("cache/prepare.progress", "w");
+            if (f) { fprintf(f, "%u %u 2\n", next, h.count); fclose(f); }
+            if (budget && plat_private_bytes() > baseline + budget) break;
+        }
+    }
+    free(recipes);
+    vk_pipeline_cache_save();
+    LOG("[prep] recorded %u graphics and %u compute pipelines, %u unavailable (%u..%u of %u)\n",
+        graphics, compute, next - start - graphics - compute, start, next, h.count);
+    if (next == h.count) {
+        remove(RECORDED_NEXT);
+        return 0;
+    }
+    f = fopen(RECORDED_NEXT ".tmp", "w");
+    if (!f) return 1;
+    bool wrote = fprintf(f, "%llx %u\n", (unsigned long long)h.checksum, next) > 0;
+    wrote = fclose(f) == 0 && wrote;
+    if (wrote && SDL_RenamePath(RECORDED_NEXT ".tmp", RECORDED_NEXT)) return 2;
+    remove(RECORDED_NEXT ".tmp");
+    return 1;
+}
+
+void vk_pipeline_prewarm(bool build) {
+    const char *e = getenv("ODYSSEY_PIPELINE_PREWARM");
+    pipe_prewarm_enabled = e ? atoi(e) != 0 : !settings_low_memory();
+    if (build) prewarm_post_pipelines();
+    if (!pipe_prewarm_enabled) return;
+    if (build) prewarm_prepared_compute();
+    PipeRecipeHeader h;
+    PipeRecipe *recipes = load_pipeline_recipes(&h);
+    if (!recipes) return;
+
+    uint64_t t0 = plat_now_ns(), memory = plat_private_bytes();
+    // Allow a longer replay on machines with enough RAM to keep the known pipelines alive.
+    const char *mem_mb = getenv("ODYSSEY_PIPELINE_PREWARM_MEM_MB");
+    const char *time_ms = getenv("ODYSSEY_PIPELINE_PREWARM_MS");
+    unsigned set_ms, set_mb;  // (the menu's Warm-up at start; the environment variables win, for tests)
+    settings_warmup_budget(&set_ms, &set_mb);
+    uint64_t memory_budget = (mem_mb ? strtoull(mem_mb, NULL, 10) : set_mb) * 1048576ull;
+    uint64_t time_budget = (time_ms ? strtoull(time_ms, NULL, 10) : set_ms) * 1000000ull;
+    bool use_libraries = warm_uses_libraries();
+    uint32_t warmed = 0, compute = 0;
+    // Give recently discovered pipelines a share of the fixed startup budget. Otherwise
+    // long caches can stop at the same early entries on every boot and miss gameplay effects.
+    uint32_t recent = odyssey_native_120_enabled() ? h.count / 4 : 0;
+    if (recent > 768) recent = 768;
+    uint32_t *order = build ? prioritize_first_scene(recipes, h.count, recent) : NULL;
+    uint32_t attempted = 0;
+    for (; build && attempted < h.count; attempted++) {
+        uint32_t index = order ? order[attempted] : attempted < recent ? h.count - recent + attempted : attempted - recent;
+        const PipeRecipe *r = &recipes[index];
+        // Driver allocations for libraries can be much larger than the recipe file. Keep startup bounded.
+        if (attempted && attempted % 16 == 0 &&
+            (plat_private_bytes() > memory + memory_budget || plat_now_ns() - t0 > time_budget)) break;
+        uint64_t hash = pipe_recipe_hash(r);
+        if (!r->spv[1]) { compute += prewarm_compute(r, hash); continue; }
+        warmed += warm_graphics_pipeline(r, hash, use_libraries);
+    }
+    free(order);
+    for (uint32_t i = 0; i < h.count; i++) pipe_recipe_add(&recipes[i]);
+    pipe_recipe_saved = pipe_recipe_count;
+    free(recipes);
+    atomic_store(&stat_compiles, 0);
+    atomic_store(&stat_links, 0);
+    if (build)
+        LOG("[vk] prewarmed %u graphics and %u compute pipelines (%u attempted of %u recorded) in %.2f s\n",
+            warmed, compute, attempted, h.count, (plat_now_ns() - t0) / 1e9);
+    else
+        LOG("[vk] kept %u pipeline recipes for the next normal start\n", h.count);
+}
+
 // (ODYSSEY_HUGE_AHEAD=1, tests) what a draw of a huge program costs: a link with one RGBA8 target, as a draw would
 static void huge_link_test(Prog *p) {
     if (!g_vk.gpl || !p->lib_fs || !p->lib_pr[1]) return;
@@ -3399,6 +3996,42 @@ static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_) {
     uint32_t tic = h & 0xFFFFF;
     if (!h || !st.tpool || tic >= (uint32_t)st.tpool->count) return NULL;
     return ((NvnTexEntry *)st.tpool->entries)[tic].tex;
+}
+
+// Survey the pre-HUD scene inputs without readback, jitter, or altering the frame.
+static void dlss_probe_scene(ShaderInfo *fs) {
+    static int enabled = -1;
+    static uint64_t next_frame;
+    if (enabled < 0) {
+        const char *probe = getenv("ODYSSEY_DLSS_PROBE");
+        enabled = probe && !strcmp(probe, "1");
+    }
+    bool upscale = false;
+#ifdef _WIN32
+    upscale = vk_temporal_enabled();
+#endif
+    if (!enabled && !upscale) return;
+    uint64_t frame = renderer_present_count();
+    if (!upscale && frame < next_frame) return;
+    NvnTexture *target = st.rt.color[0];
+    const TexBackend *color = NULL, *depth = NULL;
+    for (int i = 0; i < fs->ntex; i++) {
+        NvnTexture *t = shader_texture_object(1, &fs->tex[i]);
+        const TexBackend *b = t ? t->backend : NULL;
+        if (!b || !b->image) continue;
+        if (t->width < target->width * 3u || t->height < target->height * 3u) continue;
+        if (b->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) color = b;
+        if (b->format == VK_FORMAT_D32_SFLOAT) depth = b;
+    }
+    if (!color || !depth || color->width != depth->width || color->height != depth->height) return;
+#ifdef _WIN32
+    if (upscale) vk_dlss_capture_depth(depth, frame);
+#endif
+    if (!enabled || frame < next_frame) return;
+    next_frame = frame + 120;
+    LOG("[dlss] frame %llu bloom candidate fs %016llx: %ux%u HDR color + D32 depth -> %ux%u guest bloom\n",
+        (unsigned long long)frame, (unsigned long long)g_cur_fs_hash, color->width, color->height,
+        target->width, target->height);
 }
 
 static bool is_attachment(NvnTexture *t) {
@@ -3724,6 +4357,12 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
                 e[1] = (uint32_t)(st.sbuf[stage][i].addr >> 32);
                 e[2] = (uint32_t)st.sbuf[stage][i].size;
             }
+            // c[0x0][0x610]: the largest point size - a vertex shader writing gl_PointSize clamps to it
+            // (min(size, c[0x0][0x610])). Left 0, every point sprite was size 0 and drew nothing: the fluid surfaces'
+            // disturbance points (al::FluidSimulateWave::drawPoint) among them, so Cap Kingdom's fog never parted
+            // around Mario or rolled (a flat sheet).
+            float maxpt = g_vk.props.limits.pointSizeRange[1] > 0 ? g_vk.props.limits.pointSizeRange[1] : 2048.0f;
+            memcpy(&drv[0x610 / 4], &maxpt, 4);
         }
         uint64_t size = si->cbuf_size[0] > sizeof drv ? sizeof drv : (si->cbuf_size[0] ? si->cbuf_size[0] : 256);
         if (size < 0x500 && stage == 5) size = 0x500;
@@ -3809,6 +4448,57 @@ static VkDescriptorBufferInfo gmem_info(void) {
     static uint32_t zero[1024];
     VkSpan s = vk_transient_copy(zero, sizeof zero, 256);
     return (VkDescriptorBufferInfo){s.buf, s.off, sizeof zero};
+}
+
+// Linear render targets written back to guest memory: a texture with a pitch (agl's createAglTextureDataLinear) that
+// the GPU draws into is one the game reads on the CPU - al::getF32FromLinearTextureF16 / getColorFromLinearTexture:
+// the fog's surface height (al::OceanWave::calcPos -> OrthoDepthTexture::tryCalcDepth, the top-down depth under it;
+// the fluid surfaces' displacement), the poison's paint map (PaintObj). The GPU's result stayed in its image, so the CPU
+// read zeros: Cap Kingdom's fog surface came out 3000 units up (1600 instead of ~-1400), every ripple Mario or Cappy
+// made there was rejected as too far below it (OceanWave::tryAddRippleWithRange), and the fog never parted. Now each
+// pass's linear colour targets are copied, on the GPU, into their place in the imported guest heap after the pass:
+// the CPU sees them a frame later at most, as on the Switch (where the GPU writes that memory itself).
+// ODYSSEY_LINEAR_WRITEBACK=1: on. OFF by default: with it the game faults (access to 0xffffffffffffffff) a few
+// seconds into Cap Kingdom even with only R16F / RGBA16F targets written back; the fog height (calcPos) changed but
+// stayed wrong (~1500-1900 instead of near -1400). Work in progress (docs: fog-reference-review/claude-handoff.md).
+static void linear_writeback(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("ODYSSEY_LINEAR_WRITEBACK"); on = e && atoi(e) != 0; }  // (opt-in until the crash below is understood)
+    int n = pass_nlin;
+    pass_nlin = 0;
+    if (!on || !gmem_buf) return;
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    for (int i = 0; i < n; i++) {
+        NvnTexture *t = pass_lin[i];
+        // SetStride alone does not select pitch-linear storage (see builder_storage_size).
+        // In particular agl can leave a pitch on a block-linear render target. Copying
+        // stride * height there writes beyond the allocation the builder requested.
+        if (!t || !(t->flags & 0x10) || !t->pool || t->pool_offset > t->pool->size) continue;
+        TexBackend *b = t ? (TexBackend *)t->backend : NULL;
+        const FormatInfo *fi = t ? t->layout.fmt : NULL;
+        // (only the formats the game's CPU readers take: F16 - R16F, RG16F, RGBA16F - and RGBA8. The R32F linear targets
+        // in Cap Kingdom are something else: written back, the game faulted on a -1 pointer)
+        if (t->format != 0x05 && t->format != 0x11 && t->format != 0x29 && t->format != 0x25) continue;
+        if (!b || !b->image || !fi || !fi->bpb || fi->bw != 1 || fi->bh != 1 || b->guest_format || b->width != t->width ||
+            b->height != t->height || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT) || t->stride % fi->bpb)
+            continue;
+        uint64_t row = (uint64_t)t->width * fi->bpb;
+        if (!t->height || t->stride < row || t->stride / fi->bpb > UINT32_MAX || t->addr < HEAP_BASE) continue;
+        uint64_t available = t->pool->size - t->pool_offset;
+        // The final row has no trailing padding in VkBufferImageCopy's destination range.
+        if (row > available || (t->height > 1 && t->stride > (available - row) / (t->height - 1))) continue;
+        uint64_t off = t->addr - HEAP_BASE, size = t->stride * (uint64_t)(t->height - 1) + row;
+        if (off > gmem_size || size > gmem_size - off || off % fi->bpb) continue;
+        if (!cb) { cb = vk_cmd(); vk_full_barrier(cb); }
+        VkBufferImageCopy c = {.bufferOffset = off, .bufferRowLength = (uint32_t)(t->stride / fi->bpb),
+                               .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {t->width, t->height, 1}};
+        vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, gmem_buf, 1, &c);
+        static int nlog;
+        if (nlog++ < 12)
+            LOG("[vk] linear render target %ux%u f%#x at %llx (pitch %llu) written back to guest memory\n", t->width, t->height,
+                t->format, (unsigned long long)t->addr, (unsigned long long)t->stride);
+    }
+    if (cb) vk_full_barrier(cb);
 }
 
 // Compute dispatches that use global memory: the imported heap is host memory across PCIe on a discrete GPU, and a
@@ -4157,6 +4847,7 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     uint64_t h = (slot >= 0 && slot < 32) ? st.tex[stage][slot] : 0;
     VkImageView view = VK_NULL_HANDLE;
     VkSampler smp = VK_NULL_HANDLE;
+    NvnTexture *sampled_texture = NULL;
     uint32_t tic = h & 0xFFFFF, tsc = (uint32_t)(h >> 20) & 0xFFF;
     sc[0] = sc[1] = 1;
     wh[0] = wh[1] = 0;
@@ -4165,6 +4856,7 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
         // (frame interpolation: the frame's entry - the game rewrites the pool while replays run)
         if (g_interp_log && stage < 2) e = (NvnTexEntry *)interp_texentry(stage, i, e, sizeof *e);
         if (e->tex) {
+            sampled_texture = e->tex;
             // Per-frame memo: ~2400 lookups per overworld frame recomputed the view (format / range math, cache
             // probe). The first lookup of a frame still runs vk_view (upload check); a view that may have been
             // destroyed (eviction, image re-created) bumps vk_view_gen. ODYSSEY_VK_NO_TEX_MEMO=1 disables.
@@ -4197,7 +4889,23 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
                 }
         }
     }
-    if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
+    if (h && st.spool && tsc < (uint32_t)st.spool->count) {
+        NvnSamplerDesc *desc = &((NvnSamplerDesc *)st.spool->entries)[tsc];
+#ifdef _WIN32
+        const TexBackend *sampled = sampled_texture ? sampled_texture->backend : NULL;
+        float bias = stage == 1 && st.ds[0] && st.rt.depth && sampled && sampled->levels > 1 &&
+                     !(sampled->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && desc->min_filter >= 2 && !desc->compare_mode
+                         ? vk_dlss_surface_lod_bias(st.rt.depth->backend) : 0;
+        if (bias < 0) {
+            NvnSamplerDesc adjusted = *desc;
+            adjusted.backend = NULL;
+            float limit = g_vk.props.limits.maxSamplerLodBias;
+            adjusted.lod_bias = fmaxf(-limit, fminf(limit, adjusted.lod_bias + bias));
+            smp = vk_sampler(&adjusted); // cached by sampler state; the guest descriptor stays untouched
+        } else
+#endif
+            smp = vk_sampler(desc);
+    }
     if (!view) view = vk_dummy_view(st_->type);
     if (!smp) smp = vk_default_sampler(true);
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};
@@ -4776,7 +5484,12 @@ static void draw_(CmdRec *r, bool indexed) {
             k = pass_sx / pass_sy;
         float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
         if (k > 1.0f) { vx -= vw * (k - 1) / 2; vw *= k; }
-        set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
+        float jitter[2] = {0};
+#ifdef _WIN32
+        if (st.rt.depth && st.ds[0])
+            vk_dlss_viewport_jitter(st.rt.depth->backend, renderer_present_count(), jitter);
+#endif
+        set_viewport(vx + jitter[0], vp[1] * vp_sy + vp_oy + jitter[1], vw, vp[3] * vp_sy, zn, zf);
         if (g_debug_frame) {
             VkRect2D sr = scissor_rect();
             LOG("[draw]   vp %.2f %.2f %.2f %.2f (stretch %.3f, fs hash %016llx) scissor %d %d %u %u | guest sc %d %d %d %d | pass %ux%u s %.4f %.4f\n",
@@ -4906,7 +5619,56 @@ static void draw_(CmdRec *r, bool indexed) {
     dbg_draws++;
     debug_raw_after();
     debug_tex_trace("draw");
-    if (g_debug_frame) { debug_probe(); debug_watch_max(); }
+    if (g_debug_frame) { debug_probe(); debug_watch_max(); debug_rg16f_max(); }
+    {   // ODYSSEY_MARK_RG16F=<x>,<y>,<w>,<h>,<value> (tests): after the fluid surface's final blend into its persistent
+        // height map (fs 72698eae00), that rectangle of it set to value - a marker whose hollow shows where the fog
+        // reads that texel
+        static int mark = -1;
+        static int mx, my, mw, mh;
+        static float mv;
+        if (mark < 0) {
+            const char *e = getenv("ODYSSEY_MARK_RG16F");
+            mark = e && sscanf(e, "%d,%d,%d,%d,%f", &mx, &my, &mw, &mh, &mv) == 5 && mw > 0 && mh > 0;
+        }
+        if (mark && st.program->stages[1].code_addr == 0x72698eae00ull && st.rt.ncolor && st.rt.color[0] &&
+            st.rt.color[0]->format == 0x11 && st.rt.color[0]->backend && st.rt.color[0]->width == 256) {
+            int x0 = mx < 0 ? 0 : mx, y0 = my < 0 ? 0 : my;
+            int x1 = mx + mw > 256 ? 256 : mx + mw, y1 = my + mh > 256 ? 256 : my + mh;
+            if (x1 > x0 && y1 > y0) {
+                vk_end_pass();
+                st.rt_dirty = true;
+                uint32_t w = (uint32_t)(x1 - x0), h = (uint32_t)(y1 - y0);
+                VkSpan s = vk_transient((uint64_t)w * h * 4, 16);
+                uint16_t hv;
+                { _Float16 f = (_Float16)mv; memcpy(&hv, &f, 2); }
+                uint16_t *px = s.ptr;
+                for (uint32_t i = 0; i < w * h * 2; i++) px[i] = hv;
+                VkCommandBuffer cb = vk_cmd();
+                vk_full_barrier(cb);
+                VkBufferImageCopy c = {.bufferOffset = s.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                       .imageOffset = {x0, y0, 0}, .imageExtent = {w, h, 1}};
+                vkCmdCopyBufferToImage(cb, s.buf, ((TexBackend *)st.rt.color[0]->backend)->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+                vk_full_barrier(cb);
+            }
+        }
+    }
+    {   // ODYSSEY_FILL_RG16F=<r>,<g> (tests): every 256x256 RG16F target filled with that value after each draw into it -
+        // does what samples it (Cap Kingdom's fog) change with it?
+        static int fill = -1;
+        static float fv[2];
+        if (fill < 0) { const char *e = getenv("ODYSSEY_FILL_RG16F"); fill = e && sscanf(e, "%f,%f", &fv[0], &fv[1]) == 2; }
+        if (fill && st.rt.ncolor && st.rt.color[0] && st.rt.color[0]->format == 0x11 && st.rt.color[0]->backend &&
+            st.rt.color[0]->width == 256 && st.rt.color[0]->height == 256) {
+            vk_end_pass();
+            st.rt_dirty = true;
+            VkCommandBuffer cb = vk_cmd();
+            vk_full_barrier(cb);
+            VkClearColorValue cv = {.float32 = {fv[0], fv[1], 0, 0}};
+            VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdClearColorImage(cb, ((TexBackend *)st.rt.color[0]->backend)->image, VK_IMAGE_LAYOUT_GENERAL, &cv, 1, &rg);
+            vk_full_barrier(cb);
+        }
+    }
     cum_draws++;
     if (g_gpuprof_frame && gp_n) {
         if (!gp_draws[gp_n - 1]) {  // first draw of the row: its fragment shader hash
@@ -5115,6 +5877,35 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
             }
         }
     }
+    {   // ODYSSEY_LOG_CB=<code address>[,...]: for a draw using that vertex or fragment shader, its constant buffers
+        // (each bound one's first 32 vec4, as floats) - a shader's transforms next to the data it reads
+        static uint64_t want[8];
+        static int nwant = -1;
+        if (nwant < 0) {
+            nwant = 0;
+            const char *e = getenv("ODYSSEY_LOG_CB");
+            while (e && *e && nwant < 8) { char *end; want[nwant++] = strtoull(e, &end, 16); e = *end == ',' ? end + 1 : NULL; }
+        }
+        for (int k = 0; k < nwant; k++) {
+            int stg = st.program->stages[0].code_addr == want[k] ? 0 : st.program->stages[1].code_addr == want[k] ? 1 : -1;
+            if (stg < 0) continue;
+            for (int cb = 0; cb < 18; cb++) {
+                uint64_t a = st.ubuf[stg][cb].addr, sz = st.ubuf[stg][cb].size;
+                if (!a || a < GUEST_LO || a >= GUEST_HI) continue;
+                const float *f = (const float *)(uintptr_t)a;
+                uint64_t nv = sz / 16 < 32 ? sz / 16 : 32;
+                for (uint64_t v = 0; v < nv; v++)
+                    LOG("[cb] %s cb%d[%llu] = %g %g %g %g\n", stg ? "fs" : "vs", cb + 3, (unsigned long long)v, f[v * 4], f[v * 4 + 1],
+                        f[v * 4 + 2], f[v * 4 + 3]);
+            }
+        }
+    }
+    for (int i = 0; i < pr->vi->ntex && i < 64; i++) {  // vertex textures (displacement maps): which, size, format
+        NvnTexture *t = shader_texture_object(0, &pr->vi->tex[i]);
+        if (!t) { LOG("[draw]   vtex%d: none\n", i); continue; }
+        LOG("[draw]   vtex%d: %p addr %llx %ux%u f%#x lv %u\n", i, (void *)t, (unsigned long long)t->addr, t->width, t->height,
+            t->format, t->layout.levels);
+    }
     for (int i = 0; i < pr->fi->ntex && i < 64; i++) {  // fragment textures: guest size / format, allocation, scale
         NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
         const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
@@ -5132,6 +5923,109 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
         }
         LOG("\n");
     }
+}
+
+typedef struct { NvnTexture *tex; uint64_t id, addr, size; } PaintShared;
+static PaintShared *paint_shared;
+static size_t paint_shared_count, paint_shared_capacity;
+static uint64_t paint_cpu_epoch;
+
+static bool paint_register_shared(NvnTexture *t, uint64_t span) {
+    size_t slot = paint_shared_count;
+    for (size_t i = 0; i < paint_shared_count; i++) {
+        if (paint_shared[i].tex == t && paint_shared[i].id == t->debug_id) return true;
+        if (!paint_shared[i].tex->backend || paint_shared[i].tex->live <= 0) slot = i;
+    }
+    if (slot == paint_shared_count) {
+        if (paint_shared_count == paint_shared_capacity) {
+            size_t capacity = paint_shared_capacity ? paint_shared_capacity * 2 : 16;
+            void *p = realloc(paint_shared, capacity * sizeof *paint_shared);
+            if (!p) return false;
+            paint_shared = p; paint_shared_capacity = capacity;
+        }
+        paint_shared_count++;
+    }
+    paint_shared[slot] = (PaintShared){t, t->debug_id, t->addr, span};
+    return true;
+}
+
+static bool paint_write_overlaps(const PaintShared *p, uint64_t addr, uint64_t size) {
+    return p->tex->backend && p->tex->live > 0 && p->tex->debug_id == p->id &&
+        (addr >= p->addr ? addr - p->addr < p->size : p->addr - addr < size);
+}
+
+// Only textures fully synchronized for PaintObj's verified CPU filter qualify.
+// An explicit game CPU flush then hands those bytes back to the GPU uploader.
+void renderer_paint_cpu_written(uint64_t addr, uint64_t size) {
+    if (!size) return;
+    bool any = false;
+    for (size_t i = 0; i < paint_shared_count; i++) any |= paint_write_overlaps(&paint_shared[i], addr, size);
+    if (!any) return;
+    vk_end_pass();
+    wait_why = "paint CPU edits";
+    renderer_flush();
+    for (size_t i = 0; i < paint_shared_count; i++) if (paint_write_overlaps(&paint_shared[i], addr, size)) {
+        TexBackend *b = paint_shared[i].tex->backend;
+        b->gpu_owned = false; b->dynamic = true; b->uploaded = false;
+        b->paint_cpu_pending = true;
+        b->checked_frame = UINT64_MAX;
+    }
+    paint_cpu_epoch++;
+    vk_view_gen++;
+    st.rt_dirty = true;
+    static unsigned count;
+    if (++count <= 4) LOG("[paint-sync] CPU edits flushed at %llx +%llu\n", (unsigned long long)addr, (unsigned long long)size);
+}
+
+// Experimental CPU feedback: read only the resource and texel explicitly requested
+// by the game. Stage on the render thread; never DMA into the live guest heap.
+void renderer_cpu_texel(RqCpuTexel *q) {
+    NvnTexture *t = tex_trace_find(q->addr);
+    TexBackend *b = t ? t->backend : NULL;
+    const FormatInfo *fi = t ? t->layout.fmt : NULL;
+    unsigned bytes = q->component_bytes ? q->component_bytes : 2;
+    bool format_ok = t && ((bytes == 2 && (t->format == 0x05 || t->format == 0x11 || t->format == 0x29)) ||
+        (bytes == 4 && q->components == 1 && t->format == 0x25 && b && b->gpu_owned));
+    if (!b || !b->image || !fi || !format_ok || !q->components || q->components > 4 || fi->bpb != q->components * bytes || q->component >= q->components ||
+        b->guest_format ||
+        b->width != t->width || b->height != t->height || b->layers != 1 || b->depth != 1 || b->samples != 1 ||
+        q->x >= b->width || q->y >= b->height || b->width > 1024 || b->height > 1024) return;
+    uint64_t row_bytes = (uint64_t)b->width * fi->bpb;
+    if (q->snapshot && (bytes != 4 || !nvn_flags_linear(t->flags) || q->guest_pitch != t->stride ||
+        !nvn_linear_rows_fit(q->guest_capacity, q->guest_pitch, row_bytes, b->height) ||
+        !nvn_linear_rows_fit(q->snapshot_capacity, row_bytes, row_bytes, b->height))) return;
+    typedef struct { uint64_t id, frame, size, epoch; uint8_t *bytes; } Cache;
+    static Cache cache[8];
+    static unsigned next;
+    Cache *e = NULL;
+    for (int i = 0; i < 8; i++) if (cache[i].id == t->debug_id) { e = &cache[i]; break; }
+    if (!e) { e = &cache[next++ % 8]; e->id = t->debug_id; e->frame = UINT64_MAX; }
+    uint64_t frame = renderer_present_count(), size = (uint64_t)b->width * b->height * fi->bpb;
+    if (q->refresh_snapshot || e->frame != frame || e->size != size || (bytes == 4 && e->epoch != paint_cpu_epoch)) {
+        vk_end_pass();
+        st.rt_dirty = true;
+        VkCommandBuffer cb = vk_cmd();
+        vk_full_barrier(cb);
+        VkSpan out = vk_readback(size);
+        VkBufferImageCopy cp = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                .imageExtent = {b->width, b->height, 1}};
+        vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &cp);
+        wait_why = bytes == 4 ? "paint CPU feedback probe" : "fog CPU feedback probe";
+        renderer_flush();
+        if (e->size != size) { free(e->bytes); e->bytes = malloc(size); e->size = size; }
+        if (!e->bytes) { e->size = 0; return; }
+        memcpy(e->bytes, out.ptr, size);
+        e->frame = frame;
+        e->epoch = paint_cpu_epoch;
+    }
+    if (q->snapshot) {
+        uint64_t span = q->guest_pitch * (b->height - 1) + row_bytes;
+        if (!paint_register_shared(t, span)) return;
+        memcpy(q->snapshot, e->bytes, size);
+        q->snapshot_width = b->width; q->snapshot_height = b->height;
+    }
+    memcpy(&q->value, e->bytes + ((uint64_t)q->y * b->width + q->x) * fi->bpb + q->component * bytes, bytes);
+    q->valid = true;
 }
 
 // ================================================================== texture copies
@@ -5431,7 +6325,7 @@ static VkPipeline post_pipeline(const char *fs) {
                                               .pAttachments = &cba};
     VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn};
-    VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
+    VkFormat fmt = !strcmp(fs, "cas.frag") || !strcmp(fs, "dlss_rcas.frag") ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM;
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1,
                                         .pColorAttachmentFormats = &fmt};
     VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
@@ -5445,10 +6339,21 @@ static VkPipeline post_pipeline(const char *fs) {
     return p;
 }
 
-// Post image `i` at w x h (RGBA8, kept until the size changes). 0, 1: SMAA edges / weights, 2: SMAA output,
-// 3, 4: FSR EASU / RCAS.
+static void prewarm_post_pipelines(void) {
+    static const char *const filters[] = {
+        "smaa_edge.frag", "smaa_weight.frag", "smaa_blend.frag", "easu.frag", "rcas.frag",
+#ifdef _WIN32
+        "cas.frag",
+        "dlss_rcas.frag",
+#endif
+    };
+    for (size_t i = 0; i < sizeof filters / sizeof *filters; i++) post_pipeline(filters[i]);
+}
+
+// Post image `i` at w x h. 0, 1: SMAA edges / weights, 2: SMAA output,
+// 3, 4: FSR EASU / RCAS (RGBA8). 5, 6: CAS / RCAS on DLSS (half float).
 static TexBackend *post_image(int i, uint32_t w, uint32_t h) {
-    static TexBackend img[5];
+    static TexBackend img[7];
     TexBackend *d = &img[i];
     if (d->image && (d->width != w || d->height != h)) {
         vk_views_forget(d);
@@ -5457,13 +6362,14 @@ static TexBackend *post_image(int i, uint32_t w, uint32_t h) {
         d->mem = VK_NULL_HANDLE;
     }
     if (!d->image) {
+        VkFormat format = i >= 5 ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM;
         VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
-                                .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1,
+                                .format = format, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1,
                                 .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
                                 .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &d->image, &d->mem, NULL));
-        d->format = VK_FORMAT_R8G8B8A8_UNORM; d->width = w; d->height = h; d->depth = 1; d->layers = 1; d->levels = 1;
+        d->format = format; d->width = w; d->height = h; d->depth = 1; d->layers = 1; d->levels = 1;
         d->samples = 1; d->aspect = VK_IMAGE_ASPECT_COLOR_BIT; d->base_type = VK_IMAGE_VIEW_TYPE_2D;
         vk_image_init_layout(vk_cmd(), d->image, d->aspect);
     }
@@ -5542,6 +6448,34 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
     uint32_t ow = (uint32_t)lround(ow_d), oh = (uint32_t)lround(oh_d);
     if (ow > 16384) ow = 16384;
     if (oh > 16384) oh = 16384;
+#ifdef _WIN32
+    VkImageView dlss = vk_dlss_upscale(cb, b, v, ow, oh, renderer_present_count());
+    if (dlss) {
+        bool fsr3 = g_settings.temporal_backend == TEMPORAL_FSR3 || g_settings.temporal_backend == TEMPORAL_FSR4;
+        int cas_strength = *settings_temporal_cas_sharpness();
+        bool cas = *settings_temporal_cas() && cas_strength > 0;
+        int rcas_strength = fsr3 ? 0 : *settings_temporal_sharpness(); // FSR's own RCAS ran inside its dispatch
+        if (!cas && !rcas_strength) return dlss;
+        extern void vk_frame_suspend(void), vk_frame_resume(void);
+        vk_frame_suspend();
+        if (rcas_strength > 0) {
+            TexBackend *sharp = post_image(6, ow, oh);
+            float pc[8] = {exp2f(-2.0f * (1.0f - rcas_strength * 0.01f)), 0, 0, 0, (float)ow, (float)oh};
+            post_pass(cb, "dlss_rcas.frag", &dlss, 1, sharp, pc, false);
+            vk_full_barrier(cb);
+            dlss = post_view(sharp);
+        }
+        if (cas) {
+            TexBackend *sharp = post_image(5, ow, oh);
+            float pc[8] = {cas_strength * 0.01f};
+            post_pass(cb, "cas.frag", &dlss, 1, sharp, pc, false);
+            vk_full_barrier(cb);
+            dlss = post_view(sharp);
+        }
+        vk_frame_resume();
+        return dlss;
+    }
+#endif
     bool fsr = g_settings.upscaler == UPSCALE_FSR1 && (ow > b->width + 1 || oh > b->height + 1);  // (an upscale only)
     if (!smaa && !fsr) return v;
     extern void vk_frame_suspend(void);
@@ -5566,10 +6500,13 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
         float pe[8] = {iw / ow, ih / oh, 0.5f * iw / ow - 0.5f, 0.5f * ih / oh - 0.5f, iw, ih};
         VkImageView ei[3] = {v};
         post_pass(cb, "easu.frag", ei, 1, e, pe, false);
-        float pr[8] = {exp2f(-0.2f), 0, 0, 0, (float)ow, (float)oh};  // (sharpness 0.2 stops: AMD's default)
-        VkImageView ri_[3] = {post_view(e)};
-        post_pass(cb, "rcas.frag", ri_, 1, r, pr, false);
-        v = post_view(r);
+        v = post_view(e);
+        if (g_settings.fsr1_sharpness > 0) {
+            float pr[8] = {exp2f(-2.0f * (1.0f - g_settings.fsr1_sharpness * 0.01f)), 0, 0, 0, (float)ow, (float)oh};
+            VkImageView ri_[3] = {v};
+            post_pass(cb, "rcas.frag", ri_, 1, r, pr, false);
+            v = post_view(r);
+        }
     }
     vk_full_barrier(cb);
     vk_frame_resume();

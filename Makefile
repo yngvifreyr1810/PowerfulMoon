@@ -45,7 +45,7 @@ GEN_OBJ  := $(patsubst %.c,$(B)/obj/%.o,$(patsubst $(GEN)/%,%,$(GEN_SRC))) $(B)/
 GEN_MODS := $(foreach m,main subsdk0 sdk,$(if $(wildcard $(GEN)/$(m)/*.c),$(m)))
 RT_SRC   := $(wildcard runtime/*.c) $(wildcard runtime/hle/*.c) $(wildcard runtime/services/*.c) \
             $(wildcard runtime/nvn/*.c) $(wildcard runtime/nvn/maxwell/*.c) runtime/platform/$(PLATFORM).c
-RT_HDRS  := $(wildcard runtime/*.h) $(wildcard runtime/platform/*.h) $(wildcard runtime/nvn/*.h) \
+RT_HDRS  := $(wildcard runtime/*.h) $(wildcard runtime/hle/*.h) $(wildcard runtime/platform/*.h) $(wildcard runtime/nvn/*.h) \
             $(wildcard runtime/nvn/maxwell/*.h) $(wildcard runtime/nvn/vulkan/*.h) $(wildcard runtime/ui/*.h)
 UI_SRC   := $(wildcard runtime/ui/*.mm)
 UI_OBJ   := $(patsubst runtime/%.mm,$(B)/rt/%.o,$(UI_SRC))
@@ -114,7 +114,8 @@ endif
 GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/odyssey_patches.py \
                 tools/simd_c.py tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
                 runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h runtime/app_identity.h tools/zig_slim.sh
-GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
+# (line endings don't count: a Windows checkout with CRLF and GitHub's LF one make the same library)
+GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | tr -d '\015' | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
 RTFLAGS  := -O2 -g -ffile-prefix-map=$(CURDIR)=. $(if $(DEPS),-ffile-prefix-map=$(DEPS)=dependencies) -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(DEPINC) $(OSFLAGS)
@@ -129,7 +130,7 @@ $(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h
 $(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS) $(wildcard $(GEN)/*/*_table.c)
 	@mkdir -p $(dir $@)
 	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_ID)"' -DGAMELIB_MODULES='$(foreach m,$(GEN_MODS),X($(m)))' -c $< -o $@
-$(B)/rt/gamelib.o: $(GAMELIB_SRCS)
+$(B)/rt/gamelib.o: $(GAMELIB_SRCS) Makefile  # (GAMELIB_ID is computed there)
 $(B)/rt/gamelib.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"'
 # the setup page's build of it on the player's machine (runtime/gamebuild.c) uses the same flags
 $(B)/rt/gamebuild.o: $(GAMELIB_SRCS) Makefile
@@ -148,6 +149,9 @@ $(B)/inc/smaa_hlsl.inc: third_party/smaa/SMAA.hlsl
 	LC_ALL=C tr -d '\r' < $< | LC_ALL=C tr '\200-\377' '?' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' > $@
 $(B)/rt/nvn/smaa_data.o: $(B)/inc/smaa_hlsl.inc
 $(B)/rt/nvn/smaa_data.o: RTFLAGS += -I$(B)/inc -Ithird_party/smaa/Textures
+$(B)/rt/nvn/vulkan/fsr3_sdk.o: $(wildcard third_party/fsr3_sdk/api/include/*.h) \
+    $(wildcard third_party/fsr3_sdk/api/include/vk/*.h) $(wildcard third_party/fsr3_sdk/upscalers/include/*.h)
+$(B)/rt/nvn/vulkan/xess_sdk.o: $(wildcard third_party/xess/include/*.h)
 
 $(B)/rt/%.o: runtime/%.cpp $(RT_HDRS)
 	@mkdir -p $(dir $@)
@@ -216,7 +220,8 @@ dlls: $(EXE)
 # gamelib-src/ and the exe's import library - the shader list, the menu font, README and LICENSE. No game code and no
 # game files: the setup page (runtime/ui/setup.mm) builds them from the player's own. The exe is built in $(WIN_B)
 # against the LGPL FFmpeg from `make deps-windows` (MSYS2's is a GPLv3 build); vulkan-1.dll is the system's.
-# Order: make deps-windows; make gen-helper; tools/fetch_zig.sh; make dist.
+# Also the vendors' upscaler runtimes (tools/fetch_upscalers.sh: DLSS, FSR 3.1 / 4, XeSS) and the pipeline seed.
+# Order: make deps-windows; make gen-helper; tools/fetch_zig.sh; tools/fetch_upscalers.sh; make dist.
 VERSION  := $(shell sed -n 's/.*"ProductVersion", "\(.*\)"/\1/p' runtime/platform/windows.rc)
 DIST     := build/dist/PowerfulMoon
 WIN_B    := build/win-release
@@ -271,6 +276,7 @@ dist:
 	@[ -f build/deps-win/lib/libavcodec.dll.a ] || { echo "make deps-windows first (LGPL FFmpeg)"; exit 1; }
 	@[ -d build/helper/odysseygen ] || { echo "make gen-helper first (the game code generator)"; exit 1; }
 	@[ -x build/zig/zig.exe ] || { echo "tools/fetch_zig.sh first (the compiler)"; exit 1; }
+	@[ -f build/upscalers/libxess.dll ] || { echo "tools/fetch_upscalers.sh first (DLSS, FSR, XeSS runtimes)"; exit 1; }
 	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win $(WIN_B)/PowerfulMoon.exe
 	! nm $(WIN_B)/PowerfulMoon.exe | grep ' f_70' >/dev/null  # (no game code inside)
 	rm -rf build/dist && mkdir -p "$(DIST)/gamelib-src"
@@ -281,7 +287,8 @@ dist:
 	cp -R build/zig-slim "$(DIST)/zig"
 	cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
 	    "$(DIST)/gamelib-src/"
-	cp runtime/nvn/vulkan/known_programs.txt third_party/imgui/misc/fonts/Roboto-Medium.ttf README.md LICENSE "$(DIST)/"
+	cp runtime/nvn/vulkan/known_programs.txt third_party/imgui/misc/fonts/Roboto-Medium.ttf data/pipeline-seed.bin 	    README.md LICENSE "$(DIST)/"
+	cp build/upscalers/*.dll "$(DIST)/"  # (loaded only when chosen in the menu)
 	tools/dist_licenses.sh "$(DIST)"  # (every shipped component's licence and source: licenses/README.txt)
 	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/PowerfulMoon.exe | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | \
 	    sort -u | xargs -I{} cp -u {} "$(DIST)/"

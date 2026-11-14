@@ -41,6 +41,7 @@ static uint32_t *cache_load(uint64_t h, size_t *nwords) {
     return d;
 }
 
+_Atomic bool vk_spirv_cache_failed;  // a SPIR-V couldn't be written: what is stored can't be counted on (exec.c modules)
 static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
     static int made;
     if (!made) { made = 1; mkdir("cache", 0755); mkdir("cache/spirv", 0755); }
@@ -48,9 +49,10 @@ static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
     snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)h);
     snprintf(tmp, sizeof tmp, "%s.%llx", path, (unsigned long long)(uintptr_t)&made ^ (unsigned long long)(uintptr_t)spv);
     FILE *f = fopen(tmp, "wb");
-    if (!f) return;
+    if (!f) { vk_spirv_cache_failed = true; return; }
     bool ok = fwrite(spv, 4, nwords, f) == nwords;
-    fclose(f);
+    if (fclose(f) != 0) ok = false;
+    if (!ok) vk_spirv_cache_failed = true;
     if (!ok || rename(tmp, path) != 0) remove(tmp);  // (another thread may have stored it first)
 }
 
@@ -410,9 +412,36 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(min(mx, max(mn, ac / aw)), 1.0);\n"
                "}\n";
     }
+    // AMD FidelityFX CAS (MIT), sharpening only. Soften the local extrema with the diagonals,
+    // then adapt the cross filter to the contrast per channel. pc.a.x is the strength from 0 to 1.
+    if (!strcmp(name, "cas.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(binding=0) uniform sampler2D src;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location=0) out vec4 o;\n"
+               "vec3 sampleLinear(ivec2 p) {\n"
+               "  vec3 c = clamp(texelFetch(src, clamp(p, ivec2(0), textureSize(src,0)-1), 0).rgb, 0.0, 1.0);\n"
+               "  return c;\n"  // The final SDR signal is already display-referred, like the RCAS input.
+               "}\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+               "  vec3 e=sampleLinear(p), n=sampleLinear(p+ivec2(0,-1)), s=sampleLinear(p+ivec2(0,1));\n"
+               "  vec3 w=sampleLinear(p+ivec2(-1,0)), r=sampleLinear(p+ivec2(1,0));\n"
+               "  vec3 nw=sampleLinear(p+ivec2(-1,-1)), ne=sampleLinear(p+ivec2(1,-1));\n"
+               "  vec3 sw=sampleLinear(p+ivec2(-1,1)), se=sampleLinear(p+ivec2(1,1));\n"
+               "  vec3 lo=min(e,min(min(n,s),min(w,r))), hi=max(e,max(max(n,s),max(w,r)));\n"
+               "  lo += min(lo,min(min(nw,ne),min(sw,se)));\n"
+               "  hi += max(hi,max(max(nw,ne),max(sw,se)));\n"
+               "  vec3 amp=sqrt(clamp(min(lo,2.0-hi)/max(hi,vec3(1e-6)),0.0,1.0));\n"
+               "  vec3 weight=-amp/mix(8.0,5.0,pc.a.x);\n"
+               "  vec3 sharp=clamp((e+weight*(n+s+w+r))/(1.0+4.0*weight),0.0,1.0);\n"
+               "  o=vec4(sharp,1);\n"
+               "}\n";
+    }
     // FSR 1 RCAS: contrast-adaptive sharpening of the EASU output (same size). a.x = sharpness (exp2(-stops)),
     // b.xy = image size. The lobe is limited so the result stays inside the neighbours' range; noise is damped.
-    if (!strcmp(name, "rcas.frag")) {
+    if (!strcmp(name, "rcas.frag") || !strcmp(name, "dlss_rcas.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
                "layout(set = 0, binding = 0) uniform sampler2D t;\n"

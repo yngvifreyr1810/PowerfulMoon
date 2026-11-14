@@ -5,6 +5,8 @@
 #include <string.h>
 #include <assert.h>
 bool plat_is_steam_deck(void) { return false; }
+int SDL_GetSystemRAM(void) { return 16384; }
+uint64_t plat_total_ram(void) { return 16ull << 30; }
 static char mapping[32]="east";
 bool bind_settings_load(const char *key,const char *value) {
     if (strcmp(key,"bind_pad_a")) return false;

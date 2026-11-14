@@ -16,7 +16,7 @@ extern "C" {
 static void cell(int dev, int slot, int fam, int cap_dev, int cap_slot, int ms_left) {
     char lbl[96];
     bool waiting = cap_dev == dev && cap_slot == slot;
-    if (waiting) snprintf(lbl, sizeof lbl, "Press %s...  %d##%d_%d", dev == BIND_DEV_PAD ? "a button" : "a key",
+    if (waiting) snprintf(lbl, sizeof lbl, "Press %s...  %d##%d_%d", dev == BIND_DEV_PAD ? "a button" : "a key or mouse button",
                           (ms_left + 999) / 1000, dev, slot);
     else snprintf(lbl, sizeof lbl, "%s##%d_%d", dev == BIND_DEV_PAD ? bind_pad_label(g_bind_pad[slot], fam) :
                                                  bind_key_label(g_bind_key[slot]), dev, slot);
@@ -50,7 +50,7 @@ extern "C" void controls_bindings_draw(float scale) {
     SDL_free(ids);
     ImGui::TextUnformatted(line);
     ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("Select a binding, then press the new button or key. Esc (or 5 seconds) cancels. A button "
+    ImGui::TextDisabled("Select a binding, then press the new button, key, mouse button or wheel. Esc (or 5 seconds) cancels. A button "
                         "that's already in use swaps with the old one.");
     ImGui::PopTextWrapPos();
 

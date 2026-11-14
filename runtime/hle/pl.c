@@ -4,7 +4,9 @@
 //     and nintendo_ext_003.bfttf (NintendoExt button glyphs); plain .ttf versions of those names also work
 //  3. a Japanese gothic like UD Shin Go (much closer to the game's look than Arial): Hiragino Sans W4 on macOS,
 //     Yu Gothic Regular / Medium on Windows
-//  4. Arial
+//  4. Arial; on Linux DejaVu Sans, Noto Sans or Liberation Sans, whichever the distribution has
+//  5. Roboto Medium, shipped next to the app for the menu (Apache 2.0): so a system with none of those fonts still
+//     starts (Manjaro, Bazzite: #16)
 // .bfttf is the console's obfuscated TTF: 8-byte header (magic, size) then every u32 XORed with a fixed key.
 // .ttc collections get face 0 copied out as a standalone font (the game's font engine wants one sfnt).
 #include <stdlib.h>
@@ -12,6 +14,7 @@
 #include <strings.h>
 
 #include "../hle.h"
+#include "../paths.h"
 
 typedef struct { uint64_t addr, size; } Font;
 static Font fonts[2];  // [0] Standard (every type), [1] NintendoExt when a dump provides it
@@ -118,10 +121,20 @@ static void load_fonts(void) {
                          // Linux: DejaVu Sans (Debian / Ubuntu, Arch, Fedora). Not Noto Sans CJK: CFF outlines,
                          // which the game's font engine crashes on (it wants TrueType)
                          "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
-                         "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"};
+                         "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+                         // Noto Sans' static TrueType (Arch, Debian / Ubuntu, Fedora), Liberation Sans (Fedora, Debian)
+                         "/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                         "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+                         "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+                         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                         "/usr/share/fonts/TTF/LiberationSans-Regular.ttf"};
     for (size_t i = 0; i < sizeof std / sizeof *std && !fonts[0].addr; i++)
         if (std[i]) load_one(std[i], &fonts[0]);
-    if (!fonts[0].addr) FATAL("no usable system font substitute\n");
+    char shipped[1100];  // (the menu's font, next to the app: always there in a release)
+    if (!fonts[0].addr && rt_resource("Roboto-Medium.ttf", "third_party/imgui/misc/fonts/Roboto-Medium.ttf", shipped,
+                                      sizeof shipped))
+        load_one(shipped, &fonts[0]);
+    if (!fonts[0].addr) FATAL("no usable system font substitute (and Roboto-Medium.ttf is missing next to the app)\n");
     if (!load_one("fonts/nintendo_ext_003.bfttf", &fonts[1])) load_one("fonts/nintendo_ext_003.ttf", &fonts[1]);
 }
 

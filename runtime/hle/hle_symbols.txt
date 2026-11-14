@@ -12,3 +12,7 @@ _ZN2nn4diag6detail10VAbortImplEPKcS3_S3_iPKNS_6ResultEPKNS_2os17UserExceptionInf
 _ZN4sead6system14HaltWithDetailEPKciS2_z
 _ZN4sead6system4HaltEv
 _ZN4sead6system15PrintStringImplEPKci
+# Odyssey: the camera's stick (runtime/hle/input.c: the mouse camera adds to it, past a stick's reach)
+_ZNK18ProjectCameraInput14calcInputStickEPN4sead7Vector2IfEE
+# Odyssey: the save's text language, then the menu's Language over it (runtime/hle/odyssey_language.c)
+_ZN14GameDataHolder44readFromSaveDataBufferCommonFileOnlyLanguageEv

@@ -19,6 +19,8 @@
 #include <unistd.h>
 
 #include "../mods.h"
+#include "../diagnostics.h"
+#include "../paths.h"
 #include "../platform.h"
 
 #ifndef MAP_FIXED_NOREPLACE
@@ -80,6 +82,7 @@ void plat_thread_realtime(uint64_t period_ns) {
 // (runtime/paths.h; rt_paths_init runs later, so the same rule is applied here). Processes started by this one (the
 // re-exec for a fresh address layout) append to the same log.
 static char g_log_path[1024];
+const char *plat_log_path(void) { return g_log_path; }
 
 static void log_to_file_without_terminal(void) {
     if (isatty(STDERR_FILENO)) return;
@@ -178,14 +181,128 @@ uint64_t plat_heap_bytes(void) { return 0; }
 void plat_heap_histogram(void) {}
 void plat_heap_check(const char *where) { (void)where; }
 
+// An error before the game has a window of its own (the first start: no Vulkan driver, say), in a plain window of ours:
+// SDL's text, the software renderer. SDL's message box draws its own X11 window without WM_CLASS and with a WM_NAME
+// that older tools can't read (the AppImage catalog's test, xdotool 2016, never saw it), and in a Wayland session
+// without Xwayland it needs zenity. Closed by Enter / Escape / a click / a controller button / the window's X.
+static bool error_window(const char *text) {
+    if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) return false;
+    SDL_InitSubSystem(SDL_INIT_GAMEPAD);  // (a Steam Deck: the A button closes it)
+    enum { W = 760, SCALE = 2, CH = 8 * SCALE, LINE = 12 * SCALE, MARGIN = 20 };
+    const int cols = (W - 2 * MARGIN) / CH;
+    // word-wrapped lines (a word longer than a line - a path - is cut where the line ends)
+    static char lines[64][128];
+    int n = 0, len = 0;
+    for (const char *p = text; *p && n < 60;) {
+        if (*p == '\n') { lines[n][len] = 0; n++, len = 0; p++; continue; }
+        size_t word = strcspn(p, " \n");
+        if (len && len + (int)word > cols) { lines[n][len] = 0; n++, len = 0; }
+        if (*p == ' ' && !len) { p++; continue; }
+        size_t take = word ? word : 1;
+        if (take > (size_t)(cols - len)) take = (size_t)(cols - len);
+        memcpy(lines[n] + len, p, take);
+        len += (int)take, p += take;
+        if (len >= cols) { lines[n][len] = 0; n++, len = 0; }
+    }
+    if (len) lines[n][len] = 0, n++;
+    const char *hint = "Enter or a click closes this window.";
+    int h = MARGIN * 2 + (n + 2) * LINE;
+    SDL_Window *w = SDL_CreateWindow(RT_APP_NAME, W, h, 0);
+    if (!w) return false;
+    SDL_Renderer *r = SDL_CreateRenderer(w, "software");
+    if (!r) r = SDL_CreateRenderer(w, NULL);
+    if (!r) { SDL_DestroyWindow(w); return false; }
+    SDL_SetRenderScale(r, SCALE, SCALE);
+    for (bool done = false; !done;) {
+        SDL_SetRenderDrawColor(r, 32, 32, 36, 255);
+        SDL_RenderClear(r);
+        SDL_SetRenderDrawColor(r, 235, 235, 235, 255);
+        for (int i = 0; i < n; i++)
+            SDL_RenderDebugText(r, MARGIN / (float)SCALE, (MARGIN + i * LINE) / (float)SCALE, lines[i]);
+        SDL_SetRenderDrawColor(r, 150, 150, 160, 255);
+        SDL_RenderDebugText(r, MARGIN / (float)SCALE, (MARGIN + (n + 1) * LINE) / (float)SCALE, hint);
+        SDL_RenderPresent(r);
+        SDL_Event e;
+        if (!SDL_WaitEventTimeout(&e, 250)) continue;
+        do {
+            switch (e.type) {
+            case SDL_EVENT_QUIT: case SDL_EVENT_WINDOW_CLOSE_REQUESTED: case SDL_EVENT_MOUSE_BUTTON_UP:
+            case SDL_EVENT_GAMEPAD_BUTTON_DOWN: done = true; break;
+            case SDL_EVENT_KEY_DOWN:
+                if (e.key.key == SDLK_RETURN || e.key.key == SDLK_ESCAPE || e.key.key == SDLK_SPACE) done = true;
+                break;
+            case SDL_EVENT_GAMEPAD_ADDED: SDL_OpenGamepad(e.gdevice.which); break;
+            }
+        } while (SDL_PollEvent(&e));
+    }
+    SDL_DestroyRenderer(r);
+    SDL_DestroyWindow(w);
+    return true;
+}
+
+// An error box that never hangs. Before the game's window: error_window. After it (a crash in play): SDL's message box,
+// which tries zenity first and waits for it to end - and zenity can hang without ever showing a window (seen on
+// SteamOS's desktop). With zenity out of PATH, SDL draws its own X11 box; only if that fails in a Wayland session (no
+// Xwayland) is zenity tried. Only called just before the process ends, so the changed PATH doesn't matter.
+void plat_error_box(const char *text) {
+    int windows = 0;
+    SDL_Window **list = SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetWindows(&windows) : NULL;
+    SDL_free(list);
+    if (!windows && error_window(text)) return;
+    const char *path = getenv("PATH");
+    char *saved = path ? strdup(path) : NULL;
+    setenv("PATH", "", 1);
+    bool shown = SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, RT_APP_NAME, text, NULL);
+    if (saved) setenv("PATH", saved, 1);
+    free(saved);
+    if (!shown && getenv("WAYLAND_DISPLAY"))  // (no display at all: zenity would hang too)
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, RT_APP_NAME, text, NULL);
+}
+
+// Fatal error (rt_fatal_trace): the last FATAL / exception line of the log in a message box (as on Windows)
 void plat_fatal_notice(void) {
     if (!g_log_path[0]) return;
     fflush(stderr);
-    char text[1600];
-    snprintf(text, sizeof text, "Power Moon Recomp stopped because of an error.%s\n\nDetails: %s",
-             mods_applied() ? "\n\nMods are on. If this started with a new mod, move it out of the mods folder: mods made "
-                              "for a later version of the game (1.3.0) can crash 1.0.0." : "", g_log_path);
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Power Moon Recomp", text, NULL);
+    char text[2900] = "PowerfulMoon stopped because of an error.";
+    FILE *f = fopen(g_log_path, "rb");
+    if (f) {
+        static char tail[16384];
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f), from = sz > (long)sizeof tail - 1 ? sz - (long)sizeof tail + 1 : 0;
+        fseek(f, from, SEEK_SET);
+        size_t got = fread(tail, 1, sizeof tail - 1, f);
+        tail[got] = 0;
+        fclose(f);
+        char *line = NULL;
+        for (char *p = tail; (p = strstr(p, "FATAL: ")) != NULL; p++) line = p;
+        if (!line) for (char *p = tail; (p = strstr(p, "*** ")) != NULL; p++) line = p;
+        if (line) {
+            char *end = strchr(line, '\n');
+            if (end) *end = 0;
+            snprintf(text, sizeof text, "PowerfulMoon stopped because of an error:\n\n%.600s", line);
+            // (VK_ERROR_OUT_OF_HOST_MEMORY -1 / VK_ERROR_OUT_OF_DEVICE_MEMORY -2: not a driver that is too old)
+            if (strstr(line, "failed: -2 (") || strstr(line, "failed: -1 (")) {
+                size_t l = strlen(text);
+                snprintf(text + l, sizeof text - l, "\n\nThe graphics card ran out of memory. Lower the internal resolution "
+                         "(menu > Graphics), or delete powermoon.ini in the game's folder to go back to the default settings.");
+            } else if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {
+                size_t l = strlen(text);
+                snprintf(text + l, sizeof text - l, "\n\nPowerfulMoon needs a graphics driver with Vulkan 1.3: "
+                         "install your distribution's Mesa or NVIDIA driver (on a Steam Deck it is already there).");
+            }
+        }
+    }
+    size_t l = strlen(text);
+    if (mods_applied())
+        l += (size_t)snprintf(text + l, sizeof text - l, "\n\nMods are on. If this started with a new mod, move it out of "
+                              "the mods folder: mods made for a later version of the game (1.3.0) can crash 1.0.0.");
+    // The crash report (runtime/diagnostics.c) is saved before the box shows. Not diagnostics_fatal_dialog here: its
+    // SDL message box with buttons goes through zenity, which can hang without a window (plat_error_box).
+    char report[1200];
+    if (diagnostics_capture_crash(report, sizeof report))
+        snprintf(text + l, sizeof text - l, "\n\nCrash report (attach it to a bug report): %s", report);
+    else snprintf(text + l, sizeof text - l, "\n\nDetails: %s", g_log_path);
+    plat_error_box(text);
 }
 
 const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c

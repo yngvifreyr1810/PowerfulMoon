@@ -75,7 +75,12 @@ const char *bind_pad_label(int host, int fam) {
     return fam == 1 ? xb[host] : fam == 2 ? ps[host] : nin[host];
 }
 
+// powermoon.ini's and the menu's names of the mouse's bindings (BIND_MOUSE_LEFT..)
+static const char *const k_mouse[BIND_KEY_CODE_COUNT - BIND_MOUSE_LEFT] = {
+    "Mouse Left", "Mouse Middle", "Mouse Right", "Mouse Back", "Mouse Forward", "Wheel Up", "Wheel Down"};
+
 const char *bind_key_label(int sc) {
+    if (bind_is_mouse(sc)) return k_mouse[sc - BIND_MOUSE_LEFT];
     if (sc <= 0 || sc >= SDL_SCANCODE_COUNT) return "(none)";
     const char *n = SDL_GetScancodeName((SDL_Scancode)sc);
     return n && *n ? n : "(unnamed key)";
@@ -181,6 +186,18 @@ bool bind_capture_event(const SDL_Event *e) {
         return true;
     case SDL_EVENT_KEY_UP: case SDL_EVENT_TEXT_INPUT:
         return true;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:  // (the click that started the capture was already let go: ImGui acts on release)
+        if (dev != BIND_DEV_KEY || e->button.button < SDL_BUTTON_LEFT || e->button.button > SDL_BUTTON_X2) return true;
+        cap_dev = -1;
+        assign(dev, cap_slot, BIND_MOUSE_LEFT + e->button.button - SDL_BUTTON_LEFT);
+        return true;
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+        return true;
+    case SDL_EVENT_MOUSE_WHEEL:
+        if (dev != BIND_DEV_KEY || e->wheel.y == 0) return true;
+        cap_dev = -1;
+        assign(dev, cap_slot, (e->wheel.y > 0) != (e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED) ? BIND_WHEEL_UP : BIND_WHEEL_DOWN);
+        return true;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
         // Home / Guide opens the menu; a keyboard capture ignores the controller (it times out, or Esc)
         if (dev != BIND_DEV_PAD || e->gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE || e->gbutton.button >= SDL_GAMEPAD_BUTTON_COUNT) return true;
@@ -211,6 +228,9 @@ bool bind_settings_load(const char *key, const char *val) {
             for (int h = 0; h < PADB_HOST_COUNT; h++)
                 if (!strcmp(val, k_pad_ini[h])) g_bind_pad[i] = (int16_t)h;
         } else {
+            int m = 0;
+            while (m < BIND_KEY_CODE_COUNT - BIND_MOUSE_LEFT && strcmp(val, k_mouse[m])) m++;
+            if (m < BIND_KEY_CODE_COUNT - BIND_MOUSE_LEFT) { g_bind_key[i] = (int16_t)(BIND_MOUSE_LEFT + m); continue; }
             SDL_Scancode sc = strcmp(val, "none") ? SDL_GetScancodeFromName(val) : SDL_SCANCODE_UNKNOWN;
             if (sc != SDL_SCANCODE_UNKNOWN || !strcmp(val, "none")) g_bind_key[i] = (int16_t)sc;
         }
@@ -223,5 +243,6 @@ void bind_settings_save(FILE *f) {
         if (g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT)
             fprintf(f, "bind_pad_%s = %s\n", k_ini[i], k_pad_ini[g_bind_pad[i]]);
     for (int i = 0; i < BIND_KEY_COUNT; i++)
-        fprintf(f, "bind_key_%s = %s\n", k_ini[i], g_bind_key[i] ? SDL_GetScancodeName((SDL_Scancode)g_bind_key[i]) : "none");
+        fprintf(f, "bind_key_%s = %s\n", k_ini[i], bind_is_mouse(g_bind_key[i]) ? k_mouse[g_bind_key[i] - BIND_MOUSE_LEFT] :
+                g_bind_key[i] ? SDL_GetScancodeName((SDL_Scancode)g_bind_key[i]) : "none");
 }

@@ -4,7 +4,8 @@
 # after make deps-windows and make gen-helper (it reads their build trees).
 set -euo pipefail
 D="$1/licenses"
-U=/c/msys64/ucrt64/share/licenses
+# (the MSYS2 tree the build uses, wherever it is installed: its clang's ../share/licenses)
+U=$(cd "$(dirname "$(command -v clang)")/../share/licenses" && pwd)
 SP=build/gen-venv/Lib/site-packages
 FF=build/deps-win/src/ffmpeg
 PYHOME=$(build/gen-venv/Scripts/python.exe -c 'import sys; print(sys.base_prefix)')
@@ -13,20 +14,32 @@ cp third_party/imgui/LICENSE.txt "$D/Dear-ImGui-MIT.txt"
 cp third_party/smaa/LICENSE.txt "$D/SMAA-MIT.txt"
 cp third_party/fsr/LICENSE.txt "$D/AMD-FSR1-MIT.txt"
 cp third_party/ryujinx/LICENSE.txt "$D/Ryujinx-MIT.txt"
-cp $U/VulkanMemoryAllocator/LICENSE "$D/VulkanMemoryAllocator-MIT.txt"
-cp $U/sdl3/LICENSE.txt "$D/SDL3-zlib.txt"
-cp $U/shaderc/LICENSE "$D/Apache-2.0.txt"
-cp $U/llvm-libs/LICENSE "$D/LLVM-Apache-2.0-with-LLVM-exception.txt"
-cp $U/libwinpthread/COPYING "$D/winpthreads.txt"
-cp $U/libgcc/COPYING.RUNTIME "$D/GCC-runtime-library-exception.txt"
-cp $U/libgcc/COPYING3 "$D/GPL-3.0.txt"
+# MSYS2 packages' licences: the folder's name has changed between package versions (VulkanMemoryAllocator /
+# vulkan-memory-allocator, ...), so each is found by pattern: the first match, or a clear error
+lic() {  # out-name folder-pattern file-pattern
+    local f
+    f=$(find "$U" -mindepth 2 -maxdepth 3 -type f -ipath "$U/$2/$3" 2>/dev/null | sort | head -1)
+    [ -n "$f" ] || { echo "tools/dist_licenses.sh: no $3 under $U/$2"; ls "$U"; exit 1; }
+    cp "$f" "$D/$1"
+}
+lic VulkanMemoryAllocator-MIT.txt '*vulkan*memory*allocator*' 'LICENSE*'
+lic SDL3-zlib.txt 'sdl3' 'LICENSE*'
+lic Apache-2.0.txt 'shaderc' 'LICENSE*'
+lic LLVM-Apache-2.0-with-LLVM-exception.txt 'llvm-libs' 'LICENSE*'
+lic winpthreads.txt '*winpthread*' 'COPYING*'
+lic GCC-runtime-library-exception.txt 'libgcc' 'COPYING.RUNTIME'
+lic GPL-3.0.txt 'libgcc' 'COPYING3'
 cp $FF/COPYING.LGPLv2.1 "$D/FFmpeg-LGPL-2.1.txt"
 cp $FF/COPYING.GPLv2 "$D/GPL-2.0.txt"
-cp $U/libiconv/COPYING.LIB "$D/libiconv-LGPL-2.1.txt"
+lic libiconv-LGPL-2.1.txt 'libiconv' 'COPYING.LIB'
 cp "$(cygpath -u "$PYHOME")/LICENSE.txt" "$D/Python-PSF.txt"
 cp $SP/capstone-*.dist-info/LICENSE.TXT "$D/Capstone-BSD.txt"
 cp $SP/lz4-*.dist-info/licenses/LICENSE "$D/python-lz4-BSD.txt"
 cp build/zig/LICENSE "$D/Zig-MIT.txt"
+cp build/upscalers/NVIDIA-RTX-SDK-LICENSE.txt "$D/NVIDIA-RTX-SDK-LICENSE.txt"
+cp third_party/fsr3_sdk/LICENSE-SDK.md "$D/AMD-FSR-SDK-LICENSE.md"
+cp third_party/xess/LICENSE-RUNTIME.txt "$D/Intel-XeSS-LICENSE.txt"
+cp third_party/xess/third-party-programs.txt "$D/Intel-XeSS-THIRD-PARTY.txt"
 cat > "$D/README.txt" <<'EOF'
 Power Moon Recomp - third-party components in this release and their licences
 ==============================================================================
@@ -50,6 +63,14 @@ Program (PowerMoonRecomp.exe and the DLLs next to it)
 - SMAA (MIT) - SMAA-MIT.txt; AMD FidelityFX Super Resolution 1 (MIT) - AMD-FSR1-MIT.txt
 - Parts of the audio renderer and of the shader translator follow an MIT-licensed project - Ryujinx-MIT.txt
 - The Roboto font, Roboto-Medium.ttf (Apache 2.0, Google) - Apache-2.0.txt
+
+Upscaler runtimes (unmodified, as the vendors ship them and signed by them; each loaded only when chosen in the menu)
+- nvngx_dlss.dll - NVIDIA DLSS 310.9.1, from https://github.com/NVIDIA/DLSS - NVIDIA-RTX-SDK-LICENSE.txt.
+  This software contains source code provided by NVIDIA Corporation.
+- amd_fidelityfx_loader_vk.dll, amd_fidelityfx_upscaler_vk.dll - AMD FidelityFX SDK 2.4.0 (FSR 3.1 / FSR 4), from
+  https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK - AMD-FSR-SDK-LICENSE.md
+- libxess.dll - Intel XeSS 2.0.2, from https://github.com/intel/xess - Intel-XeSS-LICENSE.txt,
+  Intel-XeSS-THIRD-PARTY.txt
 
 Setup's tools (used once, on your PC, to build the game code from your own game files)
 - zig/ - Zig 0.17.0 (MIT) - Zig-MIT.txt - https://ziglang.org - with LLVM / Clang / LLD (Apache 2.0 with LLVM
