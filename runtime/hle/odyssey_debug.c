@@ -10,7 +10,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "odyssey_v141.h"
 #include "../rt.h"
+#include "../odyssey_pose.h"
+#ifdef _WIN32
+#include "../nvn/vulkan/dlss_probe.h"
+#endif
 
 uint64_t renderer_present_count(void);
 
