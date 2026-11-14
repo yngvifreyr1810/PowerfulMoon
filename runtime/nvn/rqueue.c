@@ -61,6 +61,17 @@ static void *render_thread(void *arg) {
         case RQ_FENCE: { NvnSync *s = it.p; s->seq = renderer_fence_seq(); __atomic_store_n(&s->signaled, 1, __ATOMIC_RELEASE); break; }
         case RQ_FRAME: backend_frame_done(it.p, it.a); break;
         case RQ_PRESENT: backend_present(it.p); atomic_fetch_sub(&q_presents, 1); break;
+        case RQ_ODYSSEY_POSE: odyssey_pose_render_frame(it.p); break;
+#ifndef __APPLE__
+        case RQ_CPU_TEXEL: { extern void renderer_cpu_texel(RqCpuTexel *); renderer_cpu_texel(it.p); break; }
+        case RQ_PAINT_WRITE: {
+            extern void renderer_paint_cpu_written(uint64_t, uint64_t);
+            RqPaintWrite *w = it.p; renderer_paint_cpu_written(w->addr, w->size); break;
+        }
+#endif
+#ifdef _WIN32
+        case RQ_DLSS_CAMERA: vk_dlss_set_camera(it.p); free(it.p); break;
+#endif
         }
         if (rt_log) {
             rt_ns[it.type == RQ_PRESENT ? 2 : it.type == RQ_FRAME ? 1 : 0] += plat_now_ns() - t0;

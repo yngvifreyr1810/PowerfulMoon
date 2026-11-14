@@ -63,6 +63,65 @@ static void parse_specs(void) {
 static float sreg(Cpu *c, int n) { float f; memcpy(&f, &c->v[n], 4); return f; }
 
 void odyssey_debug_hook(Cpu *c, uint64_t pc) {
+    // the hooked places in 1.0.0, or in 1.4.1 (runtime/odyssey_v141.h)
+    static int v141 = -1;
+    if (v141 < 0) v141 = loader_main_is_v141();
+    uint64_t camera_at = v141 ? ODYSSEY_V141_DRAWMAIN_CAMERA : 0x70004ccbc8ull;
+    uint64_t pose_at = v141 ? ODYSSEY_V141_MODELKEEPER_CALC : 0x700094c428ull;
+    uint64_t view_at = v141 ? ODYSSEY_V141_UPDATE_VIEW_GPU : 0x7000879c98ull;
+    if (pc == camera_at) {
+        extern void odyssey_camera_draw(Cpu *);
+        odyssey_camera_draw(c);
+#ifdef _WIN32
+        // This camera-copy hook is part of every generated game library. The
+        // older updateViewGpu probe was only inserted by an optional debug build,
+        // so ordinary installs never supplied a camera and DLSS silently skipped.
+        if (vk_temporal_enabled()) {
+            static uint64_t get_projection, get_matrix;
+            if (!get_projection) {
+                get_projection = loader_find_symbol("_ZN2al13getProjectionEPKNS_10IUseCameraEi");
+                get_matrix = loader_find_symbol("_ZNK4sead10Projection25getDeviceProjectionMatrixEv");
+            }
+            if (get_projection && get_matrix) {
+                Cpu probe = *c;
+                probe.x[0] = c->x[19] + 0x18;  // Scene's IUseCamera subobject, view zero
+                probe.x[1] = 0;
+                guest_call(&probe, get_projection);
+                uint64_t projection = probe.x[0];
+                uint64_t copied_camera = v141 ? c->x[29] - 0xf0 : c->x[23];
+                if (projection >= GUEST_LO && projection < GUEST_HI - 0x8c &&
+                    copied_camera >= GUEST_LO && copied_camera < GUEST_HI - 0x38) {
+                    // The projection is lazy: obtain this frame's matrix rather
+                    // than copying last frame's cached field after an FOV change.
+                    probe.x[0] = projection;
+                    guest_call(&probe, get_matrix);
+                    uint64_t matrix = probe.x[0];
+                    if (matrix < GUEST_LO || matrix >= GUEST_HI - 64) return;
+                    DlssCamera camera;
+                    memcpy(camera.view, (const void *)(uintptr_t)(copied_camera + 8), sizeof camera.view);
+                    memcpy(camera.projection, (const void *)(uintptr_t)matrix, sizeof camera.projection);
+                    vk_dlss_queue_camera(&camera);
+                }
+            }
+        }
+#endif
+        return;
+    }
+    if (pc == pose_at) {
+        odyssey_pose_capture(c);
+        return;
+    }
+#ifdef _WIN32
+    // GraphicsSystemInfo::updateViewGpu, view zero. Copy before this guest data can be reused by the next frame.
+    // (1.4.1: the same arguments as far as tools/dis141.py shows; to be checked in game with DLSS on)
+    if (pc == view_at && (uint32_t)c->x[1] == 0 && c->x[2] && c->x[3] && vk_temporal_enabled()) {
+        DlssCamera camera;
+        memcpy(camera.view, (const void *)(uintptr_t)(c->x[2] + 8), sizeof camera.view);
+        memcpy(camera.projection, (const void *)(uintptr_t)(c->x[3] + 0x4c), sizeof camera.projection);
+        vk_dlss_queue_camera(&camera);
+        if (!getenv("ODYSSEY_HOOK_LOG")) return;
+    }
+#endif
     static int once;
     static unsigned long long from, to = ~0ull;  // ODYSSEY_HOOK_FRAMES=<from>:<to>: only hits in those frames (counted too)
     if (once && (renderer_present_count() < from || renderer_present_count() > to)) return;

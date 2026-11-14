@@ -74,5 +74,88 @@ def _debug_hook(gen, a):
     return f'{{ extern void odyssey_debug_hook(Cpu *, uint64_t); odyssey_debug_hook(c, {a:#x}ull); }} {code}'
 
 
+# ModelKeeper::calc is called directly from the lifted game, bypassing dispatch overrides.
+# Observe the models updated on the simulation tick so the extra draw can sample their skeletal clips.
+PATCHES[0x700094c428] = _debug_hook
+# StageScene::drawMain, just after copying the live LookAtCamera to its stack.
+PATCHES[0x70004ccbc8] = _debug_hook
+
+
+def _particle_tick(target):
+    def patch(gen, a):
+        # Both System::Draw and BatchCalculationComputeShaderEmitter can advance GPU particles.
+        # Keep their draw and buffer handling intact while reusing particle positions on extra draws.
+        ins = gen.lift(a)
+        assert ins.kind == 'bl' and ins.target == target, f'{a:#x}: unexpected particle update call'
+        code = ' '.join(gen.render_single(ins, a, None, set()))
+        return (f'{{ extern _Bool odyssey_skip_extra_particle_update(void); extern void f_{target:x}(Cpu *); '
+                f'if (!odyssey_skip_extra_particle_update()) {{ {code} }} }}')
+    return patch
+
+
+_particle_compute_tick = _particle_tick(0x7000b45ae8)
+PATCHES[0x7000b398d0] = _particle_compute_tick
+PATCHES[0x7000b39d2c] = _particle_compute_tick
+
+
 for _h in filter(None, os.environ.get('ODYSSEY_HOOKS', '').replace(' ', '').split(',')):
     PATCHES[int(_h, 16)] = _debug_hook
+
+
+# Super Mario Odyssey 1.4.1 (main build b424be150a8e7d78): each 1.0.0 site above at its place in 1.4.1's main, found by
+# tools/port141.py (the same instruction word in the matched function) and read by eye with tools/dis141.py.
+ODYSSEY_141_BUILD = 'b424be150a8e7d78'
+SITES_141 = {
+    HEAP_LOCK_SITE: 0x7000954ea4,   # sead::Heap::Heap + 0xe4: csel w8, w8, w9, ne (same word)
+    0x7000837914: 0x70005adf40,     # al::CameraPoseUpdater::init: ldp s3, s1 (same word)
+    0x7000837a54: 0x70005ae094,     # al::CameraPoseUpdater::update: ldp s1, s3 (same word)
+    0x7000a63c94: 0x70006330d4,     # al::initDrawInfoDefault: ucvtf after the layout width (now width(0))
+    0x7000a63cb4: 0x70006330fc,     # ... the second width
+    0x70001e813c: 0x70001ca548,     # CounterLifeCtrl::calcLayoutTransByPlayer: ucvtf s0 after the width
+    0x70001e816c: 0x70001ca57c,     # ... ucvtf s1 (same word)
+    0x70003fb8b0: 0x70003a1008,     # HackCap::updateFrameOutLayout: ucvtf s0 after the width
+    0x7000883064: 0x70005fcdc4,     # alEffectSystemFunction::drawEffect2D: ucvtf s8 after the width
+    0x700094c428: 0x70006b9ec0,     # al::ModelKeeper::calc's entry (debug hook)
+    0x70004ccbc8: 0x7000473354,     # StageScene::drawMain, after the camera copy (debug hook)
+    0x7000b398d0: 0x700091e0ac,     # nn::vfx::System::DrawEmitter: bl CalculateComputeShader
+    0x7000b39d2c: 0x700091e2a4,     # nn::vfx::System::BatchCalculationComputeShaderEmitter: bl CalculateComputeShader
+}
+CALC_COMPUTE_SHADER_141 = 0x700092c020  # nn::vfx::detail::EmitterCalculator::CalculateComputeShader (1.0.0: 0x7000b45ae8)
+
+# The 1.4.1 table: the same replacements at the 1.4.1 sites. The wide-screen sites keep their instruction words; in
+# 1.4.1's al::initDrawInfoDefault the DrawInfo is in x19 (1.0.0: x20).
+WIDE_SITES_141 = {SITES_141[a]: v for a, v in WIDE_SITES.items()}
+WIDE_SITES_141[SITES_141[0x7000a63c94]] = (0x1e230000, 0, 'odyssey_wide_drawinfo(c->x[19])')
+
+
+def _wide_141(gen, a):
+    word, reg, k = WIDE_SITES_141[a]
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == word, f'{a:#x}: {w:#x}'
+    code = ' '.join(gen.render_single(gen.lift(a), a, None, set()))
+    decl = 'extern float odyssey_wide(void), odyssey_wide_camera(void), odyssey_wide_drawinfo(uint64_t);'
+    return f'{code} {{ {decl} FP_SETS({reg}, VSF32({reg}) * {k}); }}  /* {a:#x}: wide screen (1.4.1) */'
+
+
+PATCHES_141 = {SITES_141[HEAP_LOCK_SITE]: _heap_lock}
+for _a in WIDE_SITES_141:
+    PATCHES_141[_a] = _wide_141
+PATCHES_141[SITES_141[0x700094c428]] = _debug_hook
+PATCHES_141[SITES_141[0x70004ccbc8]] = _debug_hook
+PATCHES_141[SITES_141[0x7000b398d0]] = _particle_tick(CALC_COMPUTE_SHADER_141)
+PATCHES_141[SITES_141[0x7000b39d2c]] = _particle_tick(CALC_COMPUTE_SHADER_141)
+for _h in filter(None, os.environ.get('ODYSSEY_HOOKS', '').replace(' ', '').split(',')):
+    PATCHES_141[int(_h, 16)] = _debug_hook
+
+# Functions replaced by the runtime (runtime/hle/hle_symbols.txt) that 1.4.1's main has no names for: address -> name
+HLE_141 = {
+    0x700097bfa0: '_ZN4sead6system4HaltEv',
+    0x70004dba00: '_ZN14GameDataHolder44readFromSaveDataBufferCommonFileOnlyLanguageEv',  # (code shape: odyssey_language.c)
+    # the mouse camera without a stick's limit (runtime/hle/input.c); 1.4.1 had none, so the mouse was the right stick
+    # there, capped at full tilt (#11). ProjectCameraInput's vtable slot 0, a branch to calcCameraMoveInput (0x70005172b0)
+    0x70000c1310: '_ZNK18ProjectCameraInput14calcInputStickEPN4sead7Vector2IfEE',
+}
+
+# main's build -> its patches (gen.py; other modules and builds are lifted unpatched)
+PATCHES_BY_BUILD = {ODYSSEY_MAIN_BUILD: PATCHES, ODYSSEY_141_BUILD: PATCHES_141}
+HLE_BY_BUILD = {ODYSSEY_141_BUILD: HLE_141}

@@ -77,7 +77,11 @@ static bool writable(const char *dir) {
 
 void rt_fail(const char *msg) {
     fprintf(stderr, "%s\n", msg);
+#ifdef __linux__
+    plat_error_box(msg);  // (never waits on a hung zenity: runtime/platform/linux.c)
+#else
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, RT_APP_NAME, msg, NULL);
+#endif
     exit(1);
 }
 

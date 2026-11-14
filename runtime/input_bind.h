@@ -27,7 +27,13 @@ enum { BIND_DEV_PAD, BIND_DEV_KEY };
 enum { PADB_LTRIGGER = 26 /* SDL_GAMEPAD_BUTTON_COUNT */, PADB_RTRIGGER, PADB_HOST_COUNT };
 
 extern int16_t g_bind_pad[BIND_PAD_COUNT];  // PADB value per Switch button
-extern int16_t g_bind_key[BIND_KEY_COUNT];  // SDL_Scancode per input (0 = none)
+extern int16_t g_bind_key[BIND_KEY_COUNT];  // SDL_Scancode per input (0 = none), or a mouse button (BIND_MOUSE_*)
+
+// Mouse buttons and the wheel as keyboard bindings: codes past SDL's scancodes (SDL_SCANCODE_COUNT = 512), so they bind,
+// swap, save and show like any key (#11). The wheel's two directions are a short press each.
+enum { BIND_MOUSE_LEFT = 513, BIND_MOUSE_MIDDLE, BIND_MOUSE_RIGHT, BIND_MOUSE_X1, BIND_MOUSE_X2, BIND_WHEEL_UP,
+       BIND_WHEEL_DOWN, BIND_KEY_CODE_COUNT };
+static inline bool bind_is_mouse(int code) { return code >= BIND_MOUSE_LEFT && code < BIND_KEY_CODE_COUNT; }
 
 const char *bind_input_name(int slot);         // "A", "D-pad Up", "Left stick Up"
 const char *bind_pad_label(int host, int fam); // controller button in the pad family's own words (fam: input_pad_family)

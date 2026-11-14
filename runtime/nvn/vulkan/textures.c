@@ -11,6 +11,8 @@
 #include "../astc.h"
 #include "../output_scale.h"
 #include "../renderer.h"
+#include "../linear_texture.h"
+#include "../kbprompts.h"
 #include "../../settings.h"
 
 // ================================================================== formats
@@ -171,7 +173,13 @@ void renderer_get_scale(float *sx, float *sy) { *sx = g_rs_x; *sy = g_rs_y; }
 void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
 uint64_t renderer_present_count(void);
 
-static bool tex_scalable(const NvnTexture *t) { return output_scale_texture(t); }
+static bool tex_scalable(const NvnTexture *t) {
+    if (t->flags & 0x4) return false;  // NVN_TEXTURE_FLAGS_IMAGE: compute uses the guest's integer texel coordinates.
+    // Odyssey's quarter-resolution R11G11B10F bloom chain uses taps spaced for the guest texel grid.
+    // Enlarging these targets separates the taps around small highlights and produces visible grids.
+    if (t->format == 0x3f && t->width <= 400 && t->height <= 228) return false;
+    return output_scale_texture(t);
+}
 
 bool renderer_texture_first_write(NvnTexture *t) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
@@ -325,6 +333,8 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (depthfmt) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     else if (format_supports(vf, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if ((t->flags & 0x4) && !depthfmt && samples == 1 && format_supports(vf, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+        usage |= VK_IMAGE_USAGE_STORAGE_BIT;
     VkImageCreateFlags flags = 0;
     if (!depthfmt) flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;  // format views (NVN texture views, raw sRGB views)
     if (type == VK_IMAGE_TYPE_2D && layers >= 6 && tw == th && samples == 1) flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
@@ -349,6 +359,7 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
         depthfmt = false;
     }
+    b->storage = (ci.usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
     b->format = vf;
     b->width = tw; b->height = th; b->depth = depth; b->layers = layers; b->levels = levels; b->samples = samples;
     b->aspect = depthfmt ? aspect_of(t->format) : VK_IMAGE_ASPECT_COLOR_BIT;
@@ -581,26 +592,39 @@ static void upload_pending(TexBackend *b) {
 uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn, prof_tex_watch_skips;
 static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (!t->addr || t->target == 10) return;
+    bool linear = nvn_flags_linear(t->flags);
+    if (linear) b->dynamic = true; // CPU-writable rows must be checked before the static-texture throttle.
     uint64_t frame = vk_frame_counter();
-    if (b->uploaded && b->checked_frame == frame) return;
-    if (b->uploaded && !b->dynamic && ((frame + ((uintptr_t)b >> 6)) & 7)) return;
+    // the button icon sheet whose icons should change (keyboard / controller, a rebind): uploaded again, its bytes
+    // unchanged (nvn/kbprompts.c)
+    // Nothing of it before the keyboard / mouse is used (kbprompts_active): a controller player's textures go as ever.
+    bool kb = kbprompts_active();
+    bool look = kb && !b->kbp && b->uploaded && t->layout.fmt && t->layout.layers <= 1 &&
+                kbprompts_candidate(t->width, t->height, t->layout.fmt->bw, t->layout.fmt->bh, t->layout.fmt->bpb);
+    bool repatch = look || (b->kbp > 0 && b->kbp_gen != kbprompts_generation());
+    if (b->uploaded && b->checked_frame == frame && !repatch) return;
+    if (b->uploaded && !b->dynamic && ((frame + ((uintptr_t)b >> 6)) & 7) && !repatch) return;
     const FormatInfo *fi = t->layout.fmt;
     if (!fi || !fi->bpb) return;
     VkFmt mf = fmt_of(t->format);
-    uint64_t total = tegra_total_size(&t->layout);
+    uint64_t layer_size = linear ? t->stride * t->height : tegra_layer_size(&t->layout);
+    uint64_t total = linear ? layer_size : tegra_total_size(&t->layout);
+    if (linear && (t->layout.layers != 1 || t->layout.depth != 1 || t->layout.levels != 1 ||
+        t->stride < ((uint64_t)t->width + fi->bw - 1) / fi->bw * fi->bpb ||
+        (t->pool && (t->pool_offset > t->pool->size || total > t->pool->size - t->pool_offset)))) return;
     b->checked_frame = frame;
     prof_tex_checks++;
-    if (t->flags & 0x10) b->dynamic = true;
     if (full_hash_budget_frame != frame) { full_hash_budget_frame = frame; full_hash_budget = 4 << 20; }
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
     static int always_full = -1;
     if (always_full < 0) always_full = getenv("ODYSSEY_TEX_FULLHASH") ? 1 : 0;
-    bool full = b->dynamic || !b->uploaded || always_full;
+    bool full = b->dynamic || !b->uploaded || always_full || repatch;
     bool periodic = frame - b->full_frame >= 120 && full_hash_budget >= total;  // (safety net: a full hash now and then)
     if (!full && periodic) { full = true; full_hash_budget -= total; }
     // The OS's page write tracking (exec.c vk_pages_changed, shared with the vertex cache): texture memory the CPU
     // hasn't written since the last check is not hashed at all (dynamic textures were fully hashed every frame,
     // ~2.4 MB a frame in the overworld). The periodic full hash stays as a safety net. ODYSSEY_VK_TEX_WATCH=0: off.
+    bool by_watch = false;  // (made full because the pages were written)
     static int watch = -1;
     if (watch < 0) { const char *e = getenv("ODYSSEY_VK_TEX_WATCH"); watch = !e || atoi(e) != 0; }
     if (watch && !always_full) {
@@ -609,10 +633,15 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
         int ch = vk_pages_changed(t->addr, total, b->wgen, &now);
         if (ch >= 0) {
             b->wgen = now;
-            if (!ch && b->uploaded) {
+            if (!ch && b->uploaded && !repatch) {
                 if (!periodic) { prof_tex_watch_skips++; return; }
                 if (b->dynamic) full_hash_budget -= total;  // (the others took theirs above)
             }
+            // Written since the last check: compared whole, not by its sampled bytes - a texture the CPU changes in a
+            // few spots (the poison's paint map, PaintObj: Mario hurt by poison the screen no longer showed, or never
+            // showed - issue #3) kept its sampled bytes and stayed stale until the periodic full hash, which a busy
+            // frame's budget can put off
+            if (ch > 0 && !full) full = by_watch = true;
         }
     }
     if (!full) {
@@ -623,9 +652,19 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     prof_tex_full++; prof_tex_full_bytes += total; if (b->dynamic) prof_tex_dyn++;
     uint64_t h = hash_full(mem, total);
     b->full_frame = frame;
+    uint64_t old_sample = b->sample_hash;
     b->sample_hash = fnv_sample(mem, total);
-    if (b->uploaded && h == b->data_hash) return;
+    if (by_watch && b->uploaded && h != b->data_hash && b->sample_hash == old_sample) {
+        static int n;  // (what the sampled check alone would have missed)
+        if (n++ < 30) LOG("[tex] a change the sampled check missed: %p %ux%u f%#x addr %llx (%llu KB, frame %llu)\n", (void *)t,
+                          t->width, t->height, t->format, (unsigned long long)t->addr, (unsigned long long)(total >> 10),
+                          (unsigned long long)frame);
+    }
+    if (b->uploaded && h == b->data_hash && !repatch) return;
     if (b->uploaded && h != b->data_hash) b->dynamic = true;
+    if (!b->uploaded || h != b->data_hash || look)  // (new contents: the button icon sheet? looked at deswizzled, below)
+        b->kbp = !kb ? 0 : t->layout.layers <= 1 && kbprompts_candidate(t->width, t->height, fi->bw, fi->bh, fi->bpb) ? 2 : -1;
+    if (b->kbp > 0) b->kbp_gen = kbprompts_generation();
     b->data_hash = h;
     b->uploaded = true;
     if ((t->target == 8 || t->target == 9) && getenv("ODYSSEY_LOG_CUBES")) {  // (where cube map contents come from)
@@ -639,8 +678,6 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     VkCommandBuffer cb = vk_upload_cmd();
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;
     if (layers > b->layers && b->depth == 1) layers = b->layers;
-    uint64_t layer_size = tegra_layer_size(&t->layout);
-    bool linear = (t->flags & 0x10) != 0;
     uint32_t levels = t->layout.levels < b->levels ? t->layout.levels : b->levels;
     for (uint32_t layer = 0; layer < layers; layer++) {
         for (uint32_t lv = 0; lv < levels; lv++) {
@@ -648,10 +685,22 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             if (b->astc_bw) {  // blocks -> linear block rows -> RGBA8 texels
                 const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
                 uint8_t *blocks = malloc((uint64_t)l.wb * l.hb * 16);
-                if (linear) for (uint32_t y = 0; y < l.hb; y++) memcpy(blocks + (uint64_t)y * l.wb * 16, src + (uint64_t)y * t->stride, l.wb * 16);
+                if (linear) {
+                    if (!nvn_linear_copy_rows(blocks, (uint64_t)l.wb * l.hb * 16, src, total, t->stride, (uint64_t)l.wb * 16, l.hb)) {
+                        free(blocks); return;
+                    }
+                }
                 else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, 16, l.block_height_log2, l.block_depth_log2);
                 VkSpan s = vk_transient((uint64_t)l.w * l.h * 4, 16);
+                uint32_t bad = astc_bad_blocks;
                 astc_decode_ldr(blocks, l.w, l.h, b->astc_bw, b->astc_bh, b->astc_srgb, s.ptr);
+                if (astc_bad_blocks != bad) {  // (magenta in it: HDR content or error blocks - not decoded here)
+                    static int nlog;
+                    if (nlog++ < 40)
+                        LOG("[tex] ASTC %ux%u (%ux%u blocks%s) level %u: %u blocks magenta (HDR or invalid), texture at %llx\n",
+                            l.w, l.h, b->astc_bw, b->astc_bh, b->astc_srgb ? ", sRGB" : "", (unsigned)lv,
+                            (unsigned)(astc_bad_blocks - bad), (unsigned long long)t->addr);
+                }
                 free(blocks);
                 VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = l.w, .bufferImageHeight = l.h,
                                         .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, layer, 1},
@@ -670,10 +719,15 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             uint8_t *lin = expand ? malloc(sz) : s.ptr;
             const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
             if (linear) {
-                for (uint32_t y = 0; y < l.hb; y++) memcpy(lin + (uint64_t)y * row, src + (uint64_t)y * t->stride, row);
+                if (!nvn_linear_copy_rows(lin, (uint64_t)row * l.hb, src, total, t->stride, row, l.hb)) {
+                    if (expand) free(lin);
+                    return;
+                }
             } else {
                 tegra_deswizzle(src, lin, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
             }
+            if (b->kbp == 2 && lv == 0) b->kbp = !expand && kbprompts_identify(lin, l.wb, l.hb) ? 1 : -1;
+            if (b->kbp == 1 && !expand) kbprompts_apply(lv, lin, l.wb, l.hb);  // (keyboard / mouse icons)
             if (expand) {  // RGB8 -> RGBA8
                 uint8_t *o = s.ptr;
                 uint64_t n = (uint64_t)l.wb * l.hb * l.d;
@@ -795,6 +849,10 @@ TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     else if (g_interp_log) frame_access(t, for_render);
     TexBackend *b = tex_backend(t);
     if (b->pending_rgba) upload_pending(b);
+    if (b->paint_cpu_pending) {
+        upload_texture(t, b);
+        if (b->uploaded) b->paint_cpu_pending = false;
+    }
     if (for_render) b->gpu_owned = true;
     else if (!b->gpu_owned) {
         extern uint64_t prof_up_ns;
@@ -881,6 +939,30 @@ static VkImageViewType view_type_for(int textype) {
 static const VkComponentMapping IDENTITY = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                                             VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
 
+VkImageView vk_storage_view(NvnTexture *t, const NvnTextureView *v, const ShaderImage *img) {
+    TexBackend *b = vk_tex(t, false);
+    VkImageViewType type = view_type_for(img->type);
+    if (!b->storage || b->base_type != type || b->guest_format || b->samples != 1) return VK_NULL_HANDLE;
+    uint32_t level = v && (v->setmask & 1) ? v->base_level : 0;
+    uint32_t format = v && (v->setmask & 4) ? v->format : t->format;
+    VkFormat vf = v && (v->setmask & 4) ? vk_format(format) : b->format;
+    if (level >= b->levels || fmt_of(format).expand_rgb || !format_supports(vf, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+        return VK_NULL_HANDLE;
+    if (img->access == SHADER_IMAGE_WRITE) {
+        VkFormatProperties3 caps = {.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3};
+        VkFormatProperties2 query = {.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, .pNext = &caps};
+        vkGetPhysicalDeviceFormatProperties2(g_vk.phys, vf, &query);
+        if (!(caps.optimalTilingFeatures & VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)) return VK_NULL_HANDLE;
+    } else {
+        const FormatInfo *actual = nvn_format_info(t->format);
+        if (actual->bpb != 4 || actual->bw != 1 || actual->bh != 1) return VK_NULL_HANDLE;
+        vf = VK_FORMAT_R32_UINT;
+        if (img->access == SHADER_IMAGE_ATOMIC && !format_supports(vf, VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT))
+            return VK_NULL_HANDLE;
+    }
+    return vk_image_view(b, type, vf, level, 1, 0, 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
+}
+
 // render: attachment view (one level, one layer). Otherwise a sampled view of type want_textype (TEXTYPE_*),
 // with the NVN component swizzle, converting between compatible types the way renderer.m does.
 VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype) {
@@ -927,7 +1009,7 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     }
     VkImageViewType want = view_type_for(want_textype);
     VkImageViewType have = b->base_type;
-    if (b->samples > 1) return vk_dummy_view(want_textype);  // multisampled images can't be sampled as 2D
+    if ((b->samples > 1) != (want_textype == TEXTYPE_2D_MS)) return vk_dummy_view(want_textype);
     if (want == have) {
         if (have == VK_IMAGE_VIEW_TYPE_CUBE) nly = 6;
         return vk_image_view(b, want, fmt, lv0, nlv, ly0, nly, sw, aspect);
@@ -955,11 +1037,16 @@ VkImageView vk_dummy_view(int textype) {
     TexBackend *b = &dummies[textype];
     VkImageViewType vt = view_type_for(textype);
     bool cube = vt == VK_IMAGE_VIEW_TYPE_CUBE || vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+    VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+    if (textype == TEXTYPE_2D_MS) {
+        VkSampleCountFlags supported = g_vk.props.limits.sampledImageColorSampleCounts;
+        samples = supported & VK_SAMPLE_COUNT_4_BIT ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_2_BIT;
+    }
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0,
                             .imageType = vt == VK_IMAGE_VIEW_TYPE_3D ? VK_IMAGE_TYPE_3D
                                        : vt == VK_IMAGE_VIEW_TYPE_1D || vt == VK_IMAGE_VIEW_TYPE_1D_ARRAY ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D,
                             .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {1, 1, 1}, .mipLevels = 1, .arrayLayers = cube ? 6 : 1,
-                            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .samples = samples, .tiling = VK_IMAGE_TILING_OPTIMAL,
                             .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
@@ -1015,6 +1102,21 @@ VkSampler vk_sampler(NvnSamplerDesc *d) {
     if (si.maxLod < si.minLod) si.maxLod = si.minLod;
     si.mipLodBias = d->lod_bias;
     if (d->max_aniso > 1) { si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = fminf(d->max_aniso, 16); }
+    {   // Anisotropic filtering setting (menu, Video: 2x-16x; read at start): surface textures - filtered both ways,
+        // mipmapped, tiling (repeat / mirrored repeat) and no depth compare - get at least that level, so ground and
+        // walls at a shallow angle stay sharp into the distance. Shadow maps, data maps and screen-sized buffers (clamped,
+        // not mipmapped or compared) keep the game's setting, as TOTK's recomp does.
+        static int level = -1;
+        if (level < 0) level = settings_aniso_at_start() && g_vk.feat_aniso ? settings_aniso_at_start() : 0;
+        bool tiles = false;
+        for (int i = 0; i < 2; i++)
+            tiles |= modes[i] == VK_SAMPLER_ADDRESS_MODE_REPEAT || modes[i] == VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+        if (level > 1 && mf >= 2 && si.magFilter == VK_FILTER_LINEAR && si.minFilter == VK_FILTER_LINEAR && tiles &&
+            !d->compare_mode) {
+            float lv = fminf((float)level, g_vk.props.limits.maxSamplerAnisotropy);
+            if (!si.anisotropyEnable || si.maxAnisotropy < lv) { si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = lv; }
+        }
+    }
     static float lodmin = -1;
     if (lodmin < 0) lodmin = getenv("ODYSSEY_LOD_MIN") ? (float)atof(getenv("ODYSSEY_LOD_MIN")) : 0;
     if (lodmin > 0 && mf > 1) si.minLod = fmaxf(si.minLod, lodmin);

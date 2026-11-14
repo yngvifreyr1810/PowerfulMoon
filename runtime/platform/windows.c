@@ -11,6 +11,7 @@
 #include <signal.h>
 
 #include "../mods.h"
+#include "../diagnostics.h"
 #include "../platform.h"
 
 // ---- guest address space
@@ -125,6 +126,7 @@ void plat_thread_realtime(uint64_t period_ns) {
 // exe, and a fatal error shows a message box (plat_fatal_notice) instead of vanishing. Processes started by this one
 // (a re-exec for a fresh address layout) append to the same log.
 static char g_log_path[MAX_PATH];
+const char *plat_log_path(void) { return g_log_path; }
 
 static void log_to_file_without_console(void) {
     if (GetStdHandle(STD_ERROR_HANDLE) && GetStdHandle(STD_ERROR_HANDLE) != INVALID_HANDLE_VALUE) return;  // console / pipe
@@ -245,7 +247,12 @@ void plat_fatal_notice(void) {
             char *end = strchr(line, '\n');
             if (end) *end = 0;
             snprintf(text, sizeof text, "PowerfulMoon stopped because of an error:\n\n%.600s", line);
-            if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {
+            // (VK_ERROR_OUT_OF_HOST_MEMORY -1 / VK_ERROR_OUT_OF_DEVICE_MEMORY -2: not a driver that is too old)
+            if (strstr(line, "failed: -2 (") || strstr(line, "failed: -1 (")) {
+                size_t l = strlen(text);
+                snprintf(text + l, sizeof text - l, "\n\nThe graphics card ran out of memory. Lower the internal resolution "
+                         "(menu > Graphics), or delete powermoon.ini in the game's folder to go back to the default settings.");
+            } else if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {
                 size_t l = strlen(text);
                 snprintf(text + l, sizeof text - l, "\n\nPowerfulMoon needs a graphics driver with Vulkan 1.3: install the "
                          "latest driver for your GPU (NVIDIA, AMD or Intel).");
@@ -257,7 +264,7 @@ void plat_fatal_notice(void) {
         l += (size_t)snprintf(text + l, sizeof text - l, "\n\nMods are on. If this started with a new mod, move it out of "
                               "the mods folder: mods made for a later version of the game (1.3.0) can crash 1.0.0.");
     snprintf(text + l, sizeof text - l, "\n\nDetails: %s", g_log_path);
-    MessageBoxA(NULL, text, "PowerfulMoon", MB_ICONERROR | MB_OK);
+    diagnostics_fatal_dialog(text);
 }
 
 void plat_init(void) {
