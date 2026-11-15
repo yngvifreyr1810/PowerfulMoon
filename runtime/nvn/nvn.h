@@ -45,6 +45,7 @@ typedef struct NvnTexture {
     uint32_t twin_gen;
     uint32_t rd_epoch, wr_epoch, snap_epoch;  // (textures.c: read / first written in a game frame; its frame-start copy)
     bool carry;  // (textures.c) a frame read it before writing it: what replays draw into it must not reach the game
+    bool no_prefetch;  // (textures.c vk_tex_prefetch) not uploaded ahead: drawn into by the GPU, or its upload failed
     bool window;  // one of the window's textures (nvnWindowInitialize): what is drawn into it is dithered (exec.c draw_;
                   // past addr: not part of the description, so its other initializations still find it)
 } NvnTexture;

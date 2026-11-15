@@ -174,7 +174,7 @@ void osk_draw(ImFont *big, float scale) {
         return;
     }
     ImGui::PushFont(big);
-    ImGui::TextColored(kAccentV, "%s", s.title);
+    ImGui::TextColored(kTextV, "%s", s.title);
     ImGui::PopFont();
     int max = (int)(s.size < sizeof s.text ? s.size : sizeof s.text) - 1;
     int r = cancel ? -1 : osk_keys(s.text, sizeof s.text, max, s.appearing, scale, big);

@@ -12,6 +12,8 @@
 // face button that plays each Switch button (by the Controls tab's bindings: Switch A is the east button, Xbox B,
 // PlayStation circle), LB / RB / LT / RT or L1 / R1 / L2 / R2, Menu / View or Options / Create. The sticks, the d-pad
 // and the diamond pictures (a button by its place) are the same on every controller and stay.
+#include <pthread.h>
+#include <stdatomic.h>
 #include <SDL3/SDL.h>
 #include <math.h>
 #include <stdatomic.h>
@@ -22,6 +24,7 @@
 #include "kbprompts.h"
 #include "tegra.h"
 #include "../input_bind.h"
+#include "../input_players.h"
 #include "../paths.h"
 #include "../romfs_read.h"
 #include "../rt.h"
@@ -36,6 +39,7 @@ static struct {
     int state;  // 0 not read yet, 1 read, -1 not found
     uint8_t *sheet;  // sheet 0's bytes as stored (block linear)
     uint32_t size, w, h, cellw, cellh, cols, rows;
+    uint32_t codes[33], glyphs;
 } ref;
 
 static uint16_t r16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
@@ -57,6 +61,19 @@ static bool parse_font(const uint8_t *f, size_t n) {
     if (!ref.sheet) return false;
     memcpy(ref.sheet, f + data, size);
     ref.size = size, ref.w = w, ref.h = h, ref.cellw = cellw, ref.cellh = cellh, ref.cols = cols, ref.rows = rows;
+    uint32_t cmap = r32(finf + 28);
+    for (unsigned maps = 0; cmap && maps < 32 && cmap + 20 <= n; maps++) {
+        if (r16(f + cmap + 8) == 2) {
+            uint32_t count = r32(f + cmap + 16);
+            if (count > (n - cmap - 20) / 8) return false;
+            for (uint32_t i = 0; i < count; i++) {
+                uint32_t code = r32(f + cmap + 20 + i * 8), glyph = r32(f + cmap + 24 + i * 8);
+                if (glyph < 33) ref.codes[glyph] = code;
+                if (glyph < cols * rows && glyph + 1 > ref.glyphs) ref.glyphs = glyph + 1;
+            }
+        }
+        cmap = r32(f + cmap + 12);
+    }
     return true;
 }
 
@@ -65,11 +82,17 @@ static void load_ref(void) {
     ref.state = -1;
     static const char *const langs[] = {"USen", "EUen", "JPja", "EUfr", "EUde", "EUes", "EUit", "EUnl", "EUru",
                                         "KRko", "CNzh", "TWzh", "USes", "USfr"};
+    char image[2048] = "extracted/romfs.bin";
+    if (g_romfs_dir) {
+        const char *slash = strrchr(g_romfs_dir, '/'), *back = strrchr(g_romfs_dir, '\\');
+        if (back && (!slash || back > slash)) slash = back;
+        if (slash) snprintf(image, sizeof image, "%.*s/romfs.bin", (int)(slash - g_romfs_dir), g_romfs_dir);
+    }
     for (size_t i = 0; i < sizeof langs / sizeof *langs && ref.state < 0; i++) {
         char path[96];
         snprintf(path, sizeof path, "LocalizedData/%s/LayoutData/FontData.szs", langs[i]);
         size_t n = 0, dn = 0, fn = 0;
-        uint8_t *raw = romfs_read_file("extracted/romfs.bin", path, &n);
+        uint8_t *raw = romfs_read_file(image, path, &n);
         if (!raw) continue;
         uint8_t *d = yaz0_decode(raw, n, &dn);
         const uint8_t *arc = d ? d : raw;
@@ -163,9 +186,10 @@ static int wanted_style(void) {
 bool kbprompts_active(void) {
     if (g_ever) return true;
     int st = wanted_style();
-    if (st == STYLE_GAME) return false;
+    if (st == STYLE_GAME && !input_cappy_assigned()) return false;
     g_ever = true;
-    LOG("[prompts] %s icons on\n", st == STYLE_KEYBOARD ? "keyboard / mouse" : st == STYLE_XBOX ? "Xbox" : "PlayStation");
+    LOG("[prompts] %s icons on\n", st == STYLE_KEYBOARD ? "keyboard / mouse" : st == STYLE_XBOX ? "Xbox" :
+        st == STYLE_PLAYSTATION ? "PlayStation" : "per-player controller");
     return true;
 }
 
@@ -173,7 +197,31 @@ uint32_t kbprompts_generation(void) {
     uint32_t h = 2166136261u;  // the bindings' signature: a rebind redraws the icons
     for (int i = 0; i < BIND_KEY_COUNT; i++) h = (h ^ (uint16_t)g_bind_key[i]) * 16777619u;
     for (int i = 0; i < BIND_PAD_COUNT; i++) h = (h ^ (uint16_t)bind_prompt_host(i)) * 16777619u;
-    return (h << 2 | (uint32_t)wanted_style()) | 0x80000000u;
+    int family = input_cappy_family();
+    unsigned second = family == 1 ? STYLE_XBOX : family == 2 ? STYLE_PLAYSTATION : STYLE_GAME;
+    return (h << 4 | second << 2 | (uint32_t)wanted_style()) | 0x80000000u;
+}
+
+uint16_t kbprompts_cappy_code(uint16_t code) {
+    load_ref();
+    if (ref.state != 1 || !ref.glyphs || ref.glyphs + 33 > ref.cols * ref.rows) return code;
+    // Stay inside DeviceFont's declared character range so PairFont will try
+    // it. These unused codes do not overlap any of its original 39 glyphs.
+    for (unsigned i = 0; i < 33; i++) if (ref.codes[i] == code)
+        return i < 16 ? 0xe0b0 + i : i < 32 ? 0xe0d0 + i - 16 : 0xe0ea;
+    return code;
+}
+
+bool kbprompts_cappy_glyph(uint32_t code, uint32_t *original, uint16_t *source, uint16_t *index) {
+    unsigned glyph = code >= 0xe0b0 && code < 0xe0c0 ? code - 0xe0b0 :
+        code >= 0xe0d0 && code < 0xe0e0 ? code - 0xe0d0 + 16 : code == 0xe0ea ? 32 : 33;
+    if (glyph >= 33) return false;
+    load_ref();
+    if (ref.state != 1 || !ref.codes[glyph] || !ref.glyphs || ref.glyphs + 33 > ref.cols * ref.rows) return false;
+    *original = ref.codes[glyph];
+    *source = glyph;
+    *index = ref.glyphs + glyph;
+    return true;
 }
 
 // ---------------------------------------------------------------- drawing (a cell's coverage, 0..1, y down)
@@ -572,10 +620,23 @@ static void bc4_encode(const uint8_t v[16], uint8_t *b) {
 
 // ---------------------------------------------------------------- the patched sheet
 static uint8_t *g_orig;     // the sheet's texels as the game has them (stored orientation: bottom row first)
-static uint8_t *g_patched;  // BC4 blocks with the keyboard icons
-static uint32_t g_patched_gen;
+// Built sheets by generation (BC4 blocks): a switch between keyboard and controller, back and forth, takes a built one.
+// Drawing one is ~300 ms of CPU (every icon 4x4-supersampled, then encoded): it was done on the render thread at the
+// switch, a 342 ms frame. Now the likely ones (keyboard, the controller's style, the game's own) are built ahead on a
+// thread of their own once the game's sheet is known, and again after a rebind.
+#define SHEET_CACHE 8
+static struct { uint32_t gen; uint8_t *blocks; } g_sheets[SHEET_CACHE];
+static unsigned g_sheet_next;
+static pthread_mutex_t g_sheet_lock = PTHREAD_MUTEX_INITIALIZER;  // (the cache; building runs outside it)
+static pthread_mutex_t g_build_lock = PTHREAD_MUTEX_INITIALIZER;  // (one build at a time: the font rasterizer's state)
+static uint32_t g_wb, g_hb;
 
-static void build(uint32_t gen, uint32_t wb, uint32_t hb) {
+static uint8_t *sheet_find(uint32_t gen) {  // (g_sheet_lock held)
+    for (int i = 0; i < SHEET_CACHE; i++) if (g_sheets[i].blocks && g_sheets[i].gen == gen) return g_sheets[i].blocks;
+    return NULL;
+}
+
+static void build(uint32_t gen, uint32_t wb, uint32_t hb, uint8_t *out) {
     int style = (int)(gen & 3);
     uint32_t W = wb * 4, H = hb * 4;
     uint8_t *img = malloc((size_t)W * H);
@@ -584,7 +645,9 @@ static void build(uint32_t gen, uint32_t wb, uint32_t hb) {
     Canvas c = {calloc((size_t)sw * sh, sizeof(float)), (int)sw, (int)sh};
     uint8_t *mine = calloc((size_t)W * H, 1);  // (the cells drawn here: ODYSSEY_DUMP_PROMPTS shows only these)
     int drawn = 0;
-    for (int g = 0; g < G_COUNT; g++) {
+    bool second = ref.glyphs && ref.glyphs + G_COUNT <= ref.cols * ref.rows;
+    for (int entry = 0; entry < G_COUNT * (second ? 2 : 1); entry++) {
+        int g = entry % G_COUNT, player = entry / G_COUNT;
         uint32_t col = g % ref.cols, row = g / ref.cols, x0 = col * sw, y0 = row * sh;  // (y from the top)
         if (x0 + sw > W || y0 + sh > H) continue;
         // the box the game's glyph covers, to draw ours in
@@ -599,15 +662,20 @@ static void build(uint32_t gen, uint32_t wb, uint32_t hb) {
                 }
         if (ix1 < 0) continue;
         memset(c.a, 0, (size_t)sw * sh * sizeof(float));
-        if (style == STYLE_KEYBOARD) draw_glyph(&c, g, (float)ix0, (float)iy0, (float)ix1 + 1, (float)iy1 + 1);
-        else draw_pad_glyph(&c, g, (float)ix0, (float)iy0, (float)ix1 + 1, (float)iy1 + 1, style);
+        int drawing_style = player ? (gen >> 2) & 3 : style;
+        if (drawing_style == STYLE_KEYBOARD) draw_glyph(&c, g, (float)ix0, (float)iy0, (float)ix1 + 1, (float)iy1 + 1);
+        else if (drawing_style != STYLE_GAME)
+            draw_pad_glyph(&c, g, (float)ix0, (float)iy0, (float)ix1 + 1, (float)iy1 + 1, drawing_style);
         bool any = false;
         for (uint32_t i = 0; i < sw * sh && !any; i++) any = c.a[i] > 0;
-        if (!any) continue;  // (a glyph with no keyboard / controller meaning keeps the game's)
+        if (!any && !player) continue;
+        uint32_t dx = player ? (ref.glyphs + g) % ref.cols * sw : x0;
+        uint32_t dy = player ? (ref.glyphs + g) / ref.cols * sh : y0;
         for (uint32_t y = 0; y < sh; y++)
             for (uint32_t x = 0; x < sw; x++) {
-                size_t a = (size_t)(H - 1 - (y0 + y)) * W + x0 + x;
-                img[a] = (uint8_t)lroundf(fminf(c.a[y * sw + x], 1) * 255);
+                size_t a = (size_t)(H - 1 - (dy + y)) * W + dx + x;
+                img[a] = any ? (uint8_t)lroundf(fminf(c.a[y * sw + x], 1) * 255) :
+                              g_orig[(H - 1 - (y0 + y)) * W + x0 + x];
                 mine[a] = 1;
             }
         drawn++;
@@ -627,16 +695,53 @@ static void build(uint32_t gen, uint32_t wb, uint32_t hb) {
         }
     }
     free(mine);
-    if (!g_patched) g_patched = malloc((size_t)wb * hb * 8);
     for (uint32_t by = 0; by < hb; by++)
         for (uint32_t bx = 0; bx < wb; bx++) {
             uint8_t v[16];
             for (int i = 0; i < 16; i++) v[i] = img[(by * 4 + i / 4) * W + bx * 4 + i % 4];
-            bc4_encode(v, g_patched + ((size_t)by * wb + bx) * 8);
+            bc4_encode(v, out + ((size_t)by * wb + bx) * 8);
         }
     free(img);
-    g_patched_gen = gen;
-    LOG("[prompts] %s icons drawn (%d)\n", style == STYLE_KEYBOARD ? "keyboard" : style == STYLE_XBOX ? "Xbox" : "PlayStation", drawn);
+    LOG("[prompts] %s icons drawn (%d)\n", style == STYLE_KEYBOARD ? "keyboard" : style == STYLE_XBOX ? "Xbox" :
+        style == STYLE_PLAYSTATION ? "PlayStation" : "Nintendo / per-player", drawn);
+}
+
+// Builds gen's sheet (unless built meanwhile), keeps it, and copies it to out when given
+static void sheet_build_store(uint32_t gen, uint8_t *out) {
+    size_t size = (size_t)g_wb * g_hb * 8;
+    pthread_mutex_lock(&g_build_lock);
+    pthread_mutex_lock(&g_sheet_lock);
+    uint8_t *have = sheet_find(gen);
+    if (have && out) memcpy(out, have, size);
+    pthread_mutex_unlock(&g_sheet_lock);
+    if (!have) {
+        uint8_t *b = malloc(size);
+        if (b) {
+            build(gen, g_wb, g_hb, b);
+            if (out) memcpy(out, b, size);
+            pthread_mutex_lock(&g_sheet_lock);
+            unsigned slot = g_sheet_next++ % SHEET_CACHE;
+            free(g_sheets[slot].blocks);
+            g_sheets[slot].gen = gen, g_sheets[slot].blocks = b;
+            pthread_mutex_unlock(&g_sheet_lock);
+        }
+    }
+    pthread_mutex_unlock(&g_build_lock);
+}
+
+static _Atomic uint32_t g_prebuilt_base = 0;  // (the bindings' and second player's part of the generation, built ahead)
+static void *prebuild_thread(void *arg) {
+    uint32_t base = (uint32_t)(uintptr_t)arg;
+    int pad = pad_style();
+    const int styles[3] = {STYLE_KEYBOARD, pad == STYLE_GAME ? STYLE_XBOX : pad, STYLE_GAME};
+    for (int i = 0; i < 3; i++) sheet_build_store(base | (uint32_t)styles[i], NULL);
+    return NULL;
+}
+static void prebuild_kick(uint32_t gen) {
+    uint32_t base = gen & ~3u;
+    if (atomic_exchange(&g_prebuilt_base, base) == base) return;
+    pthread_t t;
+    if (pthread_create(&t, NULL, prebuild_thread, (void *)(uintptr_t)base) == 0) pthread_detach(t);
 }
 
 void kbprompts_apply(uint32_t lv, uint8_t *blocks, uint32_t wb, uint32_t hb) {
@@ -651,7 +756,12 @@ void kbprompts_apply(uint32_t lv, uint8_t *blocks, uint32_t wb, uint32_t hb) {
             }
     }
     uint32_t gen = kbprompts_generation();
-    if (!(gen & 3)) return;  // the game's icons, as uploaded
-    if (!g_patched || g_patched_gen != gen) build(gen, wb, hb);
-    memcpy(blocks, g_patched, (size_t)wb * hb * 8);
+    g_wb = wb, g_hb = hb;
+    if (!kbprompts_active()) { prebuild_kick(gen); return; }  // (the game's own icons for now; the others built ahead)
+    pthread_mutex_lock(&g_sheet_lock);
+    uint8_t *have = sheet_find(gen);
+    if (have) memcpy(blocks, have, (size_t)wb * hb * 8);
+    pthread_mutex_unlock(&g_sheet_lock);
+    if (!have) sheet_build_store(gen, blocks);  // (not built ahead: here, as before)
+    prebuild_kick(gen);
 }

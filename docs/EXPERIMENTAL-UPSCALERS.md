@@ -25,7 +25,7 @@ runtime may also require the Microsoft Visual C++ x64 runtime.
 After staging and committing the source, `tools/package_upscaler_beta.ps1`
 creates an allowlisted runtime overlay ZIP with notices, hashes, instructions
 and the source revision. Its default build directory is
-`build/fsr4-xess-preview`. It excludes game assets, keys, saves, generated game
+`build/fsr4-xess-preview`. It excludes game assets, saves, generated game
 libraries and NVIDIA's separately supplied runtime. Use the included launcher
 with the path to a **copied** working game-data directory; it selects separate
 settings and saves. The overlay still needs the working install's compatible
@@ -83,7 +83,7 @@ need testers. Local NVIDIA fallback testing does not verify those paths.
 
 Use a separate copy of a working installation. Keep its compatible dependency
 DLLs and game data. An overlay is not a standalone installer and contains no
-game assets, keys or saves. Do not overwrite the only copy of your installation.
+game assets or saves. Do not overwrite the only copy of your installation.
 
 For each available backend:
 
@@ -99,7 +99,7 @@ For each available backend:
 6. Report crashes, ghosting, colour changes, flicker and performance differences
    with the area/steps, settings file and `SuperOdysseyRecomp.log` next to the
    executable. Logs can contain local paths; review them before sharing. Do not
-   attach keys, game data or saves to a public report.
+   attach game data or saves to a public report.
 
 An `FSR 3.1 fallback` result is useful compatibility feedback, but is not an
 FSR 4 ML quality/performance result.

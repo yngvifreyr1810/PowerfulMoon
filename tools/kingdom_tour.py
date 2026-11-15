@@ -40,15 +40,19 @@ def sha256(path):
 def stop_test_process(proc, log):
     # Windows can re-exec for the guest address reservation: its parent waits
     # for that child. Kill only this test's tree, not every running game.
+    if proc.poll() is not None:
+        return
     if os.name == 'nt':
-        subprocess.run(['taskkill', '/PID', str(proc.pid), '/T', '/F'], stdout=log,
-                       stderr=subprocess.STDOUT, check=False)
+        stopped = subprocess.run(['taskkill', '/PID', str(proc.pid), '/T', '/F'], stdout=log,
+                                 stderr=subprocess.STDOUT, check=False, timeout=10)
+        if stopped.returncode and proc.poll() is None:
+            raise RuntimeError(f'Could not stop private test process tree {proc.pid}; see cleanup log')
     else:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    proc.wait()
+    proc.wait(timeout=10)
 
 
 def comparison(image, baseline, difference):
@@ -97,8 +101,15 @@ def main():
     ap.add_argument('--frames', type=int, default=4500)
     ap.add_argument('--settle', type=int, default=600, help='minimum frames after destination arrival')
     ap.add_argument('--timeout', type=float, default=180, help='seconds per kingdom')
-    ap.add_argument('--frame-rate', choices=(60, 120), type=int, default=60,
-                    help='120 is experimental; use a larger frame budget for equivalent settling time')
+    ap.add_argument('--frame-rate', choices=(60, 90, 120), type=int, default=60,
+                    help='90/120 are experimental; use a larger frame budget for equivalent settling time')
+    ap.add_argument('--cpu-affinity', type=lambda s: int(s, 0),
+                    help='Windows processor mask, e.g. 0xffff0000 for logical processors 16-31')
+    ap.add_argument('--window', default='1280x720', help='capture dimensions, e.g. 2560x1080 or 3840x1080')
+    ap.add_argument('--aspect', choices=('16:9', 'fill'), default='16:9',
+                    help='letterbox the original aspect or exercise the game\'s wider camera/HUD path')
+    ap.add_argument('--strict-extra-draws', action='store_true',
+                    help='diagnostic cadence: force alternating gameplay/extra draws; not a performance test')
     ap.add_argument('--visible', action='store_true')
     args = ap.parse_args()
     exe, data, save, out = (p.resolve() for p in (args.exe, args.data_root, args.save, args.out))
@@ -108,21 +119,34 @@ def main():
         ap.error('Output must be a new separate directory')
     if args.warp_frame < 1 or args.settle < 1 or args.frames <= args.warp_frame + args.settle or args.timeout <= 0:
         ap.error('Invalid frame/timeout budget')
+    dimensions = re.fullmatch(r'(\d+)x(\d+)', args.window)
+    if not dimensions or any(not 320 <= int(n) <= 16384 for n in dimensions.groups()):
+        ap.error('Window must be WIDTHxHEIGHT, with each dimension between 320 and 16384')
+    if args.cpu_affinity is not None and not 0 < args.cpu_affinity < 1 << 64:
+        ap.error('CPU affinity must be a nonzero 64-bit mask')
+    if args.strict_extra_draws and args.frame_rate == 60:
+        ap.error('Strict extra draws require experimental 90/120 FPS')
     out.mkdir(parents=True)
     settings = out / 'tour.ini'
     settings.write_text('window_mode = windowed\ndisplay_resolution = 1080p\n'
                         f'resolution = match\nvolume = 0\nframe_rate = {args.frame_rate}\nframe_interp = 0\n'
                         'temporal_backend = dlss\ndlss_mode = off\nantialias = off\n'
                         'upscaler = bilinear\naniso = 16\nmotion = 0\nvibration = 0\nmouse_camera = 0\n'
-                        'skip_intro = 1\ncheck_updates = 0\n', encoding='ascii')
+                        'skip_intro = 1\ncheck_updates = 0\n' +
+                        ('aspect = fill\n' if args.aspect == 'fill' else ''), encoding='ascii')
     report = {'exe_sha256': sha256(exe), 'game_main_sha256': sha256(data / 'extracted/exefs/main'),
               'settings': settings.read_text(), 'frames': args.frames,
               'warp_frame': args.warp_frame, 'settle_frames': args.settle, 'results': []}
+    report.update(window=args.window, strict_extra_draws=args.strict_extra_draws,
+                  cpu_affinity=hex(args.cpu_affinity) if args.cpu_affinity is not None else None)
     report['save_sha256'] = {str(p.relative_to(save)): sha256(p) for p in sorted(save.rglob('*')) if p.is_file()}
     if args.baseline:
         reference = json.loads((args.baseline / 'report.json').read_text(encoding='utf-8'))
         for field in ('game_main_sha256', 'settings', 'frames', 'warp_frame', 'settle_frames', 'save_sha256'):
             if reference.get(field) != report[field]:
+                ap.error(f'Baseline differs in {field}; capture an equivalent baseline first')
+        for field, default in (('window', '1280x720'), ('strict_extra_draws', False)):
+            if reference.get(field, default) != report[field]:
                 ap.error(f'Baseline differs in {field}; capture an equivalent baseline first')
     base_env = {k: v for k, v in os.environ.items() if not k.upper().startswith('ODYSSEY_')}
     for key in args.kingdoms:
@@ -132,13 +156,17 @@ def main():
         shutil.copytree(save, private_save)
         env = dict(base_env, ODYSSEY_DATA_ROOT=str(data), ODYSSEY_SAVE_DIR=str(private_save),
                    ODYSSEY_SETTINGS=str(settings), ODYSSEY_NO_UPDATE_CHECK='1', ODYSSEY_PREPARE='0',
-                   ODYSSEY_WINDOW='1280x720', ODYSSEY_NO_USER_INPUT='1',
+                   ODYSSEY_WINDOW=args.window, ODYSSEY_NO_USER_INPUT='1',
                    ODYSSEY_INPUT='900:A:8,1050:A:8,1200:A:8,1350:A:8',
                    ODYSSEY_WARP=f'world:{stage}@{args.warp_frame}', ODYSSEY_LOG_STAGES='1',
                    ODYSSEY_WINDOW_SHOT=str(args.frames), ODYSSEY_WINDOW_SHOT_PATH=str(image),
                    ODYSSEY_EXIT_AFTER_SHOT='1', ODYSSEY_LINEAR_WRITEBACK='0')
         if not args.visible:
             env['ODYSSEY_HIDDEN'] = '1'
+        if args.cpu_affinity is not None:
+            env['ODYSSEY_AFFINITY'] = hex(args.cpu_affinity)
+        if args.strict_extra_draws:
+            env['ODYSSEY_NATIVE_120_STRICT'] = '1'
         result = {'kingdom': key, 'stage': stage, 'status': 'failed'}
         print(f'{key}: starting', flush=True)
         started = time.monotonic()

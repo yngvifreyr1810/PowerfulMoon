@@ -11,7 +11,10 @@ from upstream_sync import allowed, apply_delta, git, latest_stable
 
 class UpstreamBot(unittest.TestCase):
     def test_selects_highest_stable_not_response_order(self):
-        releases = [{'tag_name': t, 'commit': {'id': 'a' * 40}} for t in ('v0.1.6', 'v0.2.1', 'v0.2.0', 'v0.3.0-beta')]
+        releases = [{'tag_name': t, 'draft': False, 'prerelease': False}
+                    for t in ('v0.1.6', 'v0.2.1', 'v0.2.0', 'v0.3.0-beta')]
+        releases += [{'tag_name': 'v0.4.0', 'draft': False, 'prerelease': True},
+                     {'tag_name': 'v0.5.0', 'draft': True, 'prerelease': False}]
         self.assertEqual(latest_stable(releases)['tag_name'], 'v0.2.1')
         self.assertFalse(allowed('.github/workflows/publish-reviewed.yml'))
         self.assertFalse(allowed('tools/windows/installer_core.py'))

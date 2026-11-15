@@ -12,6 +12,9 @@ extern "C" {
 bool setup_ready(const char *root);
 // The setup page until it's done (true: start the game) or the window is closed (false). Main thread.
 bool setup_run(const char *root);
+// The configuration page before the game (settings, then Play or Exit): true to play. Skipped when turned off, for
+// test runs and with --play. Main thread.
+bool config_run(void);
 // Setup mode of the menu (menu.mm): it draws the setup page and takes every input while on.
 void menu_setup_mode(bool on);
 // The page itself, drawn by the menu while setup mode is on: its fonts (ImFont *; the output scale is set already).

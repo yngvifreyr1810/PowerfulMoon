@@ -30,6 +30,8 @@
 #endif
 #include "menu.h"
 #include "setup.h"
+#include "steam_shortcut.h"
+#include "backdrop.h"
 
 extern "C" {
 #include "../gamebuild.h"
@@ -37,6 +39,7 @@ extern "C" {
 #include "../paths.h"
 #include "../platform.h"
 #include "../romfs_build.h"
+#include "../settings.h"
 #include "../rt.h"
 #ifdef __APPLE__
 void *ui_metal_layer(void);
@@ -298,8 +301,158 @@ static bool accent_button(const char *label, float scale) {
     return r;
 }
 
+
+// ------------------------------------------------------------------ the configuration page (before the game boots)
+// Every start shows the settings first (the menu's tabs on the card), then Play or Exit - the settings that only take
+// effect at the next start (memory use, warm-up...) can be set before the game is there. "Show at start" turns it off;
+// the menu in play (F1, the controller's Select + Start) keeps every setting. Test runs and --play go straight in.
+static std::atomic<bool> g_config{false};
+static std::atomic<int> g_config_result{0};  // 1: Play, 2: Exit
+bool setup_config_shown(void) { return g_config.load(); }
+void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool, void (*prelaunch)(float));
+
+static void config_page(float scale, ImFont *font, ImFont *big) {
+    ImGuiIO &io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(io.DisplaySize);
+    ImGui::Begin("##config", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                       ImGuiWindowFlags_NoBackground);
+    ImGui::PushFont(font);
+    backdrop_draw(ImGui::GetBackgroundDrawList(), ImVec2(0, 0), io.DisplaySize, ImGui::GetTime());
+    float margin = 22 * scale, pad = 28 * scale;
+    float cardw = fminf(io.DisplaySize.x - 2 * margin, fmaxf(1240 * scale, io.DisplaySize.x * 0.82f)), cardh = io.DisplaySize.y - 2 * margin;
+    ImVec2 c0((io.DisplaySize.x - cardw) * 0.5f, margin);
+    ImDrawList *bg = ImGui::GetWindowDrawList();
+    bg->AddRectFilled(c0, ImVec2(c0.x + cardw, c0.y + cardh), theme_u32(kPanelV, 0.86f), 14 * scale);  // (over a bright backdrop)
+    bg->AddRect(c0, ImVec2(c0.x + cardw, c0.y + cardh), IM_COL32(255, 255, 255, 28), 14 * scale, 0, 2 * scale);
+    float colw = cardw - 2 * pad;
+    ImGui::SetCursorPos(ImVec2(c0.x + pad, c0.y + pad * 0.7f));
+    ImGui::BeginGroup();
+    ImGui::PushFont(big);
+    {
+        float lh = ImGui::GetFontSize(), sz = lh * 1.1f;
+        ImVec2 lp = ImGui::GetCursorScreenPos();
+        theme_crescent(ImGui::GetWindowDrawList(), ImVec2(lp.x, lp.y + lh * 0.5f - sz * 0.55f), sz, kAccent, theme_u32(kPanelV, 1));
+        ImGui::Dummy(ImVec2(sz, lh));
+        ImGui::SameLine(0, lh * 0.35f);
+        ImGui::TextUnformatted("Configuration");
+    }
+    ImGui::PopFont();
+    ImGui::EndGroup();
+    float footer = 84 * scale;
+    float top = ImGui::GetCursorPosY();
+    ImGui::SetCursorPos(ImVec2(c0.x + pad * 0.4f, top));
+    ImGui::BeginChild("##cfgtabs", ImVec2(cardw - pad * 0.8f, c0.y + cardh - top - footer - pad * 0.4f), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoBackground);
+    menu_tabs_draw(scale, font, big, false, NULL);
+    ImGui::EndChild();
+
+    // the footer: Play, Exit, and whether this page shows at start
+    ImGui::SetCursorPos(ImVec2(c0.x + pad, c0.y + cardh - footer + 6 * scale));
+    ImVec2 lp = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddLine(ImVec2(lp.x, lp.y - 8 * scale), ImVec2(lp.x + colw, lp.y - 8 * scale),
+                                        IM_COL32(255, 255, 255, 22), 1.0f * scale);
+    if (accent_button("Play", scale)) g_config_result = 1;
+    if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);
+    ImGui::SameLine(0, 16 * scale);
+    if (accent_button("Exit", scale)) g_config_result = 2;
+    ImGui::SameLine(0, 32 * scale);
+    {
+        float bh = ImGui::GetFrameHeight() + 28 * scale - ImGui::GetFrameHeight();  // (the buttons' height: their padding)
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (bh - ImGui::GetTextLineHeight()) * 0.5f + 7 * scale);
+        ImGui::PushStyleColor(ImGuiCol_CheckMark, kTextV);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, kSurfaceV);
+        ImGui::PushStyleColor(ImGuiCol_NavCursor, kAccentV);
+        if (ImGui::Checkbox("Show this screen at every start", &g_settings.config_at_start)) settings_save();
+        ImGui::PopStyleColor(3);
+    }
+    {   // (the controller's hint, at the right)
+        const char *hint = "Start: Play";
+        ImGui::SetWindowFontScale(0.8f);
+        ImVec2 ts = ImGui::CalcTextSize(hint);
+        ImGui::SameLine(c0.x + cardw - pad - ts.x);
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextDimV);
+        ImGui::TextUnformatted(hint);
+        ImGui::PopStyleColor();
+        ImGui::SetWindowFontScale(1);
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false)) g_config_result = 1;
+    ImGui::PopFont();
+    ImGui::End();
+}
+
+// (main thread) the window's frame with the page drawn; shot: a test's picture of it
+static void page_frame(SDL_Window *w, const char *shot) {
+#ifdef __APPLE__
+    @autoreleasepool {
+        (void)shot;
+        CAMetalLayer *layer = (__bridge CAMetalLayer *)ui_metal_layer();
+        id<MTLDevice> dev = (__bridge id<MTLDevice>)ui_metal_device();
+        static id<MTLCommandQueue> queue;
+        if (!queue) queue = [dev newCommandQueue];
+        id<CAMetalDrawable> d = layer ? [layer nextDrawable] : nil;
+        if (d) {
+            id<MTLCommandBuffer> cb = [queue commandBuffer];
+            menu_render(dev, cb, d.texture);
+            [cb presentDrawable:d];
+            [cb commit];
+        } else {
+            SDL_Delay(16);
+        }
+    }
+#else
+    static const float bgc[4] = {0, 0, 0, 1};
+    if (vk_frame_begin(bgc)) {
+        int pw, ph;
+        SDL_GetWindowSizeInPixels(w, &pw, &ph);
+        menu_render(vk_frame_cmd(), (uint32_t)pw, (uint32_t)ph);
+        vk_frame_end(shot);
+    } else {
+        SDL_Delay(16);
+    }
+#endif
+}
+
+bool config_run(void) {
+    // (test runs and --play: straight into the game)
+    const char *skip_vars[] = {"ODYSSEY_NO_CONFIG", "ODYSSEY_INPUT", "ODYSSEY_HOST_INPUT", "ODYSSEY_WARP", "ODYSSEY_HIDDEN",
+                               "ODYSSEY_EXIT_AFTER_SHOT", "ODYSSEY_SETUP_EXIT_WHEN_DONE", "ODYSSEY_BIND_TEST"};
+    for (const char *v : skip_vars)
+        if (const char *e = getenv(v); e && *e && !(v == skip_vars[0] && !strcmp(e, "0"))) return true;
+    const char *force = getenv("ODYSSEY_CONFIG");  // (1: shown even when turned off; 0: never)
+    if (force ? atoi(force) == 0 : !g_settings.config_at_start) return true;
+    ui_window_init();
+    SDL_Window *w = ui_window();
+    LOG("[config] the configuration page before the game\n");
+    g_config_result = 0;
+    g_config = true;
+    menu_setup_mode(true);
+    static const char *shot = getenv("ODYSSEY_CONFIG_SHOT");  // (test) <frame>: the page as build/config.png, then Play
+    long frame = 0;
+    int result = 0;
+    while (!result) {
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_EVENT_QUIT) result = 2;
+            else menu_handle_event(&e);
+        }
+        menu_apply_window_requests(w);
+        frame++;
+        bool s = shot && frame == atol(shot);
+        page_frame(w, s ? "build/config.png" : NULL);
+        if (s) result = 1;
+        if (!result) result = g_config_result.exchange(0);
+    }
+    g_config = false;
+    menu_setup_mode(false);
+    settings_save();
+    LOG("[config] %s\n", result == 1 ? "play" : "exit");
+    return result == 1;
+}
+
 void setup_draw(float scale, void *font_v, void *font_big_v) {
     ImFont *font = (ImFont *)font_v, *big = (ImFont *)font_big_v;
+    if (g_config.load()) { config_page(scale, font, big); return; }
     ImGuiIO &io = ImGui::GetIO();
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(io.DisplaySize);

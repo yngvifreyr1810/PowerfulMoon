@@ -1,6 +1,6 @@
 # PowerfulMoon
 
-PowerfulMoon is an independent customized fork of [Power Moon Recomp](https://gitlab.com/zzzarathustra-dev/power-moon-recomp) (v0.2.0) by zzzarathustra-dev. It is maintained by **Vĩnh An Project / yngvifreyr1810** with implementation assistance from OpenAI Codex.
+PowerfulMoon is an independent customized fork of Power Moon Recomp, now following [Super Odyssey PC Recomp](https://github.com/Simon3Sarkis/super-odyssey-pc-recomp) upstream. It is maintained by **Vĩnh An Project / yngvifreyr1810** with implementation assistance from OpenAI Codex.
 
 Upstream provides the native game runtime, renderer, frame interpolation engine, and ultrawide support. PowerfulMoon adds:
 

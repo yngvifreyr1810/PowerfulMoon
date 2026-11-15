@@ -35,10 +35,12 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, checkpoints;
+    bool feat_aniso;  // samplerAnisotropy enabled (textures.c: the Anisotropic filtering setting)
     bool gpl;  // VK_EXT_graphics_pipeline_library with fast linking: shaders compile per program, pipelines link (exec.c)
     bool pbin;  // VK_KHR_pipeline_binary: shader libraries saved as data and created from it (exec.c lib_binary_*)
     bool headless;  // the shader preparation's process (device.c vk_headless_init)
     bool cache_control;  // pipelineCreationCacheControl: "only if the driver has it compiled" (exec.c libs_from_cache)
+    bool storage_write_without_format;
     // window
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;
@@ -69,6 +71,19 @@ void vk_checkpoints_report(void);                              // the last marke
 typedef struct { VkBuffer buf; uint64_t off; void *ptr; } VkSpan;
 VkSpan vk_transient(uint64_t size, uint64_t align);
 VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align);
+bool vk_transient_sysmem(void);  // a ring chunk is in system memory (no resizable BAR, or the window ran out)
+VkSpan vk_gpu_scratch(uint64_t size, uint64_t align);  // device-local memory only the GPU touches ({0}: none)
+// ---- ASTC decoded on the GPU (astc_gpu.c, from PrimeRecomp), for GPUs without ASTC
+bool vk_astc_gpu_ready(void);  // false: decode on the CPU (no compute decoder, or ODYSSEY_ASTC_CPU)
+uint64_t vk_astc_gpu_align(void);
+void vk_astc_gpu_bind(VkCommandBuffer cb, VkBuffer buf, uint64_t off, uint64_t size);
+void vk_astc_gpu_dispatch(VkCommandBuffer cb, uint64_t in_off, uint64_t out_off, uint32_t w, uint32_t h, uint32_t bw,
+                          uint32_t bh, bool srgb);
+void vk_astc_gpu_stage(VkCommandBuffer cb, VkSpan from, VkSpan to, uint64_t size);
+void vk_astc_gpu_barrier(VkCommandBuffer cb);
+void vk_astc_gpu_selftest(void);
+void vk_astc_gpu_check_note(const uint8_t *blocks, uint32_t w, uint32_t h, uint32_t bw, uint32_t bh, bool srgb);
+void vk_astc_gpu_check_run(void);
 VkSpan vk_readback(uint64_t size);  // host-cached GPU -> CPU staging (read right after the copy completes)
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout);
 
@@ -84,6 +99,7 @@ typedef struct TexBackend {
     uint32_t width, height, depth, layers, levels, samples;
     VkImageAspectFlags aspect;
     bool gpu_owned, uploaded, dynamic, storage;
+    bool prefetched;        // uploaded ahead of its first use (vk_tex_prefetch): looked at again at that use
     bool paint_cpu_pending; // explicit CPU edits must reach the image even if its next use is a render target
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
     uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
@@ -96,6 +112,8 @@ typedef struct TexBackend {
     uint8_t astc_bw, astc_bh;  // ASTC without GPU support: decoded to RGBA8 on upload (runtime/nvn/astc.c)
     bool astc_srgb;
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
+    int8_t kbp;        // the game's button icon sheet (nvn/kbprompts.c): 1 yes, -1 no, 0 not looked at
+    uint32_t kbp_gen;  // what its icons showed at its last upload (kbprompts_generation)
 } TexBackend;
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads CPU contents unless for_render)
@@ -104,6 +122,7 @@ VkFormat vk_format(uint32_t nvn_format);
 bool vk_format_alpha_one(uint32_t nvn_format);
 // View of t (optionally through an NVN texture view) for rendering or sampling.
 VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype);
+VkImageView vk_storage_view(NvnTexture *t, const NvnTextureView *v, const ShaderImage *img);
 VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uint32_t lv0, uint32_t nlv, uint32_t ly0,
                           uint32_t nly, VkComponentMapping sw, VkImageAspectFlags aspect);
 VkImageView vk_dummy_view(int textype);

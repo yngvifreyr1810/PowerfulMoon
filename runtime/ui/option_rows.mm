@@ -41,7 +41,7 @@ void opt_section(const char *title) {
     std::string t = title;
     for (char &c : t) c = (char)toupper((unsigned char)c);
     if (ImGui::GetCursorPosY() > ImGui::GetStyle().WindowPadding.y + 1) ImGui::Dummy(ImVec2(0, 14 * g_scale));
-    ImGui::TextColored(kAccentV, "%s", t.c_str());
+    ImGui::TextColored(kTextDimV, "%s", t.c_str());  // (headings: white, red only outlines)
 }
 
 // One row: draws it, handles A / click and left / right while selected. Returns 2 (A / click), -1 / +1 (left / right) or 0.
@@ -89,7 +89,7 @@ static int row(const char *label, const std::string &value, bool changed, const 
     float r = 4 * g_scale, pad = 20 * g_scale, fs = ImGui::GetFontSize(), bar = 4 * g_scale > 2 ? 4 * g_scale : 2;
     bool lit = hov || foc;
     dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), theme_u32(lit ? kSurfaceHoverV : kSurfaceV), r);
-    if (lit) dl->AddRectFilled(p, ImVec2(p.x + bar, p.y + h), off ? kAccentDim : foc ? kAccent : kAccentDim, r, ImDrawFlags_RoundCornersLeft);
+    if (lit) dl->AddRect(p, ImVec2(p.x + w, p.y + h), off ? kAccentDim : foc ? kAccent : kAccentDim, r, 0, bar * 0.5f);  // (red outline)
     std::string t = label;
     if (upper)
         for (char &c : t) c = (char)toupper((unsigned char)c);
@@ -100,7 +100,7 @@ static int row(const char *label, const std::string &value, bool changed, const 
     if (arrows && !value.empty()) {  // ◀ value ▶, drawn (the fonts have no arrow glyphs); a click on one steps
         float aw = fs * 0.42f, gap = fs * 0.55f, cy = ty + fs * 0.52f;
         float rx = right - aw, lx = rx - gap - ImGui::CalcTextSize(value.c_str()).x - gap - aw;
-        ImU32 ac = off ? kTextOff : lit ? kAccent : kTextDim;
+        ImU32 ac = off ? kTextOff : lit ? kText : kTextDim;
         dl->AddTriangleFilled(ImVec2(lx, cy), ImVec2(lx + aw, cy - aw * 0.75f), ImVec2(lx + aw, cy + aw * 0.75f), ac);
         dl->AddTriangleFilled(ImVec2(rx + aw, cy), ImVec2(rx, cy - aw * 0.75f), ImVec2(rx, cy + aw * 0.75f), ac);
         if (clicked && !off) {
@@ -171,7 +171,7 @@ bool opt_radio(const char *label, bool selected, const char *desc) {
     ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     float r = ImGui::GetFontSize() * 0.32f, cx = b.x - 16 * g_scale - r, cy = (a.y + b.y) * 0.5f;
     ImDrawList *dl = ImGui::GetWindowDrawList();
-    ImU32 col = off ? kTextOff : selected ? kAccent : theme_u32(kTextV, 0.78f);
+    ImU32 col = off ? kTextOff : selected ? kText : theme_u32(kTextV, 0.78f);
     dl->AddCircle(ImVec2(cx, cy), r, col, 0, 2.0f);
     if (selected) dl->AddCircleFilled(ImVec2(cx, cy), r * 0.55f, col);
     return chosen && !selected;

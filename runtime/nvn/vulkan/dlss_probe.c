@@ -151,6 +151,73 @@ void vk_dlss_probe_device(const VkExtensionProperties *have, uint32_t available,
     }
 }
 
+// The DLSS feature is made on its own thread (ODYSSEY_DLSS_ASYNC_CREATE=0: in the frame, as before). NGX's CreateFeature
+// takes ~35 ms of CPU for each feature (not only the first: a throwaway one at start-up didn't make the next quicker),
+// and the first gameplay frame waited for it in its present: Cap Kingdom appearing held a frame. Until it is ready,
+// a frame or two of the fade-in are shown without DLSS (the ordinary path).
+typedef struct {
+    _Atomic int state;  // 0 idle, 1 making, 2 made, 3 failed
+    uint32_t w, h, ow, oh;
+    int mode;
+    unsigned model;
+    NgxFeature *feature;
+    double ms;
+} DlssMake;
+static DlssMake mk;
+
+static DWORD WINAPI dlss_make_thread(void *arg) {
+    (void)arg;
+    uint64_t t0 = plat_now_ns();
+    static const int quality[] = {0, 5, 2, 1, 0};
+    static const char *const hints[] = {NULL, "DLSS.Hint.Render.Preset.DLAA", "DLSS.Hint.Render.Preset.Quality",
+        "DLSS.Hint.Render.Preset.Balanced", "DLSS.Hint.Render.Preset.Performance"};
+    NgxParameters *p = NULL;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    NgxFeature *feature = NULL;
+    VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = g_vk.qfam};
+    VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                      .commandBufferCount = 1};
+    VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    bool ok = ngx.allocate(&p) == 1 && p && vkCreateCommandPool(g_vk.dev, &pi, NULL, &pool) == VK_SUCCESS &&
+              (ai.commandPool = pool, vkAllocateCommandBuffers(g_vk.dev, &ai, &cb) == VK_SUCCESS) &&
+              vkCreateFence(g_vk.dev, &fi, NULL, &fence) == VK_SUCCESS && vkBeginCommandBuffer(cb, &bi) == VK_SUCCESS;
+    if (ok) {
+        NgxSetInt set_int = (NgxSetInt)p->methods[3];
+        NgxSetUint set_uint = (NgxSetUint)p->methods[4];
+        set_uint(p, "CreationNodeMask", 1);
+        set_uint(p, "VisibilityNodeMask", 1);
+        set_uint(p, "Width", mk.w);
+        set_uint(p, "Height", mk.h);
+        set_uint(p, "OutWidth", mk.ow);
+        set_uint(p, "OutHeight", mk.oh);
+        set_int(p, "PerfQualityValue", quality[mk.mode]);
+        set_uint(p, hints[mk.mode], mk.model);
+        set_int(p, "DLSS.Feature.Create.Flags", 1 << 1);
+        ok = ngx.create(cb, 1, p, &feature) == 1 && feature;
+        VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb};
+        bool ended = vkEndCommandBuffer(cb) == VK_SUCCESS;
+        if (ok && ended) {
+            extern void vk_queue_lock(void), vk_queue_unlock(void);
+            vk_queue_lock();
+            VkResult r = vkQueueSubmit(g_vk.queue, 1, &si, fence);
+            vk_queue_unlock();
+            ok = r == VK_SUCCESS && vkWaitForFences(g_vk.dev, 1, &fence, VK_TRUE, 10000000000ull) == VK_SUCCESS;
+        } else ok = false;
+    }
+    if (!ok && feature) { ngx.release(feature); feature = NULL; }
+    if (p) ngx.destroy(p);
+    if (fence) vkDestroyFence(g_vk.dev, fence, NULL);
+    if (pool) vkDestroyCommandPool(g_vk.dev, pool, NULL);
+    mk.feature = feature;
+    mk.ms = (plat_now_ns() - t0) / 1e6;
+    atomic_store(&mk.state, ok ? 2 : 3);
+    return 0;
+}
+
 void vk_dlss_probe_run(void) {
     if (!ngx.library) return;
     wchar_t dir[1024];
@@ -204,7 +271,7 @@ static struct {
     VkImage source_depth, previous_depth, jitter_depth;
     uint64_t frame, last_eval, last_eval_ns, eval_count, input_seq, output_seq;
     DlssImage depth, motion, output;
-    uint32_t w, h, ow, oh;
+    uint32_t w, h, ow, oh, target_w, target_h;
     uint64_t jitter_frame;
     float jitter[2], scene_jitter[2]; // raster displacement in input pixels, positive right/down
     VkDescriptorSetLayout motion_set;
@@ -222,8 +289,14 @@ static float halton(unsigned index, unsigned base) {
     return value;
 }
 
+static bool temporal_dimensions_supported(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh) {
+    if (!w || !h || !ow || !oh) return false;
+    return temporal_mode() == DLSS_DLAA ? ow == w && oh == h : ow > w && oh > h;
+}
+
 float vk_dlss_surface_lod_bias(const TexBackend *depth) {
-    if (!vk_temporal_enabled() || !depth || depth->image != dlss.source_depth || !dlss.ow || !dlss.w) return 0;
+    if (!vk_temporal_enabled() || !depth || depth->image != dlss.source_depth || !dlss.ow || !dlss.w ||
+        !temporal_dimensions_supported(dlss.w, dlss.h, dlss.target_w, dlss.target_h)) return 0;
     // Choose texture detail for the reconstructed pixel size, rather than the
     // coarser input pixel size. DLAA and non-upscaled output need no adjustment.
     return dlss.w < dlss.ow ? log2f((float)dlss.w / dlss.ow) : 0;
@@ -235,8 +308,11 @@ void vk_dlss_viewport_jitter(const TexBackend *depth, uint64_t frame, float offs
     // jittering every depth target (which would also move shadow maps and UI).
     if (!vk_temporal_enabled() || !depth || depth->image != dlss.source_depth ||
         depth->width != dlss.w || depth->height != dlss.h || !dlss.camera_ready) return;
-    double scale = vk_temporal_scale();
-    if (!(scale > 0 && scale <= 1)) return; // Off can be selected between the readiness and scale checks
+    // Fixed internal resolutions can override the preset's nominal scale.
+    // Never jitter an image the resolve will reject, and choose the sequence
+    // length from the actual input/output ratio rather than the preset name.
+    if (!temporal_dimensions_supported(depth->width, depth->height, dlss.target_w, dlss.target_h)) return;
+    double scale = fmin((double)depth->width / dlss.target_w, (double)depth->height / dlss.target_h);
     unsigned phases = (unsigned)ceil(8.0 / (scale * scale));
     unsigned sample = (unsigned)(frame % phases) + 1;
     dlss.jitter_frame = frame;
@@ -524,9 +600,35 @@ static VkImageView evaluate(VkCommandBuffer cb, const TexBackend *color, VkImage
         set_int(p, "PerfQualityValue", quality[mode]);
         unsigned model = preset == DLSS_PRESET_DEFAULT ? (mode == DLSS_PERFORMANCE ? 13 : 11) : models[preset];
         set_uint(p, hints[mode], model);
-        set_int(p, "DLSS.Feature.Create.Flags", 1 << 1);
-        unsigned r = ngx.create(cb, 1, p, &dlss.feature);
-        if (r != 1 || !dlss.feature) { failed("feature creation", r); return VK_NULL_HANDLE; }
+        static int async = -1;
+        if (async < 0) async = !getenv("ODYSSEY_DLSS_ASYNC_CREATE") || atoi(getenv("ODYSSEY_DLSS_ASYNC_CREATE"));
+        if (async) {
+            int state = atomic_load(&mk.state);
+            bool same = mk.w == dlss.w && mk.h == dlss.h && mk.ow == ow && mk.oh == oh && mk.mode == mode && mk.model == model;
+            if (state == 2 && !same) {  // (made for sizes or a mode no longer wanted)
+                ngx.release(mk.feature);
+                mk.feature = NULL;
+                atomic_store(&mk.state, state = 0);
+            }
+            if (state == 0 || (state == 3 && !same)) {
+                mk.w = dlss.w, mk.h = dlss.h, mk.ow = ow, mk.oh = oh, mk.mode = mode, mk.model = model;
+                atomic_store(&mk.state, 1);
+                HANDLE th = CreateThread(NULL, 0, dlss_make_thread, NULL, 0, NULL);
+                if (th) CloseHandle(th);
+                else atomic_store(&mk.state, 3);
+                return VK_NULL_HANDLE;
+            }
+            if (state == 1) return VK_NULL_HANDLE;  // (making: this frame without DLSS)
+            if (state == 3) { failed("feature creation", 0); return VK_NULL_HANDLE; }
+            dlss.feature = mk.feature;  // (made, for these sizes)
+            mk.feature = NULL;
+            atomic_store(&mk.state, 0);
+            LOG("[dlss] feature made on its own thread in %.1f ms\n", mk.ms);
+        } else {
+            set_int(p, "DLSS.Feature.Create.Flags", 1 << 1);
+            unsigned r = ngx.create(cb, 1, p, &dlss.feature);
+            if (r != 1 || !dlss.feature) { failed("feature creation", r); return VK_NULL_HANDLE; }
+        }
         dlss.ow = ow;
         dlss.oh = oh;
         dlss.feature_mode = mode; dlss.feature_preset = preset;
@@ -632,8 +734,7 @@ static bool can_evaluate(const TexBackend *color, uint32_t ow, uint32_t oh, uint
     }
     if (!vk_temporal_enabled() || !dlss.scene_ready || dlss.frame != frame ||
         (dlss.history && dlss.last_eval == frame) || color->width != dlss.w || color->height != dlss.h ||
-        ow < dlss.w || oh < dlss.h || (temporal_mode() != DLSS_DLAA && (ow == dlss.w || oh == dlss.h))) return false;
-    if (temporal_mode() == DLSS_DLAA && (ow != dlss.w || oh != dlss.h)) return false;
+        !temporal_dimensions_supported(dlss.w, dlss.h, ow, oh)) return false;
     return true;
 }
 
@@ -645,6 +746,8 @@ static bool ensure_output(uint32_t ow, uint32_t oh) {
 
 VkImageView vk_dlss_upscale(VkCommandBuffer cb, const TexBackend *color, VkImageView view,
                             uint32_t ow, uint32_t oh, uint64_t frame) {
+    dlss.target_w = ow;
+    dlss.target_h = oh;
     if (!can_evaluate(color, ow, oh, frame)) return VK_NULL_HANDLE;
     VkFormat fmt = color->format;
     if (fmt == VK_FORMAT_R8G8B8A8_SRGB) fmt = VK_FORMAT_R8G8B8A8_UNORM;

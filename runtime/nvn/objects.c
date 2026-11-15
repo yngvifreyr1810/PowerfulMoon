@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "../kernel.h"
+#include "../sampler.h"
 #include "interp.h"
 #include "rqueue.h"
 #include "nvn.h"
@@ -32,6 +33,13 @@ static uint32_t device_integer(uint32_t which) {
         [50] = 256, [51] = 1, [52] = 0, [53] = 0, [54] = 0, [55] = 256, [56] = 32, [57] = 128,
         [58] = 1, [59] = 1, [60] = 1, [61] = 1, [62] = 1, [63] = 1, [64] = 1,
     };
+    // Odyssey 1.4.1 was built against a newer NVN and refuses one older than 53.311 (sead::GameFrameworkNx::
+    // initializeGraphicsSystem: no sead::Graphics then, and agl's setup faults on it); 1.0.0 keeps the version it saw
+    if (which == 1) {
+        static int v141 = -1;
+        if (v141 < 0) v141 = loader_main_is_v141();
+        if (v141) return 311;
+    }
     return which < sizeof v / sizeof *v ? v[which] : 0;
 }
 
@@ -340,7 +348,29 @@ NVN(nvnMemoryPoolMap) {
         uint16_t value = 0;
         bool valid = byte >= 0 && (uint64_t)byte < p->size && p->size - (uint64_t)byte >= 2;
 #ifndef __APPLE__
-        if (feedback && valid) {
+        // From the newest finished copy right here when there is one (exec.c renderer_fog_texel_cached); once a frame a
+        // request the game doesn't wait for has the render thread copy the map again. ODYSSEY_FOG_READBACK_SYNC=1: each
+        // read through the render thread, waiting for the GPU, as before.
+        static int fog_sync = -1;
+        if (fog_sync < 0) fog_sync = getenv("ODYSSEY_FOG_READBACK_SYNC") && atoi(getenv("ODYSSEY_FOG_READBACK_SYNC"));
+        uint16_t cached;
+        extern bool renderer_fog_texel_cached(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint16_t *);
+        if (feedback && valid && !fog_sync && rq_enabled() && !rq_on_thread() &&
+            renderer_fog_texel_cached(p->storage + off, x, y, comp, nc, &cached)) {
+            memcpy((void *)(uintptr_t)(p->storage + byte), &cached, 2);
+            static struct { RqCpuTexel q; uint64_t ticket, frame; } kick[4];  // (one per map: Cap Kingdom reads two)
+            static unsigned kick_next;
+            extern uint64_t renderer_present_count(void);
+            uint64_t now = renderer_present_count(), at = p->storage + off;
+            int k = -1;
+            for (int i = 0; i < 4 && k < 0; i++) if (kick[i].ticket && kick[i].q.addr == at) k = i;
+            if (k < 0) { k = (int)(kick_next++ % 4); kick[k].ticket = 0; kick[k].frame = UINT64_MAX; }
+            if (kick[k].frame != now && (!kick[k].ticket || rq_is_done(kick[k].ticket))) {
+                kick[k].q = (RqCpuTexel){.addr = at, .x = x, .y = y, .component = comp, .components = nc};
+                kick[k].ticket = rq_push(RQ_CPU_TEXEL, &kick[k].q, 0);
+                kick[k].frame = now;
+            }
+        } else if (feedback && valid) {
             RqCpuTexel q = {.addr = p->storage + off, .x = x, .y = y, .component = comp, .components = nc};
             if (rq_enabled() && !rq_on_thread()) rq_wait(rq_push(RQ_CPU_TEXEL, &q, 0));
             else { extern void renderer_cpu_texel(RqCpuTexel *); renderer_cpu_texel(&q); }
@@ -687,6 +717,22 @@ static void tex_process_releases(void) {
     for (int i = 0; i < n; i++) backend_texture_destroyed(due[i]);
 }
 
+// Live textures with guest storage the renderer hasn't touched yet (textures.c vk_tex_prefetch): up to max, a scan that
+// goes on where the last one stopped. (Textures are never freed, so the pointers stay valid.)
+int nvn_untouched_textures(NvnTexture **out, int max) {
+    static size_t cursor;
+    int n = 0;
+    pthread_mutex_lock(&g_tex_lock);
+    size_t k = 0;
+    for (; g_tex_cap && k < g_tex_cap && n < max; k++) {
+        NvnTexture *t = g_tex_set[(cursor + k) & (g_tex_cap - 1)];
+        if (t && !t->backend && !t->no_prefetch && t->live > 0 && t->addr && t->guest_obj && t->target != 10) out[n++] = t;
+    }
+    cursor += k;
+    pthread_mutex_unlock(&g_tex_lock);
+    return n;
+}
+
 // (debug, ODYSSEY_TEX_TRACE) the most recently initialized host texture with that storage address
 NvnTexture *tex_trace_find(uint64_t addr) {
     NvnTexture *best = NULL;
@@ -948,6 +994,16 @@ static void register_texture(Cpu *c) {
     e->tex = HOST(NvnTexture, A(2));
     e->has_view = A(3) != 0;
     if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
+    static int log_swz = -1;  // ODYSSEY_LOG_SWIZZLE=1: the component swizzle of two-channel (BC5, RG8) textures registered
+    if (log_swz < 0) log_swz = getenv("ODYSSEY_LOG_SWIZZLE") != NULL;
+    if (log_swz && e->tex && (e->tex->format == 0x4B || e->tex->format == 0x4C || e->tex->format == 0x0D)) {
+        static int n;
+        if (n++ < 300)
+            LOG("[swz] id %d tex %p %ux%u f%#x swz %u%u%u%u view %d mask %#x swz %u%u%u%u fmt %#x (lr %llx)\n", id, (void *)e->tex,
+                e->tex->width, e->tex->height, e->tex->format, e->tex->swizzle[0], e->tex->swizzle[1], e->tex->swizzle[2],
+                e->tex->swizzle[3], e->has_view, e->has_view ? e->view.setmask : 0, e->view.swizzle[0], e->view.swizzle[1],
+                e->view.swizzle[2], e->view.swizzle[3], e->has_view ? e->view.format : 0, (unsigned long long)c->x[30]);
+    }
 }
 NVN(nvnTexturePoolRegisterTexture) { register_texture(c); }
 NVN(nvnTexturePoolRegisterImage) { register_texture(c); }
@@ -1165,6 +1221,10 @@ NVN(nvnQueuePresentTexture) {
     if (gt_log && gt_out && plat_now_ns() - gt_out < 100000000ull) {
         gt_sum += plat_now_ns() - gt_out;
         if (++gt_n == 600) { LOG("[game-time] %.2f ms a frame outside its present\n", gt_sum / 600.0 / 1e6); gt_sum = gt_n = 0; }
+    }
+    {   // ODYSSEY_SAMPLE_AT=<frame>: the game thread sampled from there (runtime/sampler.c, Linux)
+        extern uint64_t renderer_present_count(void);
+        sampler_frame(renderer_present_count());
     }
     bool rq = rq_enabled();
     if (rq) rq_present_throttle();  // (the render thread one frame behind at most)

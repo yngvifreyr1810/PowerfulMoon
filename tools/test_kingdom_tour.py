@@ -64,8 +64,10 @@ class ComparisonTests(unittest.TestCase):
             self.assertTrue(pid_file.is_file())
             child_handle = kernel.OpenProcess(0x100000, False, int(pid_file.read_text()))
             self.assertTrue(child_handle)
+            started = time.monotonic()
             with (self.root / 'cleanup.log').open('wb') as log:
                 stop_test_process(proc, log)
+            self.assertLess(time.monotonic() - started, 8, 'Cleanup must kill the tree, not await its natural exit')
             self.assertIsNotNone(proc.returncode)
             self.assertEqual(kernel.WaitForSingleObject(child_handle, 2000), 0)
         finally:

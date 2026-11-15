@@ -8,6 +8,8 @@
 
 #include <string.h>
 
+_Atomic uint32_t astc_bad_blocks;  // (blocks decoded to magenta so far: error blocks, HDR content)
+
 // Quantization levels QUANT_2 .. QUANT_256 (index 0..20): bits / trits / quints per level.
 static const uint8_t q_bits[21]   = {1, 0, 2, 0, 1, 3, 1, 2, 4, 2, 3, 5, 3, 4, 6, 4, 5, 7, 5, 6, 8};
 static const uint8_t q_trits[21]  = {0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0};
@@ -92,6 +94,18 @@ static const uint8_t cunq_data[] = {
 };
 static const uint16_t cunq_off[16] = {0,6,14,24,36,52,72,96,128,168,216,280,360,456,584,744};  // QUANT_256: identity
 _Static_assert(sizeof wunq_data == 142 && sizeof cunq_data == 936, "unquantization table size");
+
+// The decoder's tables, one per word, for the GPU decoder (vulkan/astc_gpu.c; from PrimeRecomp, MIT)
+void astc_tables(uint32_t *out) {
+    uint32_t *o = out;
+    for (int i = 0; i < 21; i++) *o++ = q_bits[i];
+    for (int i = 0; i < 21; i++) *o++ = q_trits[i];
+    for (int i = 0; i < 21; i++) *o++ = q_quints[i];
+    for (int i = 0; i < 142; i++) *o++ = wunq_data[i];
+    for (int i = 0; i < 12; i++) *o++ = wunq_off[i];
+    for (int i = 0; i < 936; i++) *o++ = cunq_data[i];
+    for (int i = 0; i < 16; i++) *o++ = cunq_off[i];
+}
 
 // ---- bits ----
 
@@ -364,6 +378,7 @@ static bool unpack_endpoints(int cem, const uint8_t *v, int e0[4], int e1[4]) {
 // ---- block ----
 
 static void fill_error(uint8_t *out, int texels) {
+    astc_bad_blocks++;
     for (int i = 0; i < texels; i++) {
         out[4 * i + 0] = 0xFF; out[4 * i + 1] = 0x00; out[4 * i + 2] = 0xFF; out[4 * i + 3] = 0xFF;
     }
@@ -451,6 +466,7 @@ bool astc_decode_block(const uint8_t block[16], uint32_t bw, uint32_t bh, bool s
         int *e0 = ep[p][0], *e1 = ep[p][1];
         if (!unpack_endpoints(cem[p], cv + k, e0, e1)) {
             static const int magenta[4] = {0xFF, 0x00, 0xFF, 0xFF};
+            astc_bad_blocks++;
             memcpy(e0, magenta, sizeof magenta);
             memcpy(e1, magenta, sizeof magenta);
         }

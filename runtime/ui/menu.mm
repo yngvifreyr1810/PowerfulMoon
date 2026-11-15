@@ -15,6 +15,7 @@
 #include "imgui.h"
 #include "option_rows.h"
 #include "performance.h"
+#include "steam_shortcut.h"
 #include "imgui_internal.h"  // (NavCursorVisible)
 #include "osk.h"
 #include "theme.h"
@@ -478,8 +479,9 @@ static void style_init(void) {
     c[ImGuiCol_Tab] = c[ImGuiCol_TabSelected] = c[ImGuiCol_TabSelectedOverline] = none;
     c[ImGuiCol_TabDimmed] = c[ImGuiCol_TabDimmedSelected] = c[ImGuiCol_TabDimmedSelectedOverline] = none;
     c[ImGuiCol_TabHovered] = ImVec4(1, 1, 1, 0.06f);
-    c[ImGuiCol_CheckMark] = c[ImGuiCol_SliderGrabActive] = c[ImGuiCol_NavCursor] = c[ImGuiCol_ScrollbarGrabActive] = kAccentV;
-    c[ImGuiCol_SliderGrab] = ImVec4(kAccentV.x, kAccentV.y, kAccentV.z, 0.75f);
+    c[ImGuiCol_CheckMark] = c[ImGuiCol_SliderGrabActive] = c[ImGuiCol_ScrollbarGrabActive] = kTextV;
+    c[ImGuiCol_NavCursor] = kAccentV;  // (the controller / keyboard cursor: a red outline)
+    c[ImGuiCol_SliderGrab] = ImVec4(1, 1, 1, 0.75f);
     c[ImGuiCol_Separator] = kLineV;
     c[ImGuiCol_TableRowBg] = none;
     c[ImGuiCol_TableRowBgAlt] = ImVec4(1, 1, 1, 0.03f);
@@ -562,7 +564,7 @@ static void header(const char *t) {
     for (; t[i] && i < (int)sizeof up - 1; i++) up[i] = (char)toupper((unsigned char)t[i]);
     up[i] = 0;
     ImGui::Dummy(ImVec2(0, 4));
-    ImGui::TextColored(kAccentV, "%s", up);
+    ImGui::TextColored(kTextDimV, "%s", up);
     ImGui::Separator();
     ImGui::Spacing();
 }
@@ -886,12 +888,12 @@ static void tab_performance(void) {
                "Uses a lot of memory (the graphics driver keeps them), so it stops at a quarter of your RAM or 8 GB. "
                "Shaders the game has drawn before are built ahead either way. Applies to areas loaded from now on.");
     {
-        static const char *wn[] = {"Skip", "Wait"};
-        int wi = g_settings.shader_wait;
-        if (opt_choice("While a shader loads", &wi, wn, 2, 0,
-                       "What happens when something is drawn before its shader is ready. Skip: the game keeps running; "
-                       "the object appears a moment later (or the picture is held for a frame). Wait: nothing is ever "
-                       "missing, but the game pauses for the load (a short hitch).", false)) g_settings.shader_wait = wi != 0;
+        bool async = !g_settings.shader_wait;
+        if (opt_toggle("Asynchronous shader building", &async, true,
+                       "On: when something is drawn before its shader is ready, the game keeps running and the object "
+                       "appears a moment later (or the picture is held for a frame) - no stutter. Off: nothing is ever "
+                       "missing, but the game pauses while the shader builds (a short hitch)."))
+            g_settings.shader_wait = !async;  // (opt_toggle flipped it)
     }
     {
         static const char *wn[WARMUP_COUNT] = {"Auto", "Normal", "Long"};
@@ -993,13 +995,14 @@ static void tab_updates(float scale) {
                "Looks for approved releases each time the game starts in the background.");
 #else
     opt_disable_next();
-    opt_action("This version", "0.2.9", "The version of " RT_APP_NAME " you're running.");
+    opt_action("This version", POWERFULMOON_VERSION, "The version of " RT_APP_NAME " you're running.");
 #endif
     opt_section("About PowerfulMoon");
     opt_disable_next();
     opt_action("Fork", "PowerfulMoon", "Customized fork of Super Odyssey PC Recomp / Power Moon Recomp. Maintained by Vinh An Project / yngvifreyr1810. MIT host; separate GPL controller bridge. Not affiliated with Nintendo.");
     if (opt_action("Upstream project", "GitHub", "Opens the upstream project's GitHub page in your browser."))
         SDL_OpenURL("https://github.com/Simon3Sarkis/super-odyssey-pc-recomp");
+    steam_shortcut_draw(scale);
     opt_end();
 }
 
@@ -1058,6 +1061,14 @@ static void quit_dialog(float scale) {
     }
 }
 
+static void camera_speed(const char *label, int *value) {
+    static const int pct[] = {25, 50, 75, 100, 150, 200, 300, 400};
+    static const char *const names[] = {"25%", "50%", "75%", "100%", "150%", "200%", "300%", "400%"};
+    int selected = 0;
+    for (int k = 0; k < 8; k++) if (pct[k] <= *value) selected = k;
+    if (choice(label, &selected, names, 8)) *value = pct[selected];
+}
+
 static void tab_about(void) {
     header("System language");
     {
@@ -1093,18 +1104,22 @@ static void tab_about(void) {
     }
     hint("How far a controller stick moves before it counts. Raise it if Mario or the camera drifts on their own.");
     ImGui::Spacing();
+    header("Stick camera");
+    camera_speed("Stick horizontal speed", &g_settings.stick_camera_x);
+    camera_speed("Stick vertical speed", &g_settings.stick_camera_y);
+    toggle("Invert stick horizontal", &g_settings.stick_camera_invert_x);
+    toggle("Invert stick vertical", &g_settings.stick_camera_invert_y);
+    hint("The main gameplay camera only. Mario's movement and menu navigation keep their normal controls. "
+         "The game's own camera inversion options also apply.");
+    ImGui::Spacing();
     header("Mouse");
     toggle("Mouse camera", &g_settings.mouse_camera);
     hint("Moving the mouse turns the camera. While you play, the pointer stays in the window; it is free again in this "
          "menu (Esc) or when you switch to another window.");
-    {
-        static const int pct[] = {25, 50, 75, 100, 150, 200, 300, 400};
-        static const char *const names[] = {"25%", "50%", "75%", "100%", "150%", "200%", "300%", "400%"};
-        int i = 0;
-        for (int k = 0; k < 8; k++) if (pct[k] <= g_settings.mouse_sensitivity) i = k;
-        if (choice("Mouse sensitivity", &i, names, 8)) g_settings.mouse_sensitivity = pct[i];
-        hint("How far the mouse moves for the camera to turn at full speed. A quick flick turns it faster still.");
-    }
+    camera_speed("Mouse horizontal speed", &g_settings.mouse_sensitivity);
+    camera_speed("Mouse vertical speed", &g_settings.mouse_sensitivity_y);
+    hint("Separate speed for each mouse axis. A quick flick turns the camera faster still.");
+    toggle("Invert mouse left / right", &g_settings.mouse_invert_x);
     toggle("Invert mouse up / down", &g_settings.mouse_invert_y);
     hint("Moving the mouse up turns the camera down instead.");
     {
@@ -1116,8 +1131,10 @@ static void tab_about(void) {
     hint("The game's button icons. Auto switches as you play: the keys you bound (and the mouse for the camera) after "
          "you use the keyboard or mouse, the controller's own buttons (Xbox, PlayStation or Switch) after you use a "
          "controller. Controller always shows the connected controller's; Switch, Xbox and PlayStation always those.");
-    toggle("Skip controller tips", &g_settings.skip_intro);
-    hint("Leaves out the Joy-Con instructions screen's wait before the title screen. Applies at the next start.");
+    toggle("Skip the start-up controller screen", &g_settings.skip_intro);
+    hint("Leaves out the wait on the Joy-Con instructions screen before the title screen. Applies at the next start. "
+         "The game's own tips while playing (\"You can also shake the controller\", the Joy-Con videos) stay, as on the "
+         "Switch.");
     ImGui::Spacing();
     header("Controls");
     controls_bindings_draw(ImGui::GetFontSize() / 34);
@@ -1384,8 +1401,9 @@ static const char *perf_num(char *buf, size_t n, int v, const char *unit) {
 }
 
 static void draw_performance(void) {
-    const ImVec4 green(0.56f, 0.86f, 0.36f, 1), blue(0.36f, 0.66f, 0.92f, 1), pink(0.82f, 0.52f, 0.72f, 1), white(1, 1, 1, 1);
-    const ImVec4 dim(0.78f, 0.80f, 0.82f, 1);
+    // (the menu's look, theme.h: the labels dim white, the values white)
+    const ImVec4 green = kTextDimV, blue = kTextDimV, pink = kTextDimV, white = kTextDimV;
+    const ImVec4 dim = kTextDimV;
     char a[48], b[48], c[48];
     float em = ImGui::GetFontSize();
     // frame times of the last 180 presents
@@ -1439,7 +1457,8 @@ static void draw_performance(void) {
         ImGui::Dummy(ImVec2(0, em * 0.25f));
         ImVec2 p = ImGui::GetCursorScreenPos(), size(em * PERF_COLS, em * 2.2f);
         ImDrawList *dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), IM_COL32(40, 44, 36, 190), em * 0.3f);
+        dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), theme_u32(kSurfaceV), em * 0.3f);
+        dl->AddRect(p, ImVec2(p.x + size.x, p.y + size.y), theme_u32(kLineV), em * 0.3f);
         float top = filled ? sum / filled * 2.0f : 33.4f;
         if (top < worst * 1.1f) top = worst * 1.1f;
         if (top < 1) top = 1;
@@ -1516,7 +1535,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     drain_events(io);
     // fonts are built at 34/56 px for a ~1080 px tall output; scale to the window. The menu and overlays at 68% of
     // that (a menu over about 40% of the game's picture); the installer page at full size.
-    float scale = (float)(th / 1080.0) * (setup ? 1.0f : 0.68f);
+    extern bool setup_config_shown(void);  // (the configuration page: the menu's tabs, a little larger than in play)
+    float scale = (float)(th / 1080.0) * (setup ? (setup_config_shown() ? 0.8f : 1.0f) : 0.68f);
     if (scale < 0.45f) scale = 0.45f;
     io.FontGlobalScale = scale;
 
@@ -1563,16 +1583,19 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8 * scale, 3 * scale));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16 * scale, 12 * scale));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12 * scale);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.07f, 0.08f, 1));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1 * scale);
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 1));  // (black, as the menu: see-through by the opacity)
+            ImGui::PushStyleColor(ImGuiCol_Border, kLineV);
         }
         ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+        ImGui::PushFont(g_menu_font);  // (the menu's font: Roboto Medium)
         ImGui::SetWindowFontScale(advanced ? sizes[g_settings.overlay_size >= 0 && g_settings.overlay_size <= 2 ? g_settings.overlay_size : 1] : 1.0f);
         if (advanced) draw_performance();
         else ImGui::Text("%.0f fps", io.Framerate);
+        ImGui::PopFont();
         ImGui::End();
-        if (advanced) { ImGui::PopStyleColor(); ImGui::PopStyleVar(4); }
+        if (advanced) { ImGui::PopStyleColor(2); ImGui::PopStyleVar(4); }
     }
 
     if (open) {
@@ -1607,10 +1630,10 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
             bool close = ImGui::InvisibleButton("##close", ImVec2(bx, bx));
             ImGui::PopStyleColor();
             bool hot = ImGui::IsItemHovered() || ImGui::IsItemFocused();
-            ImU32 col = hot ? kAccent : theme_u32(kTextV, 0.85f);
+            ImU32 col = theme_u32(kTextV, hot ? 1.0f : 0.85f);
             float m = bx * 0.3f, t = (hot ? 3.0f : 2.4f) * scale * 1.5f;
             ImDrawList *dl = ImGui::GetWindowDrawList();
-            if (hot) dl->AddRectFilled(p, ImVec2(p.x + bx, p.y + bx), theme_u32(kSurfaceHoverV), 4 * scale);
+            if (hot) dl->AddRect(p, ImVec2(p.x + bx, p.y + bx), kAccent, 4 * scale, 0, 2 * scale);  // (red outline)
             dl->AddLine(ImVec2(p.x + m, p.y + m), ImVec2(p.x + bx - m, p.y + bx - m), col, t);
             dl->AddLine(ImVec2(p.x + bx - m, p.y + m), ImVec2(p.x + m, p.y + bx - m), col, t);
             if (close) set_open(false);

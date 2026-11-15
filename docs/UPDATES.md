@@ -2,7 +2,7 @@
 
 [Huong dan tung buoc bang tieng Viet](UPDATES-VI.md).
 
-PowerfulMoon follows [Power Moon Recomp](https://gitlab.com/zzzarathustra-dev/power-moon-recomp) while keeping its controller integration and presentation settings. Updating with an upstream Power Moon ZIP replaces the customized host; use a **PowerfulMoon release** instead.
+PowerfulMoon follows [Super Odyssey PC Recomp](https://github.com/Simon3Sarkis/super-odyssey-pc-recomp) while keeping its controller integration and presentation settings. Updating with an upstream ZIP replaces the customized host; use a **PowerfulMoon release** instead.
 
 ## Update from the app
 

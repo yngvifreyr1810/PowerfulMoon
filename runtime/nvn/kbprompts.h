@@ -24,6 +24,9 @@ uint32_t kbprompts_generation(void);
 void kbprompts_apply(uint32_t lv, uint8_t *blocks, uint32_t wb, uint32_t hb);
 // The input device the player used last (runtime/hle/input.c): true keyboard / mouse, false controller
 void kbprompts_note_device(bool keyboard);
+// Separate glyph cells for Cappy's tutorial text, in the same font texture.
+uint16_t kbprompts_cappy_code(uint16_t code);
+bool kbprompts_cappy_glyph(uint32_t code, uint32_t *original, uint16_t *source, uint16_t *index);
 
 #ifdef __cplusplus
 }

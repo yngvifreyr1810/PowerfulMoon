@@ -46,10 +46,11 @@ class Module:
         self.hi = base + n.text[0] + n.text[1]
         self.words = struct.unpack(f'<{n.text[1] // 4}I', bytes(n.image[n.text[0]:n.text[0] + n.text[1]]))
         self.lifter = Lifter(base, simd)
-        # (tools/odyssey_patches.py: by address, for Odyssey 1.0.0's main only - other modules are lifted unpatched)
-        odyssey = n.build_id.startswith(ODYSSEY_MAIN_BUILD)
-        self.patches = ODYSSEY_PATCHES if odyssey else {}
-        print(f'{name}: build {n.build_id[:16]}, Odyssey patches {"on" if odyssey else "off"}', file=sys.stderr)
+        # (tools/odyssey_patches.py: by address, for Odyssey's main in the builds it knows (1.0.0, 1.4.1) - other modules
+        # are lifted unpatched)
+        self.build = n.build_id[:16]
+        self.patches = PATCHES_BY_BUILD.get(self.build, {})
+        print(f'{name}: build {self.build}, Odyssey patches {"on" if self.patches else "off"}', file=sys.stderr)
         self.cache = {}
         self.stats = Counter()
         self.mu = None
@@ -447,10 +448,23 @@ class Module:
             out.append('    __attribute__((musttail)) return rt_dispatch(c);')
         out.append('}')
         self._refs = refs
+        wrapper = ORIGINAL_WRAPPERS_BY_BUILD.get(self.build, {}).get(entry)
+        if wrapper:
+            out = wrap_original(entry, out, wrapper)
         return out
 
 
-from odyssey_patches import ODYSSEY_MAIN_BUILD, PATCHES as ODYSSEY_PATCHES
+from odyssey_patches import HLE_BY_BUILD, PATCHES_BY_BUILD, ORIGINAL_WRAPPERS_BY_BUILD
+
+
+def wrap_original(entry, body, wrapper):
+    """Intercept direct and indirect calls while keeping the original callable."""
+    body = list(body)
+    original = fname(entry) + '_original'
+    body[0] = f'static void {original}(Cpu *c) {{'
+    body += [f'void {wrapper}(Cpu *, GuestFn);',
+             f'void {fname(entry)}(Cpu *c) {{ {wrapper}(c, {original}); }}']
+    return body
 
 
 def write_if_changed(path, text):
@@ -489,6 +503,10 @@ def main():
         for name, info, shndx, value, size in m.nso.syms:
             if shndx and name in want:
                 hle[args.base + value] = name
+        # (a build without the names, e.g. Odyssey 1.4.1's main: the replacements by address)
+        for addr, name in HLE_BY_BUILD.get(m.build, {}).items():
+            if name in want:
+                hle[addr] = name
 
     # Partition text into functions; any branch/call target outside its function becomes a new
     # boundary (splitting the containing function) until a fixpoint is reached.

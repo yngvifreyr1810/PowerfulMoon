@@ -48,6 +48,7 @@ bool rq_on_thread(void) { return on_thread; }
 static void *render_thread(void *arg) {
     (void)arg;
     on_thread = true;
+    { extern void sampler_render_thread(void); sampler_render_thread(); }
     for (;;) {
         pthread_mutex_lock(&q_mx);
         while (q_head == q_tail) pthread_cond_wait(&q_cv, &q_mx);
@@ -118,6 +119,8 @@ uint64_t rq_push(int type, void *p, uint64_t a) {
     pthread_mutex_unlock(&q_mx);
     return t;
 }
+
+bool rq_is_done(uint64_t ticket) { return atomic_load(&q_done) >= ticket; }
 
 uint64_t rq_last_ticket(void) {
     pthread_mutex_lock(&q_mx);

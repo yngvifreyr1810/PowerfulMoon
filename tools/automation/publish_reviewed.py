@@ -97,7 +97,7 @@ def main():
         # diverged incompatibly, GitHub returns a conflict and nothing is released.
         api.call('merges', {'base': 'main', 'head': args.sha,
                           'commit_message': 'Integrate owner-reviewed PowerfulMoon ' + version})
-        body = ('Customized fork of [Power Moon Recomp](https://gitlab.com/zzzarathustra-dev/power-moon-recomp) ' + meta['upstream_tag'] + '.\n\n'
+        body = ('Customized fork of [Super Odyssey PC Recomp](https://github.com/Simon3Sarkis/super-odyssey-pc-recomp) ' + meta['upstream_tag'] + '.\n\n'
                 'Includes the upstream update, Switch 2 Pro Controller Bluetooth support through the bundled ProCon2Bridge, persistent controller settings, and the VRR interpolation/VSync controls. '
                 'The Update button offers only approved PowerfulMoon releases.\n\n'
                 '**Upgrade:** close the game and select your existing game folder in Setup. Saves, mods and settings are retained; replaced program files are backed up under `powerfulmoon-backups/`.\n\n'

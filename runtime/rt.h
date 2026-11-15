@@ -50,6 +50,7 @@ typedef enum { GAME_OTHER, GAME_ODYSSEY = 2 } Game;
 extern Game g_game;
 static inline bool game_is_odyssey(void) { return g_game == GAME_ODYSSEY; }
 void odyssey_boot(void);  // each boot after dispatch_init: Odyssey test tools (hle/odyssey_warp.c)
+void odyssey_coop_boot(void);
 void odyssey_native_120_boot(void);
 bool odyssey_native_120_enabled(void);  // (90 or 120 draws a second: the extra-draw loop on)
 int odyssey_native_hz(void);              // its draws a second: 90 or 120 (60: off)

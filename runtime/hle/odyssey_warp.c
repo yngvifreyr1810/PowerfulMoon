@@ -160,6 +160,15 @@ bool odyssey_scene_warming(void) {
     return !last || now - last > 2 || now - start < WARMUP_FRAMES;
 }
 
+bool odyssey_scene_cadence_warming(void) {
+    // A skipped/delayed control call can make the shader warm-up heuristic
+    // conservative for one frame. It must not switch the display cadence back
+    // and forth. Only scene initialization and its initial settling window
+    // hold the experimental draw loop at stock speed.
+    uint64_t start = g_scene_start;
+    return g_scene_new || !start || renderer_present_count() + 1 - start < WARMUP_FRAMES;
+}
+
 // First save load only. A title screen can idle indefinitely before this window starts.
 int odyssey_first_scene_warmup(void) {
     uint64_t start = g_first_scene_start;

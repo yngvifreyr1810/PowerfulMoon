@@ -137,7 +137,11 @@ static void boot(const char *root) {
     { extern void settings_load(void); settings_load(); }
     kernel_init();
     dispatch_init();
-    if (game_is_odyssey()) odyssey_boot();
+    if (game_is_odyssey()) {
+        odyssey_boot();
+        odyssey_native_120_boot();
+        odyssey_coop_boot();
+    }
 
     uint32_t stack_size = 0x100000;
     int prio = 44;
@@ -178,7 +182,14 @@ int main(int argc, char **argv) {
     const char *prepare = NULL;
     static char arg_root[1024];
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--play")) continue;  // (older scripts: the game always starts straight away now)
+        if (!strcmp(argv[i], "--play")) {  // straight into the game, without the configuration page
+#ifdef _WIN32
+            _putenv_s("ODYSSEY_NO_CONFIG", "1");
+#else
+            setenv("ODYSSEY_NO_CONFIG", "1", 1);
+#endif
+            continue;
+        }
         else if (!strcmp(argv[i], "--build-romfs")) build_romfs = true;
         else if (!strcmp(argv[i], "--prepare-shaders") && i + 1 < argc) prepare = argv[++i];
         else if (!strcmp(argv[i], "--data-root") && i + 1 < argc) {  // (the game's own, for its shader preparation)
@@ -214,6 +225,7 @@ int main(int argc, char **argv) {
     // version of the app (an update): the setup page (runtime/ui/setup.mm) - the player's own files copied in, the game
     // code recompiled here. A source checkout has extracted/ and build/odyssey_game.* already.
     if (!setup_ready(root) && !setup_run(root)) return 0;
+    if (!config_run()) return 0;  // (the configuration page: settings, then Play or Exit - runtime/ui/setup.mm)
     // (a source checkout: the RomFS image made from extracted/romfs first if it isn't there yet, as --build-romfs)
     {
         char dir[1100], out[1100], why[256];

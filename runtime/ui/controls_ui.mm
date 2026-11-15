@@ -10,6 +10,7 @@
 
 extern "C" {
 #include "../input_bind.h"
+#include "../input_players.h"
 #include "../settings.h"
 }
 
@@ -43,12 +44,39 @@ extern "C" void controls_bindings_draw(float scale) {
     static const char *const fam_name[] = {"Nintendo", "Xbox", "PlayStation"};
     int n = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
-    const char *pad_name = ids && n > 0 ? SDL_GetGamepadNameForID(ids[0]) : NULL;
+    const char *pad_name = SDL_GetGamepadNameForID(input_primary_id());
     char line[200];
     if (n > 0) snprintf(line, sizeof line, "Controller: %s  (%s button names)", pad_name ? pad_name : "connected", fam_name[fam % 3]);
     else snprintf(line, sizeof line, "No controller connected  (%s button names shown)", fam_name[fam % 3]);
     SDL_free(ids);
     ImGui::TextUnformatted(line);
+    {
+        uint32_t selected = input_cappy_id();
+        const char *name = selected ? SDL_GetGamepadNameForID(selected) : NULL;
+        ImGui::BeginDisabled(!input_primary_id());
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Cappy controller");
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##cappy_controller", name ? name : "Not assigned")) {
+            if (ImGui::Selectable("Not assigned", !selected)) input_cappy_assign(0);
+            int count = 0;
+            SDL_JoystickID *pads = SDL_GetGamepads(&count);
+            for (int i = 0; i < count; i++) {
+                if (pads[i] == input_primary_id()) continue;
+                const char *label = SDL_GetGamepadNameForID(pads[i]);
+                char item[256];
+                snprintf(item, sizeof item, "%s##cappy-%u", label ? label : "Controller", pads[i]);
+                if (ImGui::Selectable(item, pads[i] == selected)) input_cappy_assign(pads[i]);
+            }
+            SDL_free(pads);
+            ImGui::EndCombo();
+        }
+        ImGui::EndDisabled();
+        ImGui::TextWrapped("Assign a second controller here, then choose Two Players in the game's pause menu. "
+                          "Mario keeps the current controller and keyboard. Cappy uses this controller's buttons "
+                          "and sticks; secondary motion controls are not available yet. Assignment lasts for this session.");
+    }
     ImGui::PushTextWrapPos(0);
     ImGui::TextDisabled("Select a binding, then press the new button, key, mouse button or wheel. Esc (or 5 seconds) cancels. A button "
                         "that's already in use swaps with the old one.");

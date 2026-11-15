@@ -103,7 +103,7 @@ UIFLAGS  := -x c++ $(OSFLAGS)  # the .mm UI sources are plain C++ apart from __A
 GAMELIB  := $(B)/odyssey_game.dll
 # the runtime functions it calls: exported by the .exe, linked through its import library
 LDFLAGS  += -Wl,--export-all-symbols -Wl,--out-implib,$(B)/PowerfulMoon.dll.a
-LDFLAGS  += -lpthread -lws2_32
+LDFLAGS  += -lpthread -lws2_32 -lpdh
 GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/PowerfulMoon.dll.a
 GAMELIB_SHARED := -shared -fuse-ld=lld  # (+ the import library: runtime/gamebuild.c)
 endif

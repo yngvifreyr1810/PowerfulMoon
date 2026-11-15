@@ -2,6 +2,7 @@
 #include "paths.h"
 #include "settings.h"
 #include "ui/menu.h"
+#include "ui/events.h"
 // Metal renderer for the NVN layer: window, textures, command execution, presentation.
 #include <sys/stat.h>
 #import <AppKit/AppKit.h>
@@ -1148,7 +1149,7 @@ void ui_window_init(void) {
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
-    if (g_settings.fullscreen && !getenv("ODYSSEY_WINDOW") && !getenv("ODYSSEY_HIDDEN")) SDL_SetWindowFullscreen(window, true);
+    if (!getenv("ODYSSEY_WINDOW") && !getenv("ODYSSEY_HIDDEN")) menu_apply_window_requests(window);
     SDL_MetalView view = SDL_Metal_CreateView(window);
     layer = (__bridge CAMetalLayer *)SDL_Metal_GetLayer(view);
     dev = MTLCreateSystemDefaultDevice();
@@ -1174,13 +1175,21 @@ int ui_run(void) {
     for (;;) {
         if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
-        while (SDL_WaitEventTimeout(&e, 16)) {
-            if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }
+        unsigned event_count = 0;
+        while (ui_next_event(&e, &event_count)) {
+            if (e.type == SDL_EVENT_QUIT ||
+                (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && e.window.windowID == SDL_GetWindowID(window))) {
+                LOG("window closed\n");
+                SDL_HideWindow(window);
+                exit(0);
+            }
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing
             if (menu_handle_event(&e)) continue;
             input_handle_event(&e);
         }
         menu_apply_window_requests(window);
+        extern void input_mouse_window(SDL_Window *w);
+        input_mouse_window(window);  // (the mouse camera: the pointer held while the game has it)
         int w, h;
         SDL_GetWindowSizeInPixels(window, &w, &h);
         layer.drawableSize = CGSizeMake(w, h);

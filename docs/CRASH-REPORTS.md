@@ -29,7 +29,7 @@ The report contains:
   most recent log entries (up to 1 MiB).
 
 Only the host executable is read for the startup fingerprint. Bundle contents
-come from the settings and log, without collecting game assets, keys, saves, a
+come from the settings and log, without collecting game assets, saves, a
 directory archive or a process memory dump. The text can contain local paths
 and mod names; review it before sharing. Terminal-only runs explicitly report
 when no file log is available.

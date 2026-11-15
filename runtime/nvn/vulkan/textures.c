@@ -589,7 +589,73 @@ static void upload_pending(TexBackend *b) {
                 vk_copy_buffer_to_image(cb, b, s.buf, &rg);
 }
 
+// ASTC where the GPU has none (desktop, Steam Deck): the blocks of every level and layer go into one span, the
+// compute decoder (astc_gpu.c, from PrimeRecomp) turns them into RGBA8 texels behind them, copied into the image -
+// the same bytes as the CPU decoder (astc.c), which ran on the render thread at a texture's first use (~10 ms per
+// 1024x1024; the title screen's first frames stood ~600 ms). Without resizable BAR the decoder works in GPU scratch
+// (video memory), the blocks copied there. False: the CPU decoder (ODYSSEY_ASTC_CPU=1: always).
+static bool upload_astc_gpu(NvnTexture *t, TexBackend *b, VkCommandBuffer cb, uint32_t layers, uint32_t levels,
+                            uint64_t layer_size, uint64_t total, bool linear) {
+    if (!vk_astc_gpu_ready()) return false;
+    uint32_t bw = b->astc_bw, bh = b->astc_bh;
+    uint64_t in_sz = 0, out_sz = 0;
+    for (uint32_t lv = 0; lv < levels; lv++) {
+        LevelLayout l = tegra_level(&t->layout, lv);
+        if (l.wb != (l.w + bw - 1) / bw || l.hb < (l.h + bh - 1) / bh) return false;  // (the decoders' block rows)
+        in_sz += (uint64_t)l.wb * l.hb * 16;
+        out_sz += ((uint64_t)l.w * l.h * 4 + 15) & ~15ull;
+    }
+    in_sz *= layers, out_sz *= layers;
+    static int scratch = -2;
+    if (scratch == -2) scratch = getenv("ODYSSEY_ASTC_SCRATCH") ? atoi(getenv("ODYSSEY_ASTC_SCRATCH")) : -1;
+    VkSpan s = {0}, w = {0};  // s: the blocks as the CPU writes them, w: where the decoder works (blocks, then texels)
+    if (scratch > 0 || (scratch < 0 && vk_transient_sysmem())) {
+        w = vk_gpu_scratch(in_sz + out_sz, vk_astc_gpu_align());
+        if (w.buf) s = vk_transient(in_sz, 16);
+    }
+    if (!w.buf) s = w = vk_transient(in_sz + out_sz, vk_astc_gpu_align());
+    uint64_t in = 0;
+    for (uint32_t layer = 0; layer < layers; layer++)
+        for (uint32_t lv = 0; lv < levels; lv++) {
+            LevelLayout l = tegra_level(&t->layout, lv);
+            const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
+            uint8_t *blocks = (uint8_t *)s.ptr + in;
+            if (linear) {
+                if (!nvn_linear_copy_rows(blocks, (uint64_t)l.wb * l.hb * 16, src, total, t->stride, (uint64_t)l.wb * 16, l.hb))
+                    memset(blocks, 0, (uint64_t)l.wb * l.hb * 16);
+            } else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, 16, l.block_height_log2, l.block_depth_log2);
+            vk_astc_gpu_check_note(blocks, l.w, l.h, bw, bh, b->astc_srgb);  // (ODYSSEY_ASTC_CHECK)
+            in += (uint64_t)l.wb * l.hb * 16;
+        }
+    if (w.buf != s.buf || w.off != s.off) vk_astc_gpu_stage(cb, s, w, in_sz);
+    vk_astc_gpu_bind(cb, w.buf, w.off, in_sz + out_sz);
+    uint64_t out = in_sz;
+    in = 0;
+    for (uint32_t layer = 0; layer < layers; layer++)
+        for (uint32_t lv = 0; lv < levels; lv++) {
+            LevelLayout l = tegra_level(&t->layout, lv);
+            vk_astc_gpu_dispatch(cb, in, out, l.w, l.h, bw, bh, b->astc_srgb);
+            in += (uint64_t)l.wb * l.hb * 16;
+            out += ((uint64_t)l.w * l.h * 4 + 15) & ~15ull;
+        }
+    vk_astc_gpu_barrier(cb);
+    out = in_sz;
+    for (uint32_t layer = 0; layer < layers; layer++)
+        for (uint32_t lv = 0; lv < levels; lv++) {
+            LevelLayout l = tegra_level(&t->layout, lv);
+            VkBufferImageCopy rg = {.bufferOffset = w.off + out, .bufferRowLength = l.w, .bufferImageHeight = l.h,
+                                    .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, layer, 1},
+                                    .imageExtent = {l.w < level_w(b, lv) || tex_scaled(b) ? l.w : level_w(b, lv),
+                                                    l.h < level_h(b, lv) || tex_scaled(b) ? l.h : level_h(b, lv), 1}};
+            vk_dl_note_upload((void *)b->image, rg.imageExtent.width, rg.imageExtent.height, rg.imageSubresource.mipLevel);
+            vk_copy_buffer_to_image(cb, b, w.buf, &rg);
+            out += ((uint64_t)l.w * l.h * 4 + 15) & ~15ull;
+        }
+    return true;
+}
+
 uint64_t prof_tex_checks, prof_tex_samples, prof_tex_full, prof_tex_full_bytes, prof_tex_dyn, prof_tex_watch_skips;
+static __thread bool t_prefetch;  // (vk_tex_prefetch) uploading ahead of a first use
 static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (!t->addr || t->target == 10) return;
     bool linear = nvn_flags_linear(t->flags);
@@ -603,7 +669,8 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 kbprompts_candidate(t->width, t->height, t->layout.fmt->bw, t->layout.fmt->bh, t->layout.fmt->bpb);
     bool repatch = look || (b->kbp > 0 && b->kbp_gen != kbprompts_generation());
     if (b->uploaded && b->checked_frame == frame && !repatch) return;
-    if (b->uploaded && !b->dynamic && ((frame + ((uintptr_t)b >> 6)) & 7) && !repatch) return;
+    // (one uploaded ahead is looked at again at its first use: the game may have written it since)
+    if (b->uploaded && !b->dynamic && ((frame + ((uintptr_t)b >> 6)) & 7) && !repatch && !(b->prefetched && !t_prefetch)) return;
     const FormatInfo *fi = t->layout.fmt;
     if (!fi || !fi->bpb) return;
     VkFmt mf = fmt_of(t->format);
@@ -663,10 +730,11 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (b->uploaded && h == b->data_hash && !repatch) return;
     if (b->uploaded && h != b->data_hash) b->dynamic = true;
     if (!b->uploaded || h != b->data_hash || look)  // (new contents: the button icon sheet? looked at deswizzled, below)
-        b->kbp = !kb ? 0 : t->layout.layers <= 1 && kbprompts_candidate(t->width, t->height, fi->bw, fi->bh, fi->bpb) ? 2 : -1;
+        b->kbp = t->layout.layers <= 1 && kbprompts_candidate(t->width, t->height, fi->bw, fi->bh, fi->bpb) ? 2 : -1;  // (identified even before other icons are wanted: kbprompts.c builds them ahead)
     if (b->kbp > 0) b->kbp_gen = kbprompts_generation();
     b->data_hash = h;
     b->uploaded = true;
+    b->prefetched = t_prefetch;
     if ((t->target == 8 || t->target == 9) && getenv("ODYSSEY_LOG_CUBES")) {  // (where cube map contents come from)
         static int n;
         if (n++ < 200)
@@ -675,10 +743,15 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 (unsigned long long)total, (unsigned long long)h, t->flags, (unsigned long long)frame);
     }
     if (b->format != mf.vf && !b->astc_bw) return;  // unsupported format: nothing sensible to copy
+    // ODYSSEY_LOG_UPLOAD_MS=<ms>: uploads that took longer (texture, format, size, the ASTC decode's share)
+    static double log_up = -2;
+    if (log_up == -2) log_up = getenv("ODYSSEY_LOG_UPLOAD_MS") ? atof(getenv("ODYSSEY_LOG_UPLOAD_MS")) : -1;
+    uint64_t up_t0 = log_up >= 0 ? SDL_GetTicksNS() : 0, astc_ns = 0;
     VkCommandBuffer cb = vk_upload_cmd();
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;
     if (layers > b->layers && b->depth == 1) layers = b->layers;
     uint32_t levels = t->layout.levels < b->levels ? t->layout.levels : b->levels;
+    if (b->astc_bw && upload_astc_gpu(t, b, cb, layers, levels, layer_size, total, linear)) return;
     for (uint32_t layer = 0; layer < layers; layer++) {
         for (uint32_t lv = 0; lv < levels; lv++) {
             LevelLayout l = tegra_level(&t->layout, lv);
@@ -693,7 +766,9 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, 16, l.block_height_log2, l.block_depth_log2);
                 VkSpan s = vk_transient((uint64_t)l.w * l.h * 4, 16);
                 uint32_t bad = astc_bad_blocks;
+                uint64_t astc_t0 = log_up >= 0 ? SDL_GetTicksNS() : 0;
                 astc_decode_ldr(blocks, l.w, l.h, b->astc_bw, b->astc_bh, b->astc_srgb, s.ptr);
+                if (log_up >= 0) astc_ns += SDL_GetTicksNS() - astc_t0;
                 if (astc_bad_blocks != bad) {  // (magenta in it: HDR content or error blocks - not decoded here)
                     static int nlog;
                     if (nlog++ < 40)
@@ -718,16 +793,34 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             VkSpan s = vk_transient((uint64_t)out_row * l.hb * l.d, 16);
             uint8_t *lin = expand ? malloc(sz) : s.ptr;
             const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
+            // the button icon sheet (or a texture of its shape) is read here, so it is worked on in normal memory and
+            // copied in after: lin is the upload buffer, GPU memory that is very slow to read (Resizable BAR) - reading
+            // it was 200 ms frames at every kingdom load, where many textures of the sheet's shape arrive
+            uint8_t *cpu = b->kbp > 0 && !expand ? malloc(sz) : NULL;
+            uint8_t *dst = cpu ? cpu : lin;
             if (linear) {
-                if (!nvn_linear_copy_rows(lin, (uint64_t)row * l.hb, src, total, t->stride, row, l.hb)) {
+                if (!nvn_linear_copy_rows(dst, (uint64_t)row * l.hb, src, total, t->stride, row, l.hb)) {
                     if (expand) free(lin);
+                    free(cpu);
                     return;
                 }
             } else {
-                tegra_deswizzle(src, lin, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
+                tegra_deswizzle(src, dst, l.wb, l.hb, l.d, fi->bpb, l.block_height_log2, l.block_depth_log2);
             }
-            if (b->kbp == 2 && lv == 0) b->kbp = !expand && kbprompts_identify(lin, l.wb, l.hb) ? 1 : -1;
-            if (b->kbp == 1 && !expand) kbprompts_apply(lv, lin, l.wb, l.hb);  // (keyboard / mouse icons)
+            if (b->kbp == 2 && lv == 0) {
+                // contents already found not to be the sheet aren't looked at again (by their hash)
+                static uint64_t not_sheet[128];
+                static unsigned n_not;
+                bool known = false;
+                for (unsigned i = 0; i < n_not && i < 128 && !known; i++) known = not_sheet[i] == h;
+                b->kbp = cpu && !known && kbprompts_identify(cpu, l.wb, l.hb) ? 1 : -1;
+                if (b->kbp < 0 && !known) not_sheet[n_not++ % 128] = h;
+            }
+            if (b->kbp == 1 && cpu) kbprompts_apply(lv, cpu, l.wb, l.hb);  // (keyboard / mouse icons)
+            if (cpu) {
+                memcpy(lin, cpu, sz);
+                free(cpu);
+            }
             if (expand) {  // RGB8 -> RGBA8
                 uint8_t *o = s.ptr;
                 uint64_t n = (uint64_t)l.wb * l.hb * l.d;
@@ -754,6 +847,10 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 vk_copy_buffer_to_image(cb, b, s.buf, &rg);
         }
     }
+    if (log_up >= 0 && (SDL_GetTicksNS() - up_t0) / 1e6 >= log_up)
+        LOG("[upload] %ux%u f%#x %u levels %u layers %llu KB%s: %.1f ms (ASTC decode %.1f) frame %llu\n", t->width, t->height,
+            t->format, levels, layers, (unsigned long long)(total >> 10), b->astc_bw ? " ASTC" : "", (SDL_GetTicksNS() - up_t0) / 1e6,
+            astc_ns / 1e6, (unsigned long long)frame);
 }
 
 // ---- frame interpolation's replays (runtime/nvn/interp.c) draw into twins of the game's images
@@ -857,10 +954,56 @@ TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     else if (!b->gpu_owned) {
         extern uint64_t prof_up_ns;
         uint64_t t0 = prof_up_ns != ~0ull ? SDL_GetTicksNS() : 0;
+        bool ahead = b->prefetched && !t_prefetch;
         upload_texture(t, b);
+        if (ahead) b->prefetched = false;  // (its first use has looked at it again)
         if (prof_up_ns != ~0ull) prof_up_ns += SDL_GetTicksNS() - t0;
     }
     return b;
+}
+
+// Textures uploaded ahead of their first draw (render thread, render lock, after a present): the game creates a stage's
+// textures while it loads, and each was uploaded at its first draw - mostly the stage's first frame (Cap Kingdom: ~24 ms
+// of it, half of that turning the Switch's block layout into rows). Now a few milliseconds of each present go to
+// textures it has created but not drawn yet, so a loading screen uploads them. One uploaded ahead is looked at again at
+// its first use (written since - the memory tracking, else its hash - uploads again). Not textures the size of the
+// render targets (drawn into, not from memory) and not depth; in play only small ones. ODYSSEY_TEX_PREFETCH=0: off;
+// =<ms>: the budget (3).
+void vk_tex_prefetch(void) {
+    static double budget = -1;
+    if (budget < 0) { const char *e = getenv("ODYSSEY_TEX_PREFETCH"); budget = e ? atof(e) : 3.0; }
+    if (budget <= 0) return;
+    extern int nvn_untouched_textures(NvnTexture **out, int max);
+    NvnTexture *c[64];
+    int n = nvn_untouched_textures(c, 64);
+    if (!n) return;
+    uint64_t t0 = SDL_GetTicksNS();
+    static uint64_t done, total_ns;
+    extern bool odyssey_scene_warming(void);  // (title, loading between stages, a stage's first 120 frames)
+    bool loading = odyssey_scene_warming();
+    for (int i = 0; i < n; i++) {
+        NvnTexture *t = c[i];
+        if (tex_scalable(t) || renderer_format_is_depth(t->format) || !t->layout.fmt || !t->layout.fmt->bpb) {
+            t->no_prefetch = true;
+            continue;
+        }
+        // (in play, small ones only: a large one - a CPU-decoded ASTC texture - can take tens of ms, and it may never
+        // be drawn; while a stage loads or settles, all)
+        if (!loading && tegra_total_size(&t->layout) > (256u << 10)) continue;
+        t_prefetch = true;
+        TexBackend *b = tex_backend(t);  // (not vk_tex: no read for frame interpolation's bookkeeping)
+        if (!b->gpu_owned) upload_texture(t, b);
+        t_prefetch = false;
+        if (!b || !b->uploaded) t->no_prefetch = true;  // (nothing to upload: tried once)
+        done++;
+        if ((SDL_GetTicksNS() - t0) / 1e6 >= budget) break;
+    }
+    total_ns += SDL_GetTicksNS() - t0;
+    static uint64_t logged;
+    if (done >= logged + 500) {
+        logged = done;
+        LOG("[tex] %llu textures uploaded ahead of their first draw (%.0f ms in all)\n", (unsigned long long)done, total_ns / 1e6);
+    }
 }
 
 void renderer_mark_gpu_owned(NvnTexture *t) { tex_backend(t)->gpu_owned = true; }

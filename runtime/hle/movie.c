@@ -684,6 +684,10 @@ static void dec_send_input(Cpu *c) {
     int idx = (int)c->x[1], off = (int)c->x[2], size = (int)c->x[3];
     int64_t time = (int64_t)c->x[4];
     uint32_t flags = (uint32_t)c->x[5];
+    // The decode is host work, done in the game's decoder thread: its emulated core is handed on meanwhile, as the
+    // Switch's hardware decoder runs beside the CPU. Held, the thread kept the game's main thread waiting for its core
+    // while a tutorial video played: Cap Kingdom ran ~50 FPS for its first seconds (kernel.c core gates).
+    kernel_block_begin();
     pthread_mutex_lock(&d->lock);
     if (size > 0 && idx >= 0 && idx < NIN) {
         av_packet_unref(d->pkt);
@@ -750,6 +754,7 @@ static void dec_get_output_buffer(Cpu *c) {
         int src_stride[2] = {d->stride, d->stride};
         uint8_t *dst[1] = {d->rgba};
         int dst_stride[1] = {w * 4};
+        kernel_block_begin();  // (host work: the core is handed on meanwhile, see dec_send_input)
         sws_scale(d->sws, src, src_stride, 0, h, dst, dst_stride);
         renderer_upload_rgba(t, d->rgba, (uint32_t)w, (uint32_t)h, (uint32_t)w * 4);
         c->x[0] = 0;

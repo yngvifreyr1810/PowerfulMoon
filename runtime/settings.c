@@ -60,12 +60,16 @@ Settings g_settings = {
     .motion = true, .rumble = true, .hd_rumble = true, .rumble_strength = 1.0f,
     .mouse_camera = true,
     .mouse_sensitivity = 100,
+    .mouse_sensitivity_y = 100,
+    .stick_camera_x = 100, .stick_camera_y = 100,
     .aniso = 16,
     .frame_rate = FPS_60,
     .shader_preload = false,  // (it costs a lot of memory: nvn/vulkan/exec.c preload_room)
+    .stick_deadzone = 10,  // (the Switch's controllers apply their own; 0 let a worn stick drift the map pointer, #22)
     .skip_intro = true,
     .warmup = WARMUP_AUTO,
     .interpolation_output = 120,
+    .config_at_start = true,
 };
 
 volatile bool g_app_unfocused;
@@ -246,6 +250,7 @@ void settings_load(void) {
     if (!f && !getenv("ODYSSEY_SETTINGS")) f = fopen("larecomp.ini", "r");
     if (!f) { controller_load(); controller_save(); return; }
     char line[700];
+    bool mouse_vertical_set = false;
     while (fgets(line, sizeof line, f)) {
         char key[64];
         char val[600];  // (a mod's folder can be long)
@@ -340,10 +345,24 @@ void settings_load(void) {
         else if (!strcmp(key, "skip_intro")) g_settings.skip_intro = atoi(val) != 0;
         else if (!strcmp(key, "warmup")) g_settings.warmup = named_option(val, warmups, WARMUP_COUNT);
         else if (!strcmp(key, "mute_unfocused")) g_settings.mute_unfocused = atoi(val) != 0;
+        else if (!strcmp(key, "config_at_start")) g_settings.config_at_start = atoi(val) != 0;
         else if (!strcmp(key, "mouse_camera")) g_settings.mouse_camera = atoi(val) != 0;
-        else if (!strcmp(key, "mouse_sensitivity"))
+        else if (!strcmp(key, "mouse_sensitivity")) {
             g_settings.mouse_sensitivity = atoi(val) < 25 ? 25 : atoi(val) > 400 ? 400 : atoi(val);
+            if (!mouse_vertical_set) g_settings.mouse_sensitivity_y = g_settings.mouse_sensitivity;
+        }
+        else if (!strcmp(key, "mouse_sensitivity_y")) {
+            g_settings.mouse_sensitivity_y = atoi(val) < 25 ? 25 : atoi(val) > 400 ? 400 : atoi(val);
+            mouse_vertical_set = true;
+        }
+        else if (!strcmp(key, "mouse_invert_x")) g_settings.mouse_invert_x = atoi(val) != 0;
         else if (!strcmp(key, "mouse_invert_y")) g_settings.mouse_invert_y = atoi(val) != 0;
+        else if (!strcmp(key, "stick_camera_x"))
+            g_settings.stick_camera_x = atoi(val) < 25 ? 25 : atoi(val) > 400 ? 400 : atoi(val);
+        else if (!strcmp(key, "stick_camera_y"))
+            g_settings.stick_camera_y = atoi(val) < 25 ? 25 : atoi(val) > 400 ? 400 : atoi(val);
+        else if (!strcmp(key, "stick_camera_invert_x")) g_settings.stick_camera_invert_x = atoi(val) != 0;
+        else if (!strcmp(key, "stick_camera_invert_y")) g_settings.stick_camera_invert_y = atoi(val) != 0;
         else if (!strcmp(key, "button_prompts"))
             g_settings.prompts = !strcmp(val, "controller") ? PROMPTS_CONTROLLER : !strcmp(val, "keyboard") ? PROMPTS_KEYBOARD :
                                  !strcmp(val, "switch") ? PROMPTS_SWITCH : !strcmp(val, "xbox") ? PROMPTS_XBOX :
@@ -420,9 +439,16 @@ void settings_save(void) {
     fprintf(f, "skip_intro = %d\n", g_settings.skip_intro);
     fprintf(f, "warmup = %s\n", warmups[g_settings.warmup >= 0 && g_settings.warmup < WARMUP_COUNT ? g_settings.warmup : 0]);
     fprintf(f, "mute_unfocused = %d\n", g_settings.mute_unfocused);
+    fprintf(f, "config_at_start = %d\n", g_settings.config_at_start);
     fprintf(f, "mouse_camera = %d\n", g_settings.mouse_camera);
     fprintf(f, "mouse_sensitivity = %d\n", g_settings.mouse_sensitivity);
+    fprintf(f, "mouse_sensitivity_y = %d\n", g_settings.mouse_sensitivity_y);
+    fprintf(f, "mouse_invert_x = %d\n", g_settings.mouse_invert_x);
     fprintf(f, "mouse_invert_y = %d\n", g_settings.mouse_invert_y);
+    fprintf(f, "stick_camera_x = %d\n", g_settings.stick_camera_x);
+    fprintf(f, "stick_camera_y = %d\n", g_settings.stick_camera_y);
+    fprintf(f, "stick_camera_invert_x = %d\n", g_settings.stick_camera_invert_x);
+    fprintf(f, "stick_camera_invert_y = %d\n", g_settings.stick_camera_invert_y);
     fprintf(f, "button_prompts = %s\n", g_settings.prompts == PROMPTS_CONTROLLER ? "controller" :
                                         g_settings.prompts == PROMPTS_KEYBOARD ? "keyboard" :
                                         g_settings.prompts == PROMPTS_SWITCH ? "switch" :

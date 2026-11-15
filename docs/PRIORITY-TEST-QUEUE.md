@@ -1,5 +1,9 @@
 # Priority queue after upscaler testing
 
+Historical checkpoint: this document predates the 0.2.9 release. See
+[the post-0.2.9 plan](POST-029-TEST-PLAN.md) for current work and validation.
+In particular, clean packaging/CI and the 1.4.1 poison port have since shipped.
+
 Simon confirmed the current preview works and requested this list ahead of the
 remaining frame-generation and HUD-resolution work. Implement and test changes
 separately, with private settings/saves and local commits. Do not publish a
@@ -53,10 +57,10 @@ retained but was not rerun with a matching current game-code library here.
 | --- | --- | --- |
 | 1a | Repair the 1.4.1 warp helpers | Cross-kingdom travel and a local stage change must reach the logged destination without a crash. Named 1.0.0 helpers must still work. |
 | 1b | Automated tour of every kingdom using a copied completed save | Capture actual destination scenes after loading, time out failures, keep per-stage logs and screenshots, compare candidate and last-release images with the same settings. Report visual differences for review; do not equate a screenshot match with complete gameplay correctness. Include explicit fog/poison interaction checks. |
-| 1c | Copy crash report button | One attachable file containing log, settings, CPU/GPU/driver, app/game build and exception/call location. Work for early crashes and normal sessions; disclose included data and avoid keys, assets and saves. |
+| 1c | Copy crash report button | One attachable file containing log, settings, CPU/GPU/driver, app/game build and exception/call location. Work for early crashes and normal sessions; disclose included data and avoid assets and saves. |
 | 2a | Port reactive fog readback to 1.0.0 | Verify the named reader and calling convention, then test Mario/Cappy interaction in Cap Kingdom on both versions. Preserve targeted readback; do not revive blanket pass-end writeback. |
 | 2b | Investigate poison issue #3 | Reproduce Spewart in Wooded Kingdom on 1.0.0, identify the CPU/GPU paint reader and compare drawn poison with damage. Readback is a hypothesis until traced and tested, not an established shared root cause. |
-| 3a | Windows packaging from a clean checkout | Build generator and declared FFmpeg/other dependencies without copying a prior release or a local scratch prefix. Verify DLL imports, licences, versions and absence of game files/keys in the ZIP. |
+| 3a | Windows packaging from a clean checkout | Build generator and declared FFmpeg/other dependencies without copying a prior release or a local scratch prefix. Verify DLL imports, licences, versions and absence of game files in the ZIP. |
 | 3b | GitHub Actions Windows ZIP and Linux AppImage | Pinned build inputs, clean runners, reproducible packaging steps and downloadable test artifacts. Game execution still requires privately supplied data; CI must not publish it. Linux builds must not require the Deck. |
 | 4a | Shadow resolution, draw distance, LOD distance and effect distance | Separate validated controls, original defaults, bounded ranges, test visuals/performance across kingdoms and both game versions where affected. |
 | 4b | Ultrawide polish | 21:9 and 32:9 HUD/menu placement, aspect ratio and cutscene bars, including switching back to 16:9. |

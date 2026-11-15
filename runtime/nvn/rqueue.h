@@ -23,3 +23,4 @@ void rq_wait(uint64_t ticket);                    // until that item is done
 void rq_drain(void);                              // until everything queued so far is done
 void rq_present_throttle(void);                   // until no present is queued: one frame ahead at most
 uint64_t rq_last_ticket(void);                    // the newest item's ticket
+bool rq_is_done(uint64_t ticket);                 // that item is done (no waiting)

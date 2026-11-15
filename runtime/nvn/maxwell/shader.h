@@ -49,6 +49,7 @@ typedef struct {
                             // after flip_y: keys without it hash as before - shader caches stay valid.)
     uint32_t vs_out_mask;   // fragment: varyings the vertex shader provides
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
+    uint8_t split_compute_x;  // one 1536-thread guest group mapped to three 512-thread Vulkan groups
 } ShaderKey;
 
 typedef struct {
@@ -58,6 +59,15 @@ typedef struct {
     uint32_t bindless_cbuf, bindless_offset;
 } ShaderTexture;
 
+enum { SHADER_IMAGE_READ, SHADER_IMAGE_WRITE, SHADER_IMAGE_ATOMIC };
+typedef struct {
+    uint8_t slot, type;
+    uint8_t access;
+} ShaderImage;
+
+#define SHADER_IMAGE_BINDING 64
+#define SHADER_IMAGE_LIMIT 16
+
 typedef struct {
     int stage;
     char *msl;              // complete MSL or GLSL source (MSL entry "main0", GLSL "main"); NULL on failure
@@ -66,6 +76,8 @@ typedef struct {
     uint32_t cbuf_dynamic;  // cbufs indexed with a register: bind the whole buffer
     int ntex;
     ShaderTexture tex[64];
+    int nimages;
+    ShaderImage images[SHADER_IMAGE_LIMIT];
     uint32_t attr_mask;     // vertex: input attributes; fragment: input varyings
     uint32_t out_mask;      // vertex: output varyings; fragment: render targets written
     bool writes_depth, uses_discard, writes_point_size;
@@ -103,5 +115,7 @@ extern const uint8_t *maxwell_dbg_vs;
 // code: shader binary (with the 0x50-byte SPH header for graphics stages)
 ShaderInfo *maxwell_translate(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key);
 void maxwell_free(ShaderInfo *s);
+size_t maxwell_code_extent(const uint8_t *blob, size_t max_size, int stage);  // the bytes a translation reads
+uint64_t maxwell_translator_stamp(void);  // differs between builds of the translator
 // Disassemble for debugging (writes text to f).
 void maxwell_disassemble(const uint8_t *code, size_t max_size, int stage, void *file);

@@ -187,10 +187,12 @@ void rt_unwind_point(void) {
     if (__builtin_expect(g_rt_unwind, 0) && t_cur) longjmp(t_cur->unwind, 1);
 }
 
+static KThread *g_main_kthread;  // (the game's main thread: the sampler's ODYSSEY_SAMPLE_THREAD=main)
 static void *thread_main(void *arg) {
     KThread *t = arg;
     t_cur = t;
     crash_handler_install();
+    if (t == g_main_kthread) { extern void sampler_main_thread(void); sampler_main_thread(); }
     rt_set_fpcr(0);
     if (!setjmp(t->unwind)) {
         gate_enter(t);
@@ -247,6 +249,7 @@ KThread *kernel_create_main_thread(uint64_t entry, uint64_t stack_size, int prio
 
 void kernel_run_main(KThread *t, uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3) {
     t->cpu.x[0] = x0; t->cpu.x[1] = x1; t->cpu.x[2] = x2; t->cpu.x[3] = x3;
+    g_main_kthread = t;
     thread_start(t);  // the host main thread goes on to run the window event loop
 }
 
@@ -327,7 +330,10 @@ static void gate_enter(KThread *t) {
     t->gate_queued = true;
     uint64_t t0 = plat_now_ns();
     bool give_up = false;
+    uint64_t holder = 0;  // (ODYSSEY_LOG_GATE_MS) who held the gate while this one waited
+    int holder_prio = -1;
     while (g->owner || gate_best(g) != t) {
+        if (g->owner) holder = g->owner->id, holder_prio = g->owner->prio;
         gate_update_preempt(g);
         struct timespec ts;
         deadline(&ts, 2000000);
@@ -351,7 +357,17 @@ static void gate_enter(KThread *t) {
     if (!give_up) { g->owner = t; t->gate_held = true; }
     gate_update_preempt(g);
     pthread_mutex_unlock(&g->m);
-    g_blocked_ns += plat_now_ns() - t0;
+    uint64_t waited = plat_now_ns() - t0;
+    g_blocked_ns += waited;
+    // ODYSSEY_LOG_GATE_MS=<ms>: waits for a core longer than that (a game thread kept from running: stutters)
+    static double log_ms = -2;
+    if (log_ms == -2) log_ms = getenv("ODYSSEY_LOG_GATE_MS") ? atof(getenv("ODYSSEY_LOG_GATE_MS")) : -1;
+    if (log_ms >= 0 && waited / 1e6 >= log_ms) {
+        extern uint64_t renderer_present_count(void);
+        LOG("[gate] core %d: thread %llu (prio %d) waited %.1f ms for thread %llu (prio %d), frame %llu\n", t->gate,
+            (unsigned long long)t->id, t->prio, waited / 1e6, (unsigned long long)holder, holder_prio,
+            (unsigned long long)renderer_present_count());
+    }
 }
 
 // Back to guest code: hold the gate again (a new core from SetThreadCoreMask: hand the old one on first)

@@ -16,6 +16,9 @@
 #include "../nvn/renderer.h"
 #include "../settings.h"
 #include "../input_bind.h"
+#include "../input_players.h"
+#include "../input_family.h"
+#include "../kernel.h"
 #include "../nvn/kbprompts.h"
 #include "motion_gate.h"
 #include "../controller_motion.h"
@@ -34,6 +37,17 @@ static _Thread_local bool tick_input_active;
 static _Atomic int32_t key_lx, key_ly, key_rx, key_ry, pad_lx, pad_ly, pad_rx, pad_ry;
 static uint8_t keys_down[BIND_KEY_CODE_COUNT];  // (keys, then the mouse buttons: input_bind.h)
 static SDL_Gamepad *pad;
+static atomic_uint primary_id;
+static uint32_t style_events[8]; // readable guest handles, checked again when signaling
+uint32_t input_primary_id(void) { return atomic_load(&primary_id); }
+void input_cappy_style_changed(void) {
+    pthread_mutex_lock(&g_klock);
+    for (unsigned i = 0; i < sizeof style_events / sizeof *style_events; i++) {
+        KObject *event = handle_get(style_events[i]);
+        if (event && event->type == KOBJ_EVENT) kernel_signal(event);
+    }
+    pthread_mutex_unlock(&g_klock);
+}
 static _Atomic int64_t sampling;
 
 // Host keys / buttons held by a test script (ODYSSEY_HOST_INPUT, input_frame): they go through the bindings
@@ -135,8 +149,9 @@ static void mouse_tilt(float *ox, float *oy) {
     if (dt >= 0.012) {
         float dx = atomic_exchange(&mouse_acc_x, 0) / 16.0f, dy = atomic_exchange(&mouse_acc_y, 0) / 16.0f;
         last = now;
-        float k = g_settings.mouse_sensitivity / 100.0f / full / (float)dt;  // counts -> tilt
-        float vx = dx * k, vy = -dy * k * (g_settings.mouse_invert_y ? -1 : 1);  // (screen y is down)
+        float k = 1.0f / 100.0f / full / (float)dt;  // counts -> tilt
+        float vx = dx * k * g_settings.mouse_sensitivity * (g_settings.mouse_invert_x ? -1 : 1);
+        float vy = -dy * k * g_settings.mouse_sensitivity_y * (g_settings.mouse_invert_y ? -1 : 1);  // screen y is down
         float r = sqrtf(vx * vx + vy * vy);
         if (r > 0) {  // the direction kept, the size from MOUSE_MIN up (past 1: as fast as it moved, to MOUSE_OVER)
             float t = r <= 1 ? mn + (1 - mn) * r : fminf(r, over);
@@ -174,8 +189,9 @@ static void mouse_camera_frame(float *ox, float *oy) {
         cx += atomic_exchange(&mouse_acc_x, 0) / 16.0f, cy += atomic_exchange(&mouse_acc_y, 0) / 16.0f;
         static float full = 0;
         if (!full) { const char *f = getenv("ODYSSEY_MOUSE_FULL"); full = f && atof(f) > 0 ? (float)atof(f) : MOUSE_FULL; }
-        float k = g_settings.mouse_sensitivity / 100.0f * 60.0f / full;  // counts in a 60th of a second -> tilt
-        float vx = cx * k, vy = -cy * k * (g_settings.mouse_invert_y ? -1 : 1);  // (screen y is down)
+        float k = 60.0f / 100.0f / full;  // counts in a 60th of a second -> tilt
+        float vx = cx * k * g_settings.mouse_sensitivity * (g_settings.mouse_invert_x ? -1 : 1);
+        float vy = -cy * k * g_settings.mouse_sensitivity_y * (g_settings.mouse_invert_y ? -1 : 1);
         float r = sqrtf(vx * vx + vy * vy);
         if (r >= CAMERA_THRESHOLD) {
             if (r > MOUSE_OVER) vx *= MOUSE_OVER / r, vy *= MOUSE_OVER / r;
@@ -200,16 +216,25 @@ void hle__ZNK18ProjectCameraInput14calcInputStickEPN4sead7Vector2IfEE(Cpu *c) {
     float x, y;
     mouse_camera_frame(&x, &y);
     float *v = (float *)(uintptr_t)out;
+    float stick_x = v[0], stick_y = v[1];
+    v[0] *= g_settings.stick_camera_x / 100.0f * (g_settings.stick_camera_invert_x ? -1 : 1);
+    v[1] *= g_settings.stick_camera_y / 100.0f * (g_settings.stick_camera_invert_y ? -1 : 1);
     v[0] += x, v[1] += y;
     static int lm = -1, n;
     if (lm < 0) lm = getenv("ODYSSEY_LOG_MOUSE") != NULL;
     if (lm && (x || y) && n++ % 20 == 0) LOG("[input] mouse camera: camera stick %.2f %.2f\n", v[0], v[1]);
+    static int camera_trace = -1;
+    static unsigned camera_samples;
+    if (camera_trace < 0) camera_trace = getenv("ODYSSEY_LOG_CAMERA") != NULL;
+    if (camera_trace && (stick_x || stick_y || x || y) && camera_samples++ % 20 == 0)
+        LOG("[camera-input] stick %.4f %.4f mouse %.4f %.4f result %.4f %.4f\n", stick_x, stick_y, x, y, v[0], v[1]);
 }
 
 // Main thread, every pass of the window's event loop: the pointer is held while the game has it (the window in front,
 // no menu / name entry / installer up, the setting on); otherwise it is free and shown as usual.
 extern bool menu_input_captured(void);  // runtime/ui/menu.mm: overlay menu or name entry up (it has the keys / pad)
 void input_mouse_window(SDL_Window *w) {
+    input_cappy_service(input_primary_id());
     bool want = w && g_settings.mouse_camera && !host_test && !menu_input_captured() && SDL_GetKeyboardFocus() == w;
     if (want == SDL_GetWindowRelativeMouseMode(w)) { mouse_held = want; return; }
     if (!SDL_SetWindowRelativeMouseMode(w, want)) {
@@ -228,6 +253,7 @@ void input_reset(void) {
     memset(keys_down, 0, sizeof keys_down);
     recompute_keyboard();
     atomic_store(&pending_presses, 0);
+    input_cappy_reset_presses();
     mouse_forget();
 }
 
@@ -239,7 +265,10 @@ static bool test_event(const SDL_Event *e) {
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: return e->key.which == TEST_DEVICE;
     case SDL_EVENT_TEXT_INPUT: return e->text.windowID == TEST_DEVICE;
-    case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: return e->gbutton.which == TEST_DEVICE;
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
+        return e->gbutton.which == TEST_DEVICE || input_cappy_test_device(e->gbutton.which);
+    case SDL_EVENT_GAMEPAD_ADDED: case SDL_EVENT_GAMEPAD_REMOVED: return input_cappy_test_device(e->gdevice.which);
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION: return input_cappy_test_device(e->gaxis.which);
     default: return false;
     }
 }
@@ -274,19 +303,7 @@ bool input_user_blocked(const SDL_Event *e) {
 // ODYSSEY_PAD_TYPE=xbox|playstation|nintendo pretends one is attached (tests).
 static _Atomic int pad_family;
 static void note_family(void) {
-    int f = 0;
-    if (pad) switch (SDL_GetGamepadType(pad)) {
-        case SDL_GAMEPAD_TYPE_XBOX360: case SDL_GAMEPAD_TYPE_XBOXONE: f = 1; break;
-        case SDL_GAMEPAD_TYPE_PS3: case SDL_GAMEPAD_TYPE_PS4: case SDL_GAMEPAD_TYPE_PS5: f = 2; break;
-        case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO: case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
-        case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT: case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: break;
-        default:  // (a Steam Deck's own controls, a generic pad: by what its bottom face button says)
-            switch (SDL_GetGamepadButtonLabel(pad, SDL_GAMEPAD_BUTTON_SOUTH)) {
-            case SDL_GAMEPAD_BUTTON_LABEL_A: f = 1; break;
-            case SDL_GAMEPAD_BUTTON_LABEL_CROSS: f = 2; break;
-            default: break;
-            }
-        }
+    int f = input_controller_family(pad);
     if (f != pad_family) LOG("[input] button prompts: %s controller\n", f == 1 ? "Xbox" : f == 2 ? "PlayStation" : "Nintendo / other");
     pad_family = f;
 }
@@ -304,22 +321,27 @@ void input_motion_settle(void) {
 }
 
 static void use_pad(SDL_Gamepad *p) {
-    if (!p || p == pad) return;
-    if (pad) { pm_controller_detach(); SDL_CloseGamepad(pad); }
+    if (!p || p == pad || SDL_GetGamepadID(p) == input_cappy_id()) return;
+    if (pad) pm_controller_detach();
     pad = p;
+    atomic_store(&primary_id, SDL_GetGamepadID(p));
     LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad));
     note_family();
     pm_controller_attach(pad);
 }
 
+void input_cappy_test_primary(uint32_t id) { use_pad(SDL_GetGamepadFromID(id)); }
+
 void input_handle_event(const SDL_Event *e) {
+    if (input_cappy_event(e)) return;
     static bool scanned;  // pads present at startup: their ADDED event may have gone to the start screen's loop
     if (!scanned) {
         scanned = true;
         int n = 0;
         SDL_JoystickID *ids = SDL_GetGamepads(&n);
         for (int i = 0; i < n; i++) {
-            SDL_Gamepad *p = SDL_OpenGamepad(ids[i]);
+            SDL_Gamepad *p = SDL_GetGamepadFromID(ids[i]);
+            if (!p) p = SDL_OpenGamepad(ids[i]);
             if (!pad) use_pad(p);
         }
         SDL_free(ids);
@@ -348,6 +370,7 @@ void input_handle_event(const SDL_Event *e) {
             pm_controller_detach();
             SDL_CloseGamepad(pad);
             pad = NULL;
+            atomic_store(&primary_id, 0);
             int n = 0;  // (another one still connected takes over)
             SDL_JoystickID *ids = SDL_GetGamepads(&n);
             for (int i = 0; i < n && !pad; i++) if (ids[i] != e->gdevice.which) use_pad(SDL_GetGamepadFromID(ids[i]));
@@ -362,7 +385,8 @@ void input_handle_event(const SDL_Event *e) {
     case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
         break;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
-        if (!pad || SDL_GetGamepadID(pad) != e->gbutton.which) use_pad(SDL_GetGamepadFromID(e->gbutton.which));
+        if ((!pad || SDL_GetGamepadID(pad) != e->gbutton.which) && !input_cappy_assigned())
+            use_pad(SDL_GetGamepadFromID(e->gbutton.which));
         kbprompts_note_device(false);
         // SDL's live state may already contain the release when its queued press is handled.
         if (pad && SDL_GetGamepadID(pad) == e->gbutton.which) {
@@ -557,7 +581,12 @@ static void host_test_frame(uint64_t frame) {
 
 static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A/B skip the opening on rando seeds)
-RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
+RT_ON_RESET(input_reboot_reset) {
+    g_pad_obj = 0; g_inject_plus = 0;
+    pthread_mutex_lock(&g_klock);
+    memset(style_events, 0, sizeof style_events);
+    pthread_mutex_unlock(&g_klock);
+} // (reboot: the controller object and style-event handles were guest-owned)
 void input_frame(uint64_t frame) {
     pm_controller_tick();
     for (int i = 0; i < 2; i++) {  // a wheel turn's press ends
@@ -624,12 +653,13 @@ uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_butto
 
 // Keep a press visible for one gameplay update, even if it came and went between two polls.
 void input_native_tick_begin(void) {
+    input_cappy_tick_begin();
     uint64_t pressed = atomic_exchange(&pending_presses, 0);
     tick_buttons = menu_input_captured() ? 0 : key_buttons | pad_buttons | pressed;
     tick_input_active = true;
 }
 
-void input_native_tick_end(void) { tick_input_active = false; }
+void input_native_tick_end(void) { tick_input_active = false; input_cappy_tick_end(); }
 
 static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
 
@@ -642,7 +672,8 @@ static void fill_state(Cpu *c) {
     *(int64_t *)s = ++sampling;
     static int nlog;
     if (nlog < 6 && (sampling % 600) == 1) { nlog++; LOG("[input] GetNpadState id %#x lr %llx\n", id, c->x[30]); }
-    if (id != 0) return;  // docked: only player 1 (FullKey); Handheld stays disconnected
+    if (id == 1) { input_cappy_state(s, menu_input_captured()); return; }
+    if (id != 0) return;  // Handheld and other players stay disconnected
     extern uint64_t g_watch_lo, g_watch_hi;
     if (id == 0 && !g_pad_obj) g_pad_obj = c->x[1] - 8;
     if (id == 0 && !g_watch_lo && getenv("ODYSSEY_WATCH_PAD")) {
@@ -712,35 +743,40 @@ HLE_FUNC("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", hid_states_r
 
 // ShowControllerSupport(ControllerSupportResultInfo *out, const ControllerSupportArg &) -> Result (Odyssey, at boot):
 // the system's "connect a controller" applet, which our am service doesn't have (the game waited for it forever).
-// Answered at once: one player, on controller 1. ResultInfo: {s8 player count, pad[3], u32 selected NpadId}.
+// Respect the requested player limit; assigning Cappy must not turn boot/single-player prompts into co-op.
 HLE_FUNC("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE",
          hid_show_controller_support) {
     uint8_t *out = (uint8_t *)(uintptr_t)c->x[0];
+    const uint8_t *arg = (const uint8_t *)(uintptr_t)c->x[1];
+    bool two = input_cappy_id() && arg && (int8_t)arg[1] >= 2 && !arg[5];
     if (out) {
         memset(out, 0, 8);
-        out[0] = 1;
+        out[0] = two ? 2 : 1;
     }
     static int nlog;
-    if (nlog++ < 4) LOG("[input] ShowControllerSupport: answered with 1 player on controller 1\n");
+    if (nlog++ < 8) LOG("[input] ShowControllerSupport: %d player(s), requested %d..%d, single %d\n",
+        two ? 2 : 1, arg ? (int8_t)arg[0] : 0, arg ? (int8_t)arg[1] : 0, arg ? arg[5] : 0);
     c->x[0] = RES_OK;
 }
 
-// FullKey for player 1 only (we report docked mode, where Handheld is unavailable)
+// FullKey for Mario and the assigned Cappy controller; no docked Handheld style.
 HLE_FUNC("_ZN2nn3hid15GetNpadStyleSetERKj", hid_style_set) {
     uint32_t id = *(uint32_t *)(uintptr_t)c->x[0];
     static int nlog;
     if (nlog++ < 4) LOG("[input] GetNpadStyleSet id %#x\n", id);
-    c->x[0] = id == 0 ? 1 : 0;  // docked: no handheld controller
+    c->x[0] = (id == 0 || (id == 1 && input_cappy_id())) ? 1 : 0; // FullKey; no handheld controller
 }
 
 // BindNpadStyleSetUpdateEvent(id, SystemEventType*, clear mode): signaled once so the game sees a
 // controller connected.
-#include "../kernel.h"
 HLE_FUNC("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", hid_bind_style_event) {
+    uint32_t id = *(uint32_t *)(uintptr_t)c->x[0];
     uint32_t w, r;
     KEvent *ev = kernel_create_event_pair(&w, &r);
     pthread_mutex_lock(&g_klock);
     kernel_signal(ev);
+    if (id == 1) for (unsigned i = 0; i < sizeof style_events / sizeof *style_events; i++)
+        if (!style_events[i] || !handle_get(style_events[i])) { style_events[i] = w; break; }
     pthread_mutex_unlock(&g_klock);
     uint64_t clear_mode = c->x[2];
     c->x[0] = c->x[1];
@@ -757,14 +793,16 @@ HLE_FUNC("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS
 // stronger side per band (low band: the low-frequency motor). Sent again while it lasts, so a value runs 250 ms at most:
 // a game that stops sending stops the rumble. Controls tab "Vibration" (`vibration` in powermoon.ini).
 void input_vibration(uint32_t handle, float amp_low, float amp_high) {
-    static float lo[2], hi[2];
-    static uint16_t last_l, last_h;
-    static uint64_t last_ns;
+    static float lo[2][2], hi[2][2];
+    static uint16_t last_l[2], last_h[2];
+    static uint64_t last_ns[2];
     static int log = -1;  // ODYSSEY_LOG_RUMBLE=1: each change sent to the gamepad
     if (log < 0) log = getenv("ODYSSEY_LOG_RUMBLE") != NULL;
     int side = handle & 1;
-    lo[side] = isfinite(amp_low) ? amp_low : 0, hi[side] = isfinite(amp_high) ? amp_high : 0;
-    float l = fmaxf(lo[0], lo[1]), h = fmaxf(hi[0], hi[1]);
+    unsigned player = (handle >> 8) & 0xff;
+    if (player > 1) return;
+    lo[player][side] = isfinite(amp_low) ? amp_low : 0, hi[player][side] = isfinite(amp_high) ? amp_high : 0;
+    float l = fmaxf(lo[player][0], lo[player][1]), h = fmaxf(hi[player][0], hi[player][1]);
     if (!g_settings.rumble) l = h = 0;
     // (the Joy-Cons' actuators are strong: the game's amplitudes are mostly 0.02-0.2, which a gamepad's motors barely
     // turn at - small ones get a boost, (a + a^0.4) / 2: 0.04 -> 0.2, 0.17 -> 0.37, 1 -> 1; below 0.015, nothing)
@@ -772,9 +810,10 @@ void input_vibration(uint32_t handle, float amp_low, float amp_high) {
     h = h < 0.015f ? 0 : (fminf(h, 1) + powf(fminf(h, 1), 0.4f)) * 0.5f;
     uint16_t L = (uint16_t)(l * 65535.0f), H = (uint16_t)(h * 65535.0f);
     uint64_t now = plat_now_ns();
-    if (L == last_l && H == last_h && (!(L | H) || now - last_ns < 100000000ull)) return;  // (the same: again every 100 ms)
-    last_l = L, last_h = H, last_ns = now;
-    if (log) LOG("[input] rumble %.2f %.2f\n", L / 65535.0, H / 65535.0);
+    if (L == last_l[player] && H == last_h[player] && (!(L | H) || now - last_ns[player] < 100000000ull)) return;
+    last_l[player] = L, last_h[player] = H, last_ns[player] = now;
+    if (log) LOG("[input] rumble player %u %.2f %.2f\n", player + 1, L / 65535.0, H / 65535.0);
+    if (player == 1) { input_cappy_rumble(L / 65535.0f, H / 65535.0f); return; }
     SDL_Gamepad *p = pad;
     if (p) SDL_RumbleGamepad(p, L, H, (L | H) ? 250 : 0);
 }

@@ -159,3 +159,25 @@ HLE_141 = {
 # main's build -> its patches (gen.py; other modules and builds are lifted unpatched)
 PATCHES_BY_BUILD = {ODYSSEY_MAIN_BUILD: PATCHES, ODYSSEY_141_BUILD: PATCHES_141}
 HLE_BY_BUILD = {ODYSSEY_141_BUILD: HLE_141}
+
+# These functions also have direct compiled callers. Retain their complete
+# generated bodies and pass the original to a narrow runtime wrapper.
+ORIGINAL_WRAPPERS_BY_BUILD = {
+    ODYSSEY_MAIN_BUILD: {
+        0x7000aeee10: 'odyssey_coop_find_glyph',
+        0x70001ee25c: 'odyssey_coop_set_tutorial',
+        0x70008b3820: 'odyssey_coop_set_pane',
+    },
+    ODYSSEY_141_BUILD: {
+        0x70008e2b6c: 'odyssey_coop_find_glyph',
+        0x70001cd6e0: 'odyssey_coop_set_tutorial',
+        0x70006314e0: 'odyssey_coop_set_pane',
+    },
+}
+
+def _coop_camera(gen, addr):
+    return ('void odyssey_coop_near_zero(Cpu *); '
+            f'c->x[30] = 0x{addr + 4:x}ull; odyssey_coop_near_zero(c);')
+
+PATCHES[0x700044dfb8] = _coop_camera
+PATCHES_141[0x70003f0cd4] = _coop_camera

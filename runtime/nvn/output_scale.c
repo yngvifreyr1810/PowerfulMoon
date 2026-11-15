@@ -90,6 +90,7 @@ void output_scale(double dw, double dh, double want, double now, double gpu_ms, 
     int mode = g_settings.res_mode;
     if (forced > 0) h = forced;
     else if (mode >= 1 && mode <= 8) h = mode;
+    else if (mode == RES_1440) h = 4.0 / 3.0;
     else {
         h = fit;  // Match display
         // ...but never below the game's own GAME_H lines: a smaller window (1280 x 720 at 100% display scaling) gets

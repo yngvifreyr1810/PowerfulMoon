@@ -23,7 +23,7 @@ venv/
 __pycache__/
 .DS_Store
 
-# --- Spieldateien, Keys, Dumps NIEMALS committen ---
+# --- game files and dumps: never commit ---
 exefs/
 romfs/
 *.nso
@@ -33,9 +33,6 @@ romfs/
 *.nsz
 *.xcz
 *.npdm
-*.keys
-prod.keys
-title.keys
 # lokale Konfiguration, Logs, Crash-Dumps
 logs/
 *.log

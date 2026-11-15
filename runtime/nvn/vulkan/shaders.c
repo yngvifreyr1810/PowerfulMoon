@@ -169,6 +169,12 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
 
 __thread uint64_t vk_spirv_last_key;
 uint32_t *vk_spirv_by_key(uint64_t key, size_t *nwords) { return cache_load(key, nwords); }
+bool vk_spirv_has_key(uint64_t key) {
+    char path[64];
+    snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)key);
+    struct stat st;
+    return stat(path, &st) == 0 && st.st_size > 20 && st.st_size % 4 == 0;
+}
 
 static uint32_t *vk_glsl_to_spirv_(const char *src, int stage, const char *name, size_t *nwords) {
     uint64_t h = vk_spirv_source_key(src, stage);

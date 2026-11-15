@@ -9,8 +9,10 @@ import tempfile
 import urllib.error
 import urllib.request
 
-UPSTREAM = 'https://gitlab.com/zzzarathustra-dev/power-moon-recomp.git'
-RELEASES = 'https://gitlab.com/api/v4/projects/zzzarathustra-dev%2Fpower-moon-recomp/releases?per_page=100'
+UPSTREAM_REPO = 'Simon3Sarkis/super-odyssey-pc-recomp'
+UPSTREAM_PAGE = 'https://github.com/' + UPSTREAM_REPO
+UPSTREAM = UPSTREAM_PAGE + '.git'
+RELEASES = 'https://api.github.com/repos/' + UPSTREAM_REPO + '/releases'
 ROOT = Path(__file__).resolve().parents[2]
 
 def git(root, *args, binary=False, check=True):
@@ -18,10 +20,31 @@ def git(root, *args, binary=False, check=True):
 
 def latest_stable(releases):
     releases = [r for r in releases if re.fullmatch(r'v\d+\.\d+\.\d+', r.get('tag_name', ''))
-                and not r.get('upcoming_release') and re.fullmatch(r'[0-9a-f]{40}', r.get('commit', {}).get('id', ''))]
+                and r.get('draft') is False and r.get('prerelease') is False]
     if not releases:
-        raise ValueError('No stable upstream release with a pinned source commit')
+        raise ValueError('No stable upstream release')
     return max(releases, key=lambda r: tuple(map(int, r['tag_name'][1:].split('.'))))
+
+def upstream_releases():
+    page = 1
+    while True:
+        request = urllib.request.Request(f'{RELEASES}?per_page=100&page={page}',
+            headers={'User-Agent': 'PowerfulMoon-Upstream-Bot', 'Accept': 'application/vnd.github+json'})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            releases = json.load(response)
+        yield from releases
+        if len(releases) < 100:
+            return
+        page += 1
+
+def upstream_commit(tag):
+    ref = 'refs/tags/' + tag
+    refs = dict(line.split('\t', 1)[::-1] for line in
+                git(ROOT, 'ls-remote', '--exit-code', UPSTREAM, ref, ref + '^{}').stdout.splitlines())
+    sha = refs.get(ref + '^{}', refs.get(ref, ''))
+    if not re.fullmatch(r'[0-9a-f]{40}', sha):
+        raise ValueError('Could not resolve the upstream tag to a pinned object: ' + tag)
+    return sha
 
 def allowed(path):
     # Upstream never gets to replace bot, installer, updater or workflow code.
@@ -82,12 +105,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
-    with urllib.request.urlopen(urllib.request.Request(RELEASES, headers={'User-Agent': 'PowerfulMoon-Upstream-Bot'}), timeout=60) as response:
-        release = latest_stable(json.load(response))
+    release = latest_stable(upstream_releases())
     current = json.loads((ROOT / 'release.json').read_text())
-    tag, commit = release['tag_name'], release['commit']['id']
+    tag = release['tag_name']
     if tuple(map(int, tag[1:].split('.'))) <= tuple(map(int, current['upstream_tag'][1:].split('.'))):
         print('Already integrated:', current['upstream_tag']); return
+    commit = upstream_commit(tag)
     repo = os.environ.get('GITHUB_REPOSITORY', 'yngvifreyr1810/PowerfulMoon')
     api = None if args.dry_run else GitHub(repo, os.environ['GITHUB_TOKEN'])
     branch = 'automation/upstream-' + tag
@@ -106,7 +129,7 @@ def main():
                 api.call('actions/workflows/candidate.yml/dispatches', {'ref': 'main', 'inputs': {'candidate_sha': sha}})
                 api.issue(tag, 'Candidate commit: `' + sha + '`\n\nBuild/test requested: https://github.com/' + repo + '/actions/workflows/candidate.yml\n\nNot published. Owner review is required.')
             print('Candidate already exists:', branch); return
-    report = 'Upstream: https://gitlab.com/zzzarathustra-dev/power-moon-recomp/-/releases/' + tag + '\n\nSource: `' + commit + '`\n\n'
+    report = 'Upstream: ' + UPSTREAM_PAGE + '/releases/tag/' + tag + '\n\nSource: `' + commit + '`\n\n'
     try:
         with tempfile.TemporaryDirectory(prefix='powerfulmoon-sync-') as folder:
             work = Path(folder) / 'repo'
@@ -115,6 +138,7 @@ def main():
             git(work, 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
             for source in (current['upstream_commit'], commit):
                 git(work, 'fetch', '--depth=1', UPSTREAM, source)
+            git(work, 'cat-file', '-e', commit + '^{commit}')
             selected, ignored = apply_delta(work, current['upstream_commit'], commit)
             meta = {'version': tag[1:] + '-powerfulmoon.1', 'upstream_tag': tag, 'upstream_commit': commit}
             (work / 'release.json').write_text(json.dumps(meta, indent=2) + '\n')
