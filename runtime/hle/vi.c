@@ -15,6 +15,7 @@ static pthread_mutex_t vsync_lock = PTHREAD_MUTEX_INITIALIZER;  // (host waiters
 static pthread_cond_t vsync_cond = PTHREAD_COND_INITIALIZER;
 #define VSYNC_NS 16666667ull
 static uint64_t base_ns, base_count;  // (vsync_lock) vsync number base_count + k is due at base_ns + k periods
+static uint64_t vsync_period_ns(void) { return VSYNC_NS; }
 
 // Locked to the display (ODYSSEY_VSYNC_LOCK=0/1, on by default on Linux, where pacing.c's present timing is):
 // runtime/nvn/vulkan/pacing.c reports when presented images reached the screen. Their spacing, filtered, is the
