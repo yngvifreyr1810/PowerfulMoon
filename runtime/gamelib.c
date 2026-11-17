@@ -1,5 +1,6 @@
 // Loads the recompiled game code library (runtime/gamelib.h).
 #include "gamelib.h"
+#include "gamelib_cpu.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,7 +17,64 @@
 static const GameLibTables *g_tables;
 static char g_error[256];
 
-// The library's id file (<library>.id, written next to it by the build): its GAMELIB_ID, read without loading it.
+// The CPU the game code is compiled for. The Makefile's target is x86-64-v3 (AVX2, FMA, BMI2: Intel Haswell 2013+,
+// AMD Excavator / Zen): on such a CPU nothing changes - the same flags, the same id. An older x86-64 CPU gets the game
+// code compiled for what it has (the player's machine compiles it: runtime/gamebuild.c), and an id of its own, so
+// code compiled for a newer CPU is rebuilt there rather than loaded (an illegal instruction). Without hardware FMA the
+// Switch's fused multiply-adds stay exact (the C library's fma), only slower. ODYSSEY_CPU_LEVEL=v3 / avx / v2 / x64
+// (tests): that level whatever the CPU has.
+int gamelib_cpu_level(void) {
+    static int level = -1;
+    if (level >= 0) return level;
+    const char *e = getenv("ODYSSEY_CPU_LEVEL");
+    if (e && *e) {
+        level = !strcmp(e, "avx") ? GAMELIB_CPU_AVX : !strcmp(e, "v2") ? GAMELIB_CPU_V2 : !strcmp(e, "x64") ? GAMELIB_CPU_X64
+                                                                                                               : GAMELIB_CPU_V3;
+        return level;
+    }
+#if defined(__x86_64__)
+    __builtin_cpu_init();
+    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2")) level = GAMELIB_CPU_V3;
+    else if (__builtin_cpu_supports("avx") && __builtin_cpu_supports("sse4.2") && __builtin_cpu_supports("popcnt")) level = GAMELIB_CPU_AVX;
+    else if (__builtin_cpu_supports("sse4.2") && __builtin_cpu_supports("popcnt") && __builtin_cpu_supports("ssse3")) level = GAMELIB_CPU_V2;
+    else level = GAMELIB_CPU_X64;
+#else
+    level = GAMELIB_CPU_V3;  // (not x86: the build's own target)
+#endif
+    return level;
+}
+
+// The -march the game code is compiled with on this CPU; NULL: the build's own (GAMELIB_CFLAGS)
+const char *gamelib_cpu_march(void) {
+    switch (gamelib_cpu_level()) {
+    case GAMELIB_CPU_AVX: return "sandybridge";  // (AVX, SSE4.2, POPCNT, AES, PCLMUL - no AVX2 / FMA / BMI)
+    case GAMELIB_CPU_V2: return "x86-64-v2";
+    case GAMELIB_CPU_X64: return "x86-64";
+    default: return NULL;
+    }
+}
+
+const char *gamelib_cpu_name(void) {
+    switch (gamelib_cpu_level()) {
+    case GAMELIB_CPU_AVX: return "AVX (no AVX2)";
+    case GAMELIB_CPU_V2: return "SSE4.2 (no AVX)";
+    case GAMELIB_CPU_X64: return "x86-64 baseline";
+    default: return "AVX2";
+    }
+}
+
+// GAMELIB_ID, with the CPU level when it isn't the build's own (-avx, -v2, -x64)
+const char *gamelib_id(void) {
+    static char id[96];
+    if (!id[0]) {
+        static const char *const suffix[] = {"", "-avx", "-v2", "-x64"};
+        int l = gamelib_cpu_level();
+        snprintf(id, sizeof id, "%s%s", GAMELIB_ID, l >= 0 && l < 4 ? suffix[l] : "");
+    }
+    return id;
+}
+
+// The library's id file (<library>.id, written next to it by the build): its gamelib_id, read without loading it.
 static bool id_matches(const char *lib) {
     char path[1100], id[128] = {0};
     snprintf(path, sizeof path, "%s.id", lib);
@@ -25,7 +83,7 @@ static bool id_matches(const char *lib) {
     size_t n = fread(id, 1, sizeof id - 1, f);
     fclose(f);
     while (n && (id[n - 1] == '\n' || id[n - 1] == '\r')) id[--n] = 0;
-    return !strcmp(id, GAMELIB_ID);
+    return !strcmp(id, gamelib_id());
 }
 
 static bool exists(const char *p) {
@@ -67,7 +125,7 @@ static const GameLibTables *open_lib(const char *path) {
 #endif
     if (!entry) { snprintf(g_error, sizeof g_error, "%s: not game code", path); return NULL; }
     const GameLibTables *t = entry();
-    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, GAMELIB_ID)) {
+    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, gamelib_id())) {
         snprintf(g_error, sizeof g_error, "%s was built for another version", path);
         return NULL;  // (left loaded: nothing of it runs)
     }

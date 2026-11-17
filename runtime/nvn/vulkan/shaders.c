@@ -137,6 +137,141 @@ static uint32_t *no_contraction(uint32_t *spv, size_t *nwords) {
     return out;
 }
 
+// Calls of one-instruction helpers made direct (all stages): the translated code wraps every register reinterpretation
+// in as_f() / as_u() (translate.c), and glslang at -O0 makes each a call - a temporary variable, a store, the call, a
+// load inside: ~1,250 calls in a median vertex shader, about half its instructions. The driver inlines and cleans them
+// up for every library it builds; here the call becomes the one instruction the helper holds (its Bitcast / conversion,
+// or the value itself), taking the value its argument variable was given just before. Deterministic and local: the
+// depth pre-pass and colour pass shaders still compute the same position the same way. ODYSSEY_SPV_INLINE=0: off.
+static bool unary_op(uint32_t op) {
+    switch (op) {
+    case 83: case 124:                                   // CopyObject Bitcast
+    case 109: case 110: case 111: case 112: case 113: case 114: case 115:  // ConvertFToU FToS SToF UToF UConvert SConvert FConvert
+        return true;
+    default: return false;
+    }
+}
+static uint32_t *inline_trivial(uint32_t *spv, size_t *nwords) {
+    enum { OP_FUNCTION = 54, OP_PARAM = 55, OP_FEND = 56, OP_CALL = 57, OP_LOAD = 61, OP_STORE = 62, OP_LABEL = 248,
+           OP_RETVAL = 254, OP_COPY = 83 };
+    size_t n = *nwords;
+    uint32_t bound = spv[3];
+    uint32_t *tmpl = calloc(bound, sizeof *tmpl);  // function id -> the opcode its call becomes (0: not trivial)
+    uint32_t *stored = calloc(bound, sizeof *stored);  // variable id -> the value stored in it last (this block)
+    if (!tmpl || !stored) { free(tmpl); free(stored); return spv; }
+    // 1. trivial helpers: one parameter; Label, Load param, [unary op on it,] ReturnValue
+    size_t ntrivial = 0;
+    for (size_t i = 5; i < n;) {
+        uint32_t wc = spv[i] >> 16;
+        if (!wc) break;
+        if ((spv[i] & 0xFFFF) == OP_FUNCTION && wc == 5 && spv[i + 2] < bound) {
+            uint32_t fn = spv[i + 2];
+            size_t j = i + wc;
+            uint32_t w[6][8] = {{0}};
+            int k = 0;
+            for (; j < n && k < 6; k++) {  // (the next instructions, up to OpFunctionEnd)
+                uint32_t c = spv[j] >> 16;
+                if (!c || c > 8) break;
+                memcpy(w[k], spv + j, c * 4);
+                j += c;
+                if ((w[k][0] & 0xFFFF) == OP_FEND) { k++; break; }
+            }
+            #define OPC(x) ((x)[0] & 0xFFFFu)
+            #define WC(x) ((x)[0] >> 16)
+            uint32_t param = OPC(w[0]) == OP_PARAM ? w[0][2] : 0;
+            if (param && k >= 5 && OPC(w[1]) == OP_LABEL && OPC(w[2]) == OP_LOAD && WC(w[2]) == 4 && w[2][3] == param) {
+                uint32_t v = w[2][2];
+                if (k == 5 && OPC(w[3]) == OP_RETVAL && w[3][1] == v && OPC(w[4]) == OP_FEND) tmpl[fn] = OP_COPY;
+                else if (k == 6 && unary_op(OPC(w[3])) && WC(w[3]) == 4 && w[3][3] == v && OPC(w[4]) == OP_RETVAL &&
+                         w[4][1] == w[3][2] && OPC(w[5]) == OP_FEND)
+                    tmpl[fn] = OPC(w[3]);
+                if (tmpl[fn]) ntrivial++;
+            }
+            #undef OPC
+            #undef WC
+        }
+        i += wc;
+    }
+    static int on = -1;
+    if (on < 0) on = !getenv("ODYSSEY_SPV_INLINE") || atoi(getenv("ODYSSEY_SPV_INLINE"));
+    if (!ntrivial || !on) { free(tmpl); free(stored); return spv; }
+    // 2. their calls: [5 words] Call type result fn arg -> [4 words] op type result value
+    uint32_t *out = malloc(n * 4);
+    if (!out) { free(tmpl); free(stored); return spv; }
+    memcpy(out, spv, 5 * 4);
+    size_t o = 5;
+    for (size_t i = 5; i < n;) {
+        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
+        if (!wc || i + wc > n) { memcpy(out + o, spv + i, (n - i) * 4); o += n - i; break; }
+        if (op == OP_LABEL || op == OP_FUNCTION) memset(stored, 0, bound * sizeof *stored);  // (only this block's stores)
+        if (op == OP_STORE && wc == 3 && spv[i + 1] < bound) stored[spv[i + 1]] = spv[i + 2];
+        if (op == OP_CALL && wc == 5 && spv[i + 3] < bound && tmpl[spv[i + 3]] && spv[i + 4] < bound && stored[spv[i + 4]]) {
+            out[o++] = 4u << 16 | tmpl[spv[i + 3]];
+            out[o++] = spv[i + 1];
+            out[o++] = spv[i + 2];
+            out[o++] = stored[spv[i + 4]];
+        } else {
+            if (op == OP_CALL)  // (a variable passed to another function may be written there: not known any more)
+                for (uint32_t a = 4; a < wc; a++) if (spv[i + a] < bound) stored[spv[i + a]] = 0;
+            memcpy(out + o, spv + i, wc * 4);
+            o += wc;
+        }
+        i += wc;
+    }
+    *nwords = o;
+    free(tmpl);
+    free(stored);
+    free(spv);
+    return out;
+}
+
+// ... then what nothing reads: debug instructions (names, source, lines - ~1,750 names in a median vertex shader) and
+// function-local variables that are only stored to (the calls' argument copies, after inline_trivial), with their
+// stores and decorations. Less for the driver to read in for every library built from the module.
+static uint32_t *spv_slim(uint32_t *spv, size_t *nwords) {
+    enum { OP_NAME = 5, OP_MEMBER_NAME = 6, OP_STRING = 7, OP_LINE = 8, OP_SOURCE_CONT = 2, OP_SOURCE = 3,
+           OP_SOURCE_EXT = 4, OP_NO_LINE = 317, OP_MODULE_PROCESSED = 330, OP_VARIABLE = 59, OP_STORE = 62,
+           OP_DECORATE = 71, OP_MEMBER_DECORATE = 72, SC_FUNCTION = 7 };
+    size_t n = *nwords;
+    uint32_t bound = spv[3];
+    uint8_t *local = calloc(bound, 1);  // 1: a function-local variable; 2: and read somewhere
+    if (!local) return spv;
+    for (size_t i = 5; i < n;) {
+        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
+        if (!wc || i + wc > n) { free(local); return spv; }
+        if (op == OP_VARIABLE && wc >= 4 && spv[i + 3] == SC_FUNCTION && spv[i + 2] < bound) local[spv[i + 2]] |= 1;
+        i += wc;
+    }
+    for (size_t i = 5; i < n;) {  // (every other word that names a local counts as a read: literals too - kept then)
+        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
+        bool skip = op == OP_NAME || op == OP_MEMBER_NAME || op == OP_DECORATE || op == OP_MEMBER_DECORATE;
+        for (uint32_t a = 1; a < wc && !skip; a++) {
+            if (op == OP_VARIABLE && a == 2) continue;  // (its own id)
+            if (op == OP_STORE && a == 1) continue;     // (stored to)
+            uint32_t id = spv[i + a];
+            if (id < bound && local[id]) local[id] |= 2;
+        }
+        i += wc;
+    }
+    uint32_t *out = malloc(n * 4);
+    if (!out) { free(local); return spv; }
+    memcpy(out, spv, 5 * 4);
+    size_t o = 5;
+    for (size_t i = 5; i < n;) {
+        uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
+        bool drop = op == OP_NAME || op == OP_MEMBER_NAME || op == OP_STRING || op == OP_LINE || op == OP_NO_LINE ||
+                    op == OP_SOURCE || op == OP_SOURCE_CONT || op == OP_SOURCE_EXT || op == OP_MODULE_PROCESSED;
+        uint32_t target = op == OP_VARIABLE && wc >= 3 ? spv[i + 2] : (op == OP_STORE || op == OP_DECORATE) && wc >= 2 ? spv[i + 1] : 0;
+        if (target && target < bound && local[target] == 1) drop = true;  // (a local nothing reads: gone with its stores)
+        if (!drop) { memcpy(out + o, spv + i, wc * 4); o += wc; }
+        i += wc;
+    }
+    *nwords = o;
+    free(local);
+    free(spv);
+    return out;
+}
+
 // SPIR-V words of src, or NULL (error logged with the source). *nwords set on success. Thread-safe: one shaderc
 // compiler per thread (a shared one behind a lock serialised all the pipeline workers).
 // No spirv-opt by default: it rewrote the depth pre-pass and colour-pass vertex shaders differently enough that
@@ -183,6 +318,16 @@ static uint32_t *vk_glsl_to_spirv_(const char *src, int stage, const char *name,
     if (nocache < 0) nocache = getenv("ODYSSEY_VK_NO_SPIRV_CACHE") != NULL;
     uint32_t *out = nocache ? NULL : cache_load(h, nwords);
     if (out) return out;
+    {   // ODYSSEY_DUMP_GLSL=<folder> (diagnostics): each source compiled here (not from the cache) as <key>.glsl
+        static const char *dump = (const char *)1;
+        if (dump == (const char *)1) dump = getenv("ODYSSEY_DUMP_GLSL");
+        if (dump) {
+            char path[1024];
+            snprintf(path, sizeof path, "%s/%016llx.glsl", dump, (unsigned long long)h);
+            FILE *df = fopen(path, "w");
+            if (df) { fputs(src, df); fclose(df); }
+        }
+    }
     static __thread shaderc_compiler_t comp;
     if (!comp) comp = shaderc_compiler_initialize();
     shaderc_compile_options_t o = shaderc_compile_options_initialize();
@@ -199,6 +344,8 @@ static uint32_t *vk_glsl_to_spirv_(const char *src, int stage, const char *name,
         out = malloc(n);
         memcpy(out, shaderc_result_get_bytes(r), n);
         *nwords = n / 4;
+        out = inline_trivial(out, nwords);
+        if (!getenv("ODYSSEY_SPV_SLIM") || atoi(getenv("ODYSSEY_SPV_SLIM"))) out = spv_slim(out, nwords);
         if (stage == STAGE_VERTEX) out = no_contraction(out, nwords);
         if (!nocache) cache_store(h, out, *nwords);
     }
@@ -444,6 +591,33 @@ static const char *builtin_src(const char *name, int *stage) {
                "  tapf(ac, aw, vec2(1.0, 2.0) - pp, dir, len2, lob, clp, oC);\n"
                "  tapf(ac, aw, vec2(0.0, 2.0) - pp, dir, len2, lob, clp, nC);\n"
                "  o = vec4(min(mx, max(mn, ac / aw)), 1.0);\n"
+               "}\n";
+    }
+    // The HUD layer over the picture (exec.c hud_composite): t0 the picture (sRGB-encoded bytes), t1 the layer (linear
+    // HUD over black, alpha: how much of the picture shows through). a.xy = 1 / the output size.
+    // The HUD layer into the game's picture (exec.c hud_flush; blended: rgb + picture x alpha). a.xy = 1 / its size.
+    if (!strcmp(name, "hud_flush.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(binding=0) uniform sampler2D hud;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location=0) out vec4 o;\n"
+               "void main() { vec4 h = texture(hud, gl_FragCoord.xy * pc.a.xy); o = vec4(h.rgb, clamp(h.a, 0.0, 1.0)); }\n";
+    }
+    if (!strcmp(name, "hud_over.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(binding=0) uniform sampler2D src;\n"
+               "layout(binding=1) uniform sampler2D hud;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location=0) out vec4 o;\n"
+               "vec3 dec(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c)); }\n"
+               "vec3 enc(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c)); }\n"
+               "void main() {\n"
+               "  vec2 uv = gl_FragCoord.xy * pc.a.xy;\n"
+               "  vec4 h = texture(hud, uv);\n"
+               "  vec3 s = dec(clamp(texture(src, uv).rgb, 0.0, 1.0));\n"
+               "  o = vec4(enc(clamp(s * clamp(h.a, 0.0, 1.0) + h.rgb, 0.0, 1.0)), 1.0);\n"
                "}\n";
     }
     // AMD FidelityFX CAS (MIT), sharpening only. Soften the local extrema with the diagonals,

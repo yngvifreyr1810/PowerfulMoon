@@ -33,9 +33,21 @@ typedef struct {
     VkPhysicalDeviceProperties props;
     VkPipelineCache pcache;
     VkSemaphore timeline;      // value = last completed submission number
+    // A compute-only queue (Linux; exec.c "compute queue"): small dispatches storing to game memory run there at once
+    VkQueue cqueue;            // (VK_NULL_HANDLE: none)
+    uint32_t cqfam;
+    VkSemaphore ctimeline;     // value = last completed compute submission
+    // FSR frame generation (Windows, fsr3_sdk.c): its presenter's queues - present, image acquire, async compute
+    // (families UINT32_MAX: none free, frame generation unavailable)
+    VkQueue fgq[3];
+    uint32_t fgfam[3], fgidx[3];
+    VkCommandPool cpool;       // render thread only
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, checkpoints;
+    bool placed_heap;  // coherent GPU-owned heap mapped at the guest address (Linux experiment)
+    VkDeviceSize placed_align;
     bool feat_aniso;  // samplerAnisotropy enabled (textures.c: the Anisotropic filtering setting)
+    bool features_depth_clamp;  // depthClamp enabled (exec.c: nvnCommandBufferSetDepthClamp)
     bool gpl;  // VK_EXT_graphics_pipeline_library with fast linking: shaders compile per program, pipelines link (exec.c)
     bool pbin;  // VK_KHR_pipeline_binary: shader libraries saved as data and created from it (exec.c lib_binary_*)
     bool headless;  // the shader preparation's process (device.c vk_headless_init)
@@ -51,6 +63,18 @@ typedef struct {
     VkImageView sc_views[8];
 } VkG;
 extern VkG g_vk;
+// present timing (pacing.c)
+extern bool g_pw_enabled;
+bool vk_pacing_want(void);
+void vk_pacing_init(void);
+void vk_pacing_tag(VkPresentInfoKHR *pi, VkPresentIdKHR *pid, uint64_t *val);
+void vk_pacing_presented(uint64_t val, bool ok);
+void vk_pacing_retire(void);
+void vk_pacing_gpu_done(uint64_t val, uint64_t t);
+// A buffer created with this is usable from the graphics and the compute queue (CONCURRENT sharing; no-op without one)
+void vk_buffer_share(VkBufferCreateInfo *bi);
+bool vk_image_share_small(VkImageCreateInfo *ci);  // (the same for an image of at most 65536 texels; true: shared)
+bool vk_recording_cq(void);  // (render thread) recording for the compute queue (exec.c)
 
 // ---- submissions (exec.c)
 // Work is recorded into the current command buffer; uploads go into a separate one that runs first.
@@ -104,6 +128,8 @@ typedef struct TexBackend {
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
     uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
     bool scalable, presented;
+    bool shared;            // usable from the compute queue too (CONCURRENT: small images, exec.c "compute queue")
+    uint64_t gfx_wseq;      // the graphics submission that last wrote it (drawn, copied, stored, uploaded)
     uint64_t touched_frame, frame_cleared;
     uint32_t level_gen;
     float sx, sy;

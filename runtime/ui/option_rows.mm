@@ -9,12 +9,14 @@
 #include "imgui_internal.h"  // (SetKeyOwner, NavCursorVisible)
 
 #include "option_rows.h"
+#include "i18n.h"
 #include "osk.h"
 #include "theme.h"
 
 static float g_scale = 1;
 static std::string g_desc_hover, g_desc_focus, g_desc_shown;  // this frame's hovered / selected row, and the last shown
 static std::string g_desc_first;  // the page's first row (shown until a row is selected or hovered)
+static std::string g_page, g_page_shown;  // this page's id, and the page g_desc_shown belongs to
 static bool g_next_disabled;
 void opt_disable_next(void) { g_next_disabled = true; }
 static int g_indent;
@@ -30,6 +32,7 @@ void opt_begin(const char *id, float scale) {
     if (g_take_first) ImGui::NavMoveRequestCancel();  // (this frame's Down goes to the first row instead)
     g_indent = 0;
     g_desc_hover.clear(), g_desc_focus.clear();
+    g_page = id;
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImGui::PushID(id);
     ImGui::BeginChild("##rows", ImVec2(avail.x * 0.48f, avail.y), ImGuiChildFlags_None, ImGuiWindowFlags_NavFlattened);
@@ -38,7 +41,7 @@ void opt_begin(const char *id, float scale) {
 }
 
 void opt_section(const char *title) {
-    std::string t = title;
+    std::string t = tr(title);
     for (char &c : t) c = (char)toupper((unsigned char)c);
     if (ImGui::GetCursorPosY() > ImGui::GetStyle().WindowPadding.y + 1) ImGui::Dummy(ImVec2(0, 14 * g_scale));
     ImGui::TextColored(kTextDimV, "%s", t.c_str());  // (headings: white, red only outlines)
@@ -47,9 +50,12 @@ void opt_section(const char *title) {
 // One row: draws it, handles A / click and left / right while selected. Returns 2 (A / click), -1 / +1 (left / right) or 0.
 // arrows: ◀ value ▶ (a choice of several, or a stepper): left / right step it, and the arrows click too
 // Look (theme.h): a flat dark row, the label as written; selected / hovered: lighter, with a red bar on its left.
-static int row(const char *label, const std::string &value, bool changed, const char *desc, bool upper = false,
-               bool arrows = false) {
-    ImGui::PushID(label);
+static int row(const char *label_en, const std::string &value_en, bool changed, const char *desc_en, bool upper = false,
+               bool arrows = false, bool repeat = false) {
+    ImGui::PushID(label_en);  // (the English one: the same row whatever the menu's language)
+    // (the menu's language: runtime/ui/i18n.h - label, value and description as shown)
+    const char *label = tr(label_en), *desc = tr(desc_en);
+    std::string value = tr(value_en.c_str());
     if (g_indent) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + g_indent * 28 * g_scale);  // (an option of the row above)
     ImVec2 p = ImGui::GetCursorScreenPos();
     float w = ImGui::GetContentRegionAvail().x, h = ImGui::GetFontSize() * 1.9f;
@@ -206,7 +212,9 @@ void opt_end(void) {
     ImGui::PopStyleVar();
     if (const char *t = getenv("ODYSSEY_OPT_SCROLL")) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(t));  // (test)
     ImGui::EndChild();
-    // the description: the hovered row (mouse) wins, else the selected one (controller), else the last shown
+    // the description: the hovered row (mouse) wins, else the selected one (controller), else the last shown on this
+    // page (another page's stayed on every tab: the Display tab's Monitor text on Graphics, Audio, Mods...)
+    if (g_page_shown != g_page) g_desc_shown.clear(), g_page_shown = g_page;
     if (!g_desc_hover.empty()) g_desc_shown = g_desc_hover;
     else if (!g_desc_focus.empty()) g_desc_shown = g_desc_focus;
     else if (g_desc_shown.empty()) g_desc_shown = g_desc_first;

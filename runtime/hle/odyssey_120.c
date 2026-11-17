@@ -14,6 +14,9 @@
 #include "../rt.h"
 #include "../odyssey_pose.h"
 #include "../settings.h"
+#include "../gameplay_clock.h"
+#include "../ui/menu.h"
+#include "../nvn/nvn.h"
 
 static bool hooks_ok, trace, extra_draw;
 static bool safe_scene_load = true;
@@ -25,6 +28,9 @@ static uint64_t texture_allocator, texture_calc, prepare_graphics;
 static uint64_t last_logic_slot, logic_ticks, controller_ticks, draws, trace_ns;
 static uint64_t simulation_tick, camera_matrix;
 static float draw_lead;  // (90) this draw shows Mario this many ticks past the last tick: -1/6, 1/6 or 1/2
+static uint64_t stage_draw_ns;
+static GameplayClock recovery_clock;
+static bool recover_60;
 uint64_t vi_vsync_count(void);
 uint64_t vi_vsync_time(uint64_t count);
 uint64_t vi_wait_vsync(uint64_t target);
@@ -32,7 +38,7 @@ void input_native_tick_begin(void);
 void input_native_tick_end(void);
 
 bool odyssey_native_120_enabled(void) {
-    if (!hooks_ok || g_settings.frame_rate == FPS_60) return false;
+    if (!hooks_ok || settings_game_hz() == 60) return false;
     extern bool odyssey_scene_cadence_warming(void);
     // 1.4.1's asynchronous scene setup expects one framework draw per gameplay
     // tick. Extra loading draws can leave the first stage draw without a valid
@@ -44,7 +50,7 @@ bool odyssey_native_120_enabled(void) {
 }
 int odyssey_native_hz(void) {
     if (!odyssey_native_120_enabled()) return 60;
-    return g_settings.frame_rate == FPS_90 ? 90 : 120;
+    return settings_fps_hz(g_settings.frame_rate);
 }
 
 bool odyssey_skip_extra_particle_update(void) { return enabled && extra_draw; }
@@ -105,7 +111,7 @@ void odyssey_camera_draw(Cpu *c) {
     if (!enabled || !odyssey_motion_enabled() || !camera_matrix) return;
     uint64_t draw_scene = c->x[19], source = c->x[25];
     float *pose = (float *)(uintptr_t)(c->x[23] + 0x38);
-    if (odyssey_native_hz() == 90) { camera_draw_90(c, draw_scene, source, pose); return; }
+    if (odyssey_native_hz() != 120) { camera_draw_90(c, draw_scene, source, pose); return; }  // (any rate but 120)
     if (extra_draw) {
         half_drawn = draw_scene == scene && source == camera && tick == simulation_tick;
         return;
@@ -141,11 +147,133 @@ void odyssey_camera_draw(Cpu *c) {
     guest_call(&draw, camera_matrix);
 }
 
+static void quality_reduce_off(Cpu *c) { (void)c; }  // (dynamic resolution off: the Reduce nerve does nothing)
+// ODYSSEY_LOG_QUALITY=1 (dynamic resolution on): each second with Reduce steps, how many - when the game lowers it
+static GuestFn original_quality_reduce;
+
+// Mouse camera, direct (#52): CameraPoserFollowLimit::update (the game's usual follow camera; vtable slot 5) adds its
+// turn speed for this frame to its horizontal angle. The stick's speed comes eased (an accumulator that hands out half
+// of itself each frame: the camera keeps turning after the stick is let go); the mouse's movement is added to that
+// frame's speed as it is - the camera turns exactly as far as the mouse moved, at once. Vertically the stick moves a
+// target the angle eases to (the holder at +0x150 / 1.4.1 +0x158: angle +0xc0, target +0xc4); the mouse moves both,
+// within the stick's own limits (-35..85 degrees, measured: the game clamps only what the stick does).
+// (input.c input_mouse_direct; ODYSSEY_MOUSE_DIRECT=0: through the stick as before; ODYSSEY_LOG_FOLLOW=1: the angles)
+static GuestFn original_follow_update;
+static uint32_t follow_speed_off, follow_angle_off, follow_vholder_off;  // (1.0.0: 0x1e4 / 0x1b8 / 0x150; 1.4.1: +8)
+extern bool input_mouse_direct(float *dh, float *dv);
+static void follow_update(Cpu *c) {
+    uint64_t self = c->x[0];
+    float dh = 0, dv = 0;
+    if (input_mouse_direct(&dh, &dv)) {
+        *(float *)(uintptr_t)(self + follow_speed_off) += dh;
+        uint64_t holder = *(uint64_t *)(uintptr_t)(self + follow_vholder_off);
+        if (dv != 0 && holder > 0x7000000000ull) {
+            float *angle = (float *)(uintptr_t)(holder + 0xc0), *target = (float *)(uintptr_t)(holder + 0xc4);
+            const float lo = -35, hi = 85;
+            float t = *target + dv;
+            if (dv < 0 && t < lo) t = *target < lo ? *target : lo;  // (never further out than it already is)
+            if (dv > 0 && t > hi) t = *target > hi ? *target : hi;
+            *angle += t - *target;
+            *target = t;
+        }
+    }
+    static int lg = -1;
+    if (lg < 0) lg = getenv("ODYSSEY_LOG_FOLLOW") != NULL;
+    if (lg) {
+        static unsigned n;
+        uint64_t holder = *(uint64_t *)(uintptr_t)(self + follow_vholder_off);
+        if (n++ % 10 == 0 && holder > 0x7000000000ull)
+            LOG("[follow] angle H %.2f (speed %.3f), V %.2f (target %.2f), mouse %.3f %.3f\n",
+                *(float *)(uintptr_t)(self + follow_angle_off), *(float *)(uintptr_t)(self + follow_speed_off),
+                *(float *)(uintptr_t)(holder + 0xc0), *(float *)(uintptr_t)(holder + 0xc4), dh, dv);
+    }
+    original_follow_update(c);
+}
+// The HUD at the output resolution (nvn/vulkan/exec.c "HUD layer"): nn::ui2d::Layout::Draw(DrawInfo&, gfx::CommandBuffer&)
+// draws one layout - the HUD, menus, wipes - into the command buffer (the gfx one holds its NVNcommandBuffer* at +0xb8,
+// both builds); its draws are marked there, so the renderer can draw them at the window's resolution after the scene
+// was upscaled (DLSS / FSR / XeSS, a lower internal resolution) instead of upscaling them with it.
+// ODYSSEY_HUD_MARKS=0: not marked.
+static GuestFn original_layout_draw;
+static _Atomic uint64_t boot_layout_ns;  // (boot_intro, Skip the start-up controller screen) its last call
+static uint64_t boot_layout;             // the controller screen's layout (BootLoading, drawn while it runs)
+static void layout_draw(Cpu *c) {
+    {   // Skip the start-up controller screen: not drawn at all (black until the title) - the timer skip alone left it
+        // up for as long as the first load takes (owner 2026-11-16: a second or more)
+        uint64_t b = atomic_load(&boot_layout_ns), lay = c->x[0];
+        if (b && plat_now_ns() - b < 3000000000ull && lay) {
+            const char *name = *(const char **)(uintptr_t)(lay + 0x30);
+            if (!boot_layout && name && (uintptr_t)name > 0x7000000000ull && !strcmp(name, "BootLoading")) boot_layout = lay;
+            if (lay == boot_layout) return;
+        }
+    }
+    static _Thread_local int depth;
+    uint64_t ncb = c->x[2] ? *(uint64_t *)(uintptr_t)(c->x[2] + 0xb8) : 0;
+    static int lg = -1;
+    if (lg < 0) lg = getenv("ODYSSEY_LOG_LAYOUTS") != NULL;
+    if (lg) {  // (probe) the layout, its root pane's fields and the strings its pointers lead to
+        static uint64_t seen[256]; static int ns; static unsigned calls;
+        uint64_t lay = c->x[0];
+        bool known = false;
+        for (int i = 0; i < ns; i++) known |= seen[i] == lay;
+        if (!known && ns < 256) {
+            seen[ns++] = lay;
+            uint64_t root = *(uint64_t *)(uintptr_t)(lay + 0x18);
+            char line[1024]; int n = snprintf(line, sizeof line, "[layout] %llx root %llx di %llx (y scale %g):", (unsigned long long)lay,
+                                              (unsigned long long)root, (unsigned long long)c->x[1],
+                                              c->x[1] ? *(float *)(uintptr_t)(c->x[1] + 0x14 + 16) : 0.0f);
+            for (int o = 0x20; o < 0x70 && root; o += 4) n += snprintf(line + n, sizeof line - n, " %g", *(float *)(uintptr_t)(root + o));
+            for (int o = 0; o < 0x80 && n < 900; o += 8) {
+                uint64_t q = *(uint64_t *)(uintptr_t)(lay + o);
+                if (q > 0x7000000000ull && q < 0x7fffffffffull) {
+                    const char *str = (const char *)(uintptr_t)q; int k = 0;
+                    while (k < 40 && str[k] >= 32 && str[k] < 127) k++;
+                    if (k >= 4 && !str[k]) n += snprintf(line + n, sizeof line - n, " +%x'%s'", o, str);
+                }
+            }
+            for (int o = 0x80; o < 0xa0 && root; o++) if (*(char *)(uintptr_t)(root + o) >= 'A') { n += snprintf(line + n, sizeof line - n, " pane@%x'%.24s'", o, (char *)(uintptr_t)(root + o)); break; }
+            LOG("%s\n", line);
+        }
+        (void)calls;
+    }
+    // Anchored to the screen (the HUD: its counters, gauges, guides; a menu or message too - it covers the middle, the
+    // renderer leaves it): the root pane (Layout +0x18) untranslated (+0x30) and the screen's size (+0x50) - not those
+    // that follow something in the world (BalloonIcon: the root pane moved to it). The mini map's player marker
+    // (MapMiniPlayer, a layout of its own placed on the map) goes with the map. Name: Layout +0x30.
+    uint64_t lay = c->x[0], anchored = 0;
+    uint64_t root = lay ? *(uint64_t *)(uintptr_t)(lay + 0x18) : 0;
+    if (root) {
+        const float *rp = (const float *)(uintptr_t)root;
+        const char *name = *(const char **)(uintptr_t)(lay + 0x30);
+        // (only the HUD's own layouts, by name: a menu's (the title's "Menu") sat on one side too, and moved away
+        // from a logo another layout draws under it - the logo twice; owner 2026-11-16)
+        bool named = name && (uintptr_t)name > 0x7000000000ull;
+        bool map = named && !strncmp(name, "MapMini", 7);
+        bool hud = named && (!strncmp(name, "Counter", 7) || !strncmp(name, "PlayGuide", 9) || !strncmp(name, "SaveMessage", 11));
+        if (map || (hud && rp[12] == 0 && rp[13] == 0)) anchored = map ? 1 : lay;  // (the map's pieces: one id)
+        (void)rp;
+    }
+    if (!depth++) nvn_ui_mark(c, ncb, 1, anchored);
+    original_layout_draw(c);
+    if (!--depth) nvn_ui_mark(c, ncb, 0, 0);
+}
+static void quality_reduce_log(Cpu *c) {
+    static uint64_t window, n;
+    uint64_t now = plat_now_ns();
+    if (now - window > 1000000000ull) {
+        if (n) LOG("[quality] %llu Reduce steps in the last second\n", (unsigned long long)n);
+        window = now, n = 0;
+    }
+    n++;
+    original_quality_reduce(c);
+}
+
 static void boot_intro(Cpu *c) {
     // HakoniwaStateBootLoadData::exeBootLayout starts controller setup on step zero.
     // Its transition requires both step > 540 and the asynchronous loader to be ready.
     int32_t *step = (int32_t *)(uintptr_t)(c->x[1] + 0x18);  // al::NerveKeeper::mStep
     bool first = *step == 0;
+    atomic_store(&boot_layout_ns, plat_now_ns());  // (layout_draw: its screen not drawn)
     original_boot_intro(c);
     if (first && *step == 0) {
         *step = 540;  // NerveKeeper::update increments after this callback returns.
@@ -221,16 +349,30 @@ static void framework_calc(Cpu *c) {
     // 90: how far this loop's vsync is past its tick (0, 1/3 or 2/3; more when catching up), less 1/6: Mario 1/6 of a
     // tick behind that, the camera 2/3 - so that Mario never goes more than half a tick past the last tick, nor the
     // camera past it
-    if (hz == 90 && !strict) {
+    // Any other rate (72 .. 240) the same way: this vsync's fraction of a tick less (the largest fraction - 1/2), so
+    // the leads run evenly from below the last tick up to half a tick past it, a vsync's time apart (240: -1/4, 0,
+    // 1/4, 1/2; 144: -5/12 .. 1/2 in twelfths; 72: -1/3 .. 1/2), the camera always half a tick behind Mario
+    if (hz != 120 && !strict) {
+        uint64_t g = hz, b = 60;
+        while (b) { uint64_t t = g % b; g = b; b = t; }  // (gcd: the fractions are steps of g / hz)
         float past = (float)(vsync * 60 / hz - slot) + (float)(vsync * 60 % hz) / (float)hz;
-        draw_lead = past - 1.0f / 6 > 0.5f ? 0.5f : past - 1.0f / 6;
+        float c0 = (float)(hz - g) / (float)hz - 0.5f;
+        draw_lead = past - c0 > 0.5f ? 0.5f : past - c0;
     } else draw_lead = extra_draw ? 0.5f : 0.0f;
-    original_framework_calc(c);
+    // Private timing experiment, separate from the 90/120 rendering mode.
+    // Repeat complete fixed updates, never a larger physics timestep. Keep
+    // loading, non-stage scenes and the host settings menu on stock timing.
+    extern bool odyssey_scene_cadence_warming(void);
+    bool active = recover_60 && settings_game_hz() == 60 && stage_draw_ns && now-stage_draw_ns<100000000ull &&
+                  !menu_is_open() && !odyssey_scene_cadence_warming();
+    unsigned steps=gameplay_clock_steps(&recovery_clock,now,active);
+    uint64_t framework=c->x[0];
+    for (unsigned i=0;i<steps;i++) { c->x[0]=framework; original_framework_calc(c); }
 }
 
 static void controller_calc(Cpu *c) {
     if (enabled && extra_draw) return;
-    if (!enabled) { original_controller_calc(c); return; }
+    if (!enabled) { if (recover_60) controller_ticks++; original_controller_calc(c); return; }
     controller_ticks++;
     input_native_tick_begin();
     original_controller_calc(c);
@@ -266,6 +408,7 @@ static void prepare_extra_draw(Cpu *c, const char *what, bool *logged) {
 }
 
 static void stage_draw(Cpu *c) {
+    stage_draw_ns=plat_now_ns();
     static bool logged;
     static uint64_t last_stage;
     if (enabled && extra_draw) {
@@ -274,7 +417,7 @@ static void stage_draw(Cpu *c) {
     } else {
         last_stage = enabled ? c->x[0] : 0;
         // (90: the gameplay frames are between ticks too)
-        if (last_stage && odyssey_native_hz() == 90 && draw_lead != 0.0f && odyssey_pose_enabled()) odyssey_pose_draw(c, draw_lead);
+        if (last_stage && odyssey_native_hz() != 120 && draw_lead != 0.0f && odyssey_pose_enabled()) odyssey_pose_draw(c, draw_lead);
     }
     original_stage_draw(c);
 }
@@ -371,16 +514,50 @@ static void player_movement(Cpu *c) {
         (unsigned long long)updates, pos[0], pos[1], pos[2]);
 }
 
+static GuestFn original_szs_device;
+static void szs_device(Cpu *c) {  // (sead::SZSDecompressor::tryDecompFromDevice: read + decode, off the core gate)
+    static bool logged;
+    if (!logged) { logged = true; LOG("[szs] file decompression runs off the core gate\n"); }
+    kernel_ungated_begin();
+    original_szs_device(c);
+    kernel_ungated_end();
+}
+
+static GuestFn original_szs_parallel;
+static void szs_parallel(Cpu *c) {  // (sead::ParallelSZSDecompressor::tryDecompFromDevice: off the core gate)
+    static bool logged;
+    if (!logged) { logged = true; LOG("[szs] parallel file decompression runs off the core gate\n"); }
+    kernel_ungated_begin();
+    original_szs_parallel(c);
+    kernel_ungated_end();
+}
+
+static GuestFn original_szs_decoder;
+static void szs_decoder(Cpu *c) {  // (1.4.1 0x97dae0: the decoder's virtual entry, off the core gate)
+    static bool logged;
+    if (!logged) { logged = true; LOG("[szs] the decoder's own entry runs off the core gate\n"); }
+    kernel_ungated_begin();
+    original_szs_decoder(c);
+    kernel_ungated_end();
+}
+
 static GuestFn original_szs_calc;
 static void szs_calc(Cpu *c) {
     static bool logged;
     if (!logged) { logged = true; LOG("[szs] decompression runs off the core gate\n"); }
-    kernel_block_begin();  // (the core's other threads run meanwhile)
+    kernel_ungated_begin();  // (the core's other threads run meanwhile)
     original_szs_calc(c);
-    kernel_gate_reenter();  // (guest code runs next)
+    kernel_ungated_end();  // (guest code runs next)
 }
 
 void odyssey_native_120_boot(void) {
+    stage_draw_ns=0;
+    recovery_clock=(GameplayClock){0};
+    const char *recovery=getenv("ODYSSEY_GAMEPLAY_CATCHUP");
+    // On by default everywhere (ODYSSEY_GAMEPLAY_CATCHUP=0: off): below 60 FPS the game runs extra ticks so it keeps
+    // real-time speed instead of slowing down. Windows, forced ~32 FPS (2026-11-15): 120 ticks per 2 s with it, 60
+    // without (half speed - the slow motion of #13 and #42); Steam Deck likewise.
+    recover_60=!recovery || atoi(recovery)!=0;
     static bool installed;
     if (installed) {
         last_logic_slot = UINT64_MAX;
@@ -390,7 +567,10 @@ void odyssey_native_120_boot(void) {
     // ODYSSEY_NATIVE_120=1 / 90 / 0 sets the initial frame rate for tests.
     settings_load();
     const char *mode = getenv("ODYSSEY_NATIVE_120");
-    if (mode && *mode) g_settings.frame_rate = !strcmp(mode, "0") ? FPS_60 : !strcmp(mode, "90") ? FPS_90 : FPS_120;
+    if (mode && *mode) {  // (0: 60; 1: 120; else frames per second)
+        int want = !strcmp(mode, "0") ? 60 : !strcmp(mode, "1") ? 120 : atoi(mode);
+        for (int i = 0; i < FPS_COUNT; i++) if (settings_fps_hz(i) == want) g_settings.frame_rate = i;
+    }
     bool requested = true;  // (the hooks: always, the setting switches them)
     const char *skip = getenv("ODYSSEY_SKIP_CONTROLLER_INTRO");
     bool skip_intro = skip ? !strcmp(skip, "1") : g_settings.skip_intro;  // (the menu's Skip controller tips)
@@ -425,6 +605,50 @@ void odyssey_native_120_boot(void) {
         uint64_t decomp = main->base + 0x97e420;
         if ((!e || atoi(e) != 0) && (original_szs_calc = dispatch_lookup(decomp)))
             hle_override(decomp, szs_calc, "SZS decompression off the core gate");
+    }
+    {   // sead::SZSDecompressor::tryDecompFromDevice (its vtable; 1.0.0 by name): a loading thread (priority 45) reads a
+        // compressed file and decodes it in a loop without calls, holding its core - the game's main thread (44, on the
+        // same core) waited 12-26 ms for it whenever something new loaded (a model, an effect): the stutters when new
+        // things appear (Steam Deck, [gate] log). On the Switch the higher-priority thread would preempt it at once. It
+        // runs off the core gate now, as the parallel decompressor's threads (above). ODYSSEY_SZS_UNGATED=0: as before.
+        // The same for sead::ParallelSZSDecompressor::tryDecompFromDevice: the loading thread decodes parts of the file
+        // itself next to the decompressor's threads - that was the one holding the core in the [gate] log (thread 83).
+        const char *e = getenv("ODYSSEY_SZS_UNGATED");
+        uint64_t dev = main->base + (v141 ? 0x97d5c0 : 0xb63d84), par = main->base + (v141 ? 0x97df50 : 0xb622bc);
+        if ((!e || atoi(e) != 0) && (original_szs_device = dispatch_lookup(dev)))
+            hle_override(dev, szs_device, "SZS file decompression off the core gate");
+        if ((!e || atoi(e) != 0) && (original_szs_parallel = dispatch_lookup(par)))
+            hle_override(par, szs_parallel, "Parallel SZS file decompression off the core gate");
+        // ... and the decoder's own virtual entry (1.4.1: sead::Decompressor vtable slot 1, 4 bytes before the decode
+        // loop it runs into): the [gate] log still showed thread 83 holding the core inside the decoder
+        uint64_t dec = main->base + 0x97dae0;
+        if (v141 && (!e || atoi(e) != 0) && (original_szs_decoder = dispatch_lookup(dec)))
+            hle_override(dec, szs_decoder, "SZS decoder off the core gate");
+    }
+    {   // the HUD's draws marked (layout_draw)
+        uint64_t ld = main->base + (v141 ? 0x903d60 : 0xb02b2c);
+        const char *e = getenv("ODYSSEY_HUD_MARKS");
+        if ((!e || atoi(e) != 0) && (original_layout_draw = dispatch_lookup(ld)))
+            hle_override(ld, layout_draw, "Odyssey layouts: their draws marked (the HUD at the output resolution)");
+    }
+    {   // the mouse camera, direct (follow_update)
+        uint64_t upd = main->base + (v141 ? 0xbd2b0 : 0xca8b0);
+        follow_speed_off = v141 ? 0x1ec : 0x1e4, follow_angle_off = v141 ? 0x1c0 : 0x1b8, follow_vholder_off = v141 ? 0x158 : 0x150;
+        const char *e = getenv("ODYSSEY_MOUSE_DIRECT");
+        if ((!e || atoi(e) != 0) && (original_follow_update = dispatch_lookup(upd)))
+            hle_override(upd, follow_update, "Odyssey follow camera: mouse turns it directly");
+    }
+    {   // Dynamic resolution off (setting game_dynres; ODYSSEY_GAME_DYNRES=0/1): al::GraphicsQualityController - the game's
+        // own load-driven quality, a nerve machine Wait -> Reduce -> Recover - lowers the resolution when frames run
+        // long (on a Steam Deck at 7-10 W down to 960x540 of 1600x900, or a smaller viewport in handheld: blurry). Its
+        // Reduce nerve's execute (vtable slot 0 of (anonymous)::GraphicsQualityControllerNrvReduce, found from the RTTI
+        // name in both builds) does nothing then: the quality never drops, so Recover has nothing to undo.
+        uint64_t reduce = main->base + (v141 ? 0x5ef6d0 : 0xa57f58);
+        if (!settings_game_dynres() && dispatch_lookup(reduce)) {
+            hle_override(reduce, quality_reduce_off, "Odyssey dynamic resolution off");
+            LOG("[quality] the game's dynamic resolution is off (full resolution)\n");
+        } else if (getenv("ODYSSEY_LOG_QUALITY") && (original_quality_reduce = dispatch_lookup(reduce)))
+            hle_override(reduce, quality_reduce_log, "Odyssey dynamic resolution log");
     }
     if (!requested && !trace) {
         installed = true;
@@ -476,8 +700,8 @@ void odyssey_native_120_boot(void) {
     // (always: the performance overlay shows Mario's position)
     if (original_movement) hle_override(movement, player_movement, "Odyssey player movement observation");
     installed = true;
-    if (g_settings.frame_rate != FPS_60)
-        LOG("[native-120] %d Hz selected, 60 Hz gameplay%s\n", g_settings.frame_rate == FPS_90 ? 90 : 120,
+    if (settings_game_hz() != 60)
+        LOG("[native-120] %d Hz selected, 60 Hz gameplay%s\n", settings_fps_hz(g_settings.frame_rate),
             v141 ? "; stock cadence during scene setup" : "");
     else LOG("[native-120] stock 60 FPS (switchable in the menu)\n");
 }

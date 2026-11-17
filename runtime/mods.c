@@ -13,6 +13,7 @@
 
 #include "hle.h"
 #include "settings.h"
+#include "localization.h"
 
 #define MODS_DIR "mods"
 #define TITLE_ID "0100000000010000"  // Super Mario Odyssey: the console / emulator layouts name a folder after it
@@ -55,16 +56,25 @@ static void mod_name(const char *id, char *out, size_t cap) {
     if (!out[0]) strlcpy(out, MODS_DIR "/romfs", cap);
 }
 
-static int count_files(const char *dir) {
+static int count_files(const char *dir, const char *rel, ModInfo *mod) {
     DIR *d = opendir(dir);
     if (!d) return 0;
     int n = 0;
     struct dirent *e;
     while ((e = readdir(d))) {
         if (e->d_name[0] == '.') continue;
-        char p[1400];
+        char p[1400], r[1024];
         snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
-        n += is_dir(p) ? count_files(p) : 1;
+        snprintf(r, sizeof r, "%s%s%s", rel, rel[0] ? "/" : "", e->d_name);
+        if (is_dir(p)) n += count_files(p, r, mod);
+        else {
+            n++;
+            int file = mod ? localization_ptbr_file(r) : -1;
+            if (file >= 0) {
+                mod->ptbr_paths |= 1u << file;
+                if (localization_ptbr_matches(file, p)) mod->ptbr_matches |= 1u << file;
+            }
+        }
     }
     closedir(d);
     return n;
@@ -97,9 +107,9 @@ static void scan(const char *rel, int depth, ModInfo **v, int *n, int *cap) {
         if (!strcasecmp(e->d_name, "romfs")) {
             ModInfo *m = add(v, n, cap, r2);
             m->romfs = true;
-            m->files = count_files(h2);
+            m->files = count_files(h2, "", m);
         } else if (!strcasecmp(e->d_name, "exefs")) {
-            if (count_files(h2)) add(v, n, cap, r2)->code = true;  // (merged into its romfs/ mod below)
+            if (count_files(h2, "", NULL)) add(v, n, cap, r2)->code = true;  // (merged into its romfs/ mod below)
         } else if (depth < 6) {
             scan(r2, depth + 1, v, n, cap);
         }

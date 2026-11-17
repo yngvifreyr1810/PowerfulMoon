@@ -82,6 +82,10 @@ uint32_t kernel_current_thread_handle(void);
 // run; it takes the core back when it returns to guest code (SVC exit, HLE return, kernel_gate_reenter).
 void kernel_block_begin(void);
 void kernel_gate_reenter(void);
+// A stretch of guest code run off the core gate (a decoder: no shared per-core state) - unlike kernel_block_begin, an SVC
+// inside it (a file read, a lock) doesn't take the core back on its way out; kernel_ungated_end does. Nests.
+void kernel_ungated_begin(void);
+void kernel_ungated_end(void);
 void kernel_preempt_point(void);  // (fnprof.c: a function entry while a higher-priority thread waits for a core)
 Cpu *kernel_current_cpu(void);
 

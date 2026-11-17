@@ -13,7 +13,7 @@
 #include "odyssey_v141.h"
 #include "../rt.h"
 #include "../odyssey_pose.h"
-#ifdef _WIN32
+#ifndef __APPLE__  // (the temporal upscalers: every Vulkan build)
 #include "../nvn/vulkan/dlss_probe.h"
 #endif
 
@@ -77,7 +77,7 @@ void odyssey_debug_hook(Cpu *c, uint64_t pc) {
     if (pc == camera_at) {
         extern void odyssey_camera_draw(Cpu *);
         odyssey_camera_draw(c);
-#ifdef _WIN32
+#ifndef __APPLE__  // (the temporal upscalers: every Vulkan build)
         // This camera-copy hook is part of every generated game library. The
         // older updateViewGpu probe was only inserted by an optional debug build,
         // so ordinary installs never supplied a camera and DLSS silently skipped.
@@ -116,7 +116,7 @@ void odyssey_debug_hook(Cpu *c, uint64_t pc) {
         odyssey_pose_capture(c);
         return;
     }
-#ifdef _WIN32
+#ifndef __APPLE__  // (the temporal upscalers: every Vulkan build)
     // GraphicsSystemInfo::updateViewGpu, view zero. Copy before this guest data can be reused by the next frame.
     // (1.4.1: the same arguments as far as tools/dis141.py shows; to be checked in game with DLSS on)
     if (pc == view_at && (uint32_t)c->x[1] == 0 && c->x[2] && c->x[3] && vk_temporal_enabled()) {

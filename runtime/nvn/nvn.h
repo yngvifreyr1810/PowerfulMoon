@@ -101,6 +101,9 @@ typedef struct NvnSync {
     volatile int signaled;
     volatile uint64_t seq;  // GPU submission this fence belongs to (renderer_fence_seq), 0 = none
     uint64_t ticket;        // the render thread's item that fences it (rqueue.c; 0: none)
+    volatile uint64_t write_seq;  // the last submission before it in which the GPU wrote game memory (0: none)
+    uint64_t gw_mark;             // guarded compute writes recorded before it (exec.c renderer_fence_point)
+    bool gw_ok;                   // ... and handed to the GPU by then (false: the fence waits for them)
 } NvnSync;
 
 // ---- command recording (runtime/nvn/cmdbuf.c: records in host memory, counted against the game's command memory)
@@ -125,6 +128,8 @@ typedef struct {
     uint8_t extra[];
 } CmdRec;
 CmdRec *cmd_list(uint64_t handle);  // a list's first record, from its handle (NULL: none recorded there)
+void nvn_ui_mark(Cpu *c, uint64_t guest_cmdbuf, int on, uint64_t anchored);  // (cmdbuf.c) CMD_UI_MARK into a recording
+                                                                            // command buffer (anchored: a HUD layout's id)
 
 enum {
     CMD_END = 0, CMD_JUMP, CMD_CALL,
@@ -142,6 +147,8 @@ enum {
     CMD_COPY_TEXTURE_TO_TEXTURE, CMD_DOWNSAMPLE, CMD_UPDATE_UNIFORM_BUFFER, CMD_FENCE_SYNC, CMD_WAIT_SYNC,
     CMD_BARRIER, CMD_SIGNAL_EVENT, CMD_WAIT_EVENT, CMD_REPORT_COUNTER, CMD_DISCARD_COLOR,
     CMD_DISCARD_DEPTH_STENCIL, CMD_SET_COPY_STRIDES, CMD_DRAW_TEXTURE, CMD_RESOLVE_DEPTH,
+    CMD_UI_MARK,  // (ours, not NVN's: x0 1 / 0 = the game's layout drawing (nn::ui2d::Layout::Draw) begins / ends - the HUD)
+    CMD_SET_DEPTH_CLAMP,
     CMD_COUNT
 };
 

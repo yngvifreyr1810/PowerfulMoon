@@ -6,7 +6,8 @@
 
 #define SETTINGS_FILE (settings_file())
 
-enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25 = 11, RES_Q50 = 12, RES_1440 = 13 };
+enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25 = 11, RES_Q50 = 12, RES_1440 = 13,
+       RES_DISPLAY = 14 /* 100%: the window's own pixels (Steam Deck: 1280 x 800), no floor at the Switch's 900 lines */ };
 enum { UPSCALE_BILINEAR = 0, UPSCALE_METALFX = 1 /* macOS */, UPSCALE_FSR1 = 2 /* Windows: AMD FSR 1 */ };
 #ifdef __APPLE__
 #define UPSCALE_SHARP UPSCALE_METALFX  // each OS's non-bilinear upscaler (the default)
@@ -17,9 +18,14 @@ enum { AA_OFF = 0, AA_SMAA = 1 };
 enum { OVERLAY_TOP_RIGHT, OVERLAY_TOP_LEFT, OVERLAY_BOTTOM_RIGHT, OVERLAY_BOTTOM_LEFT, OVERLAY_CORNER_COUNT };
 enum { DLSS_OFF, DLSS_DLAA, DLSS_QUALITY, DLSS_BALANCED, DLSS_PERFORMANCE, DLSS_MODE_COUNT };
 enum { DLSS_PRESET_DEFAULT, DLSS_PRESET_K, DLSS_PRESET_L, DLSS_PRESET_M, DLSS_PRESET_COUNT };
-enum { TEMPORAL_DLSS, TEMPORAL_FSR3, TEMPORAL_FSR4, TEMPORAL_XESS, TEMPORAL_BACKEND_COUNT };
+// (TEMPORAL_FSR2: AMD FSR 2.2 run by our own code - runtime/nvn/vulkan/fsr2.c; it shares FSR 3.1's mode and sharpness)
+enum { TEMPORAL_DLSS, TEMPORAL_FSR3, TEMPORAL_FSR4, TEMPORAL_XESS, TEMPORAL_FSR2, TEMPORAL_BACKEND_COUNT };
 enum { WINDOWED, BORDERLESS, EXCLUSIVE_FULLSCREEN, WINDOW_MODE_COUNT };
 enum { DISPLAY_AUTO, DISPLAY_1080, DISPLAY_1440, DISPLAY_2160, DISPLAY_MODE_COUNT };
+// VSync (Vulkan present modes): ON = mailbox (no tearing, the game paces itself - the default), OFF = immediate
+// (tearing, the lowest latency), STRICT = FIFO (each frame waits for its refresh), ADAPTIVE = FIFO relaxed (a late
+// frame goes out at once, tearing then)
+enum { VSYNC_ON, VSYNC_OFF, VSYNC_STRICT, VSYNC_ADAPTIVE, VSYNC_COUNT };
 static inline int settings_display_height(int mode) {
     const int heights[DISPLAY_MODE_COUNT] = {0, 1080, 1440, 2160};
     return heights[mode];
@@ -28,30 +34,57 @@ static inline int settings_display_height(int mode) {
 enum { ANISO_GAME = 0 };
 // Frame rate: FPS_90 / FPS_120 draw 90 / 120 times a second with gameplay at its 60 (runtime/hle/odyssey_120.c); FPS_60
 // as on the Switch
-enum { FPS_60 = 0, FPS_90 = 1, FPS_120 = 2, FPS_COUNT };
+enum { FPS_60 = 0, FPS_90 = 1, FPS_120 = 2, FPS_72, FPS_100, FPS_144, FPS_165, FPS_180, FPS_240, FPS_AUTO, FPS_COUNT };
+int settings_fps_hz(int frame_rate);  // FPS_* -> frames per second (60, 90, 120, 72 ...; FPS_AUTO: from the display)
+int settings_game_hz(void);           // the chosen frame rate's frames per second
+extern volatile int g_display_hz;     // (the renderer) the display's refresh rate, whole Hz (0: not known)
 // The image in a window of another shape: 16:9 with bars, or (Vulkan) filling a wider window with more of the scene
 // at the sides (runtime/hle/odyssey_wide.c)
-enum { ASPECT_16_9 = 0, ASPECT_FILL = 1 };
-// Memory use: Normal builds the shaders of what a stage sets up ahead, Low builds each at its first draw
+// or a fixed shape on any screen (bars where the screen's differs, as in PC games' aspect ratio options)
+enum { ASPECT_16_9 = 0, ASPECT_FILL = 1, ASPECT_16_10 = 2, ASPECT_21_9 = 3, ASPECT_32_9 = 4, ASPECT_4_3 = 5, ASPECT_COUNT };
+static const char *const ASPECT_NAMES[ASPECT_COUNT] = {"16:9", "fill", "16:10", "21:9", "32:9", "4:3"};
+// the shape of each fixed one / 16:9 (0: the window's - fill); 21:9 is 64:27 (2560x1080, 5120x2160)
+static const double ASPECT_K[ASPECT_COUNT] = {1.0, 0.0, (16.0 / 10.0) / (16.0 / 9.0), (64.0 / 27.0) / (16.0 / 9.0), 2.0, (4.0 / 3.0) / (16.0 / 9.0)};
+// Console mode: what the game is told it runs as - docked (TV: its 1600x900 rendering, docked effects) or handheld (its
+// own handheld rendering, 1280x720 and lighter effects, as on a Switch Lite). Applies at the next start.
+enum { CONSOLE_DOCKED = 0, CONSOLE_HANDHELD = 1 };
+// Button prompts: Auto follows the device used last (keyboard / mouse or controller)
+// Memory use: Normal builds the shaders of what a stage sets up ahead (fewer stutters, ~3 GB more with NVIDIA's driver),
+// Low builds each at its first draw; Auto is Low on a PC with less than 12 GB of RAM
 enum { MEMORY_AUTO = 0, MEMORY_NORMAL, MEMORY_LOW, MEMORY_COUNT };
 bool settings_low_memory(void);
 // Button prompts: Auto follows the device used last (keyboard / mouse or controller)
 enum { PROMPTS_AUTO = 0, PROMPTS_CONTROLLER = 1, PROMPTS_KEYBOARD = 2, PROMPTS_SWITCH, PROMPTS_XBOX, PROMPTS_PLAYSTATION,
        PROMPTS_COUNT };
-// System language served to the game
-enum { LANG_AUTO = -1 };
-#define N_LANGUAGES 13
-extern const char *const g_language_codes[N_LANGUAGES];
-extern const char *const g_language_names[N_LANGUAGES];
+// Language preference (runtime/services/am.c GetDesiredLanguage, services/hid_set.c GetLanguageCode):
+// the game picks its text language from it, as it would from the Switch's own system setting. LANG_AUTO follows the
+// host locale ($LC_ALL / $LC_MESSAGES / $LANG); the rest are the codes of the languages the game has text for.
+enum { LANG_AUTO = 0, LANG_PT_BR = 12, N_LANGUAGES = 13 };
+// The menu's own language: Auto follows the game's (when this menu has a translation for it), or a fixed one
+// (the same list as the game's: an index into g_language_codes / g_language_names, 0 = Auto; a language with no
+// translation file in lang/ shows the menu in English)
+enum { MENU_LANG_AUTO = 0, MENU_LANG_COUNT = N_LANGUAGES };
+extern const char *const g_language_codes[N_LANGUAGES];  // Persistencia; pt-BR usa en-US no jogo.
+extern const char *const g_language_names[N_LANGUAGES];  // for the menu ("Auto", "Japanese", ..., "Spanish")
+
+enum { FG_OFF, FG_FSR, FG_DLSS, FG_COUNT };  // (frame_gen: AMD FSR - fsr3_sdk.c; NVIDIA DLSS - sl_glue.cpp)
+enum { AUDIO_OUT_AUTO, AUDIO_OUT_STEREO, AUDIO_OUT_SURROUND, AUDIO_OUT_COUNT };  // (audio_output: Auto = 5.1 when the device has 6+ channels)
 
 typedef struct {
     bool fullscreen;
     int window_mode, display_resolution;
+    int display_w, display_h;  // the window / exclusive mode's exact size (0: auto - display_resolution's old choices map here)
+    int refresh_rate;    // exclusive fullscreen's refresh rate in Hz (0: the desktop's)
+    int vsync;           // VSYNC_*: how frames reach the screen
     int monitor;         // 0: current display; 1..N: SDL's current display enumeration
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (MetalFX: macOS, FSR 1: Windows)
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     int dlss_mode, dlss_preset;  // Windows NVIDIA modes and model hints, applied during play
+    bool temporal_off;   // the menu's Upscale method: Off (the default) - no temporal upscaler, whatever the modes below
+    int frame_gen;          // FG_*: frame generation (Windows; needs an Upscale method): a generated frame between each two
+    int low_latency;        // 0 off, 1 on, 2 on + boost: NVIDIA Reflex (Streamline: sl_glue.cpp)
+    int hud_edges;          // pictures wider than 16:9: 1 the HUD at the picture's edges (default), 0 in a centred 16:9 box
     int temporal_backend, fsr3_mode, fsr3_sharpness, fsr3_cas_sharpness;
     bool fsr3_cas;
     int fsr4_mode, fsr4_sharpness, fsr4_cas_sharpness;
@@ -63,19 +96,27 @@ typedef struct {
     int fsr1_sharpness;   // FSR 1's RCAS percent, 0..100; stored independently
     int aspect;          // ASPECT_*: the image in a window wider than 16:9
     int interpolation_output; // 0: nominal display refresh, 120: explicit VRR interpolation target
-    int vsync;           // 0: auto/mailbox, 1: on, 2: off
-    bool deband;         // smooth gradients (dithering of the tonemapper's output; vulkan/textures.c)
-    bool frame_interp;   // in-between images with blended uniforms (runtime/nvn/interp.c)
-    float volume;        // master volume (0.0 .. 1.0)
-    bool reverb;         // reverberation effect in audio mixes
-    bool movie_audio;    // audio playback during cutscenes
-    bool show_fps;       // top-left corner FPS text
-    bool performance_overlay; // HUD performance overlay
+    int console_mode;    // CONSOLE_*: docked or handheld (the game's own rendering for each; next start)
+    bool game_dynres;    // the game's own dynamic resolution (on: as on the Switch; off: always its full resolution)
+    bool frame_interp;   // images between the game's frames (Vulkan: runtime/nvn/interp.c)
+    bool deband;         // smooth gradients: the game's final picture in half floats, dithered into the window (Vulkan:
+                         // nvn/vulkan/textures.c vk_deband)
+    float volume;        // master volume, 1 = 100%
+    bool reverb;         // the audio renderer's reverb effect
+    int audio_output;    // AUDIO_OUT_*: what the game is told the TV has (services/audio.c audio_channels, #35)
+    bool movie_audio;
+    bool show_fps, performance_overlay;
+    // The performance overlay (runtime/ui/menu.mm draw_performance): where, how big, how see-through, and its parts
     int overlay_corner;   // OVERLAY_*
     int overlay_size;     // 0 small, 1 medium, 2 large
     int overlay_opacity;  // percent of the background, 0..100
     bool overlay_gpu, overlay_cpu, overlay_ram, overlay_graph, overlay_hardware, overlay_render, overlay_position;
     bool motion;         // the controller's gyro / accelerometer as the Switch's motion sensor (runtime/hle/input.c)
+    int motion_shake_pad;  // a controller button (PADB_*) that shakes the controller for the game while held (-1: none)
+    bool motion_invert_x;  // the gyro's pitch (tilting forward / back) the other way round (#53)
+    bool motion_invert_y;  // the gyro's yaw (turning left / right) the other way round
+    float motion_gyro_bias[3];  // the gyro's offset at rest, Switch axes, turns a second (Calibrate gyro; 0: learned as played)
+    int motion_shake_key;  // a key (SDL scancode) or mouse button (BIND_MOUSE_*) doing the same (0: none)
     bool rumble, hd_rumble; // controller vibration & Switch 2 HD rumble
     float rumble_strength; // 0..2, default 1
     int stick_deadzone;  // percent of a controller stick's travel that counts as rest (runtime/hle/input.c), 0: none
@@ -88,6 +129,7 @@ typedef struct {
     bool stick_camera_invert_x, stick_camera_invert_y;
     int prompts;         // PROMPTS_*: the game's button icons as key caps / a mouse, or the controller's (nvn/kbprompts.c)
     int language;        // LANG_AUTO or an index into g_language_codes: the game's text language
+    int menu_language;   // MENU_LANG_*: this menu's own text (runtime/ui/i18n.mm); applies at the next start
     int aniso;           // ANISO_GAME or 2, 4, 8, 16: the most anisotropic filtering of filtered, mipmapped textures that
                          // tile (nvn/vulkan/textures.c vk_sampler; read at start)
     int frame_rate;      // FPS_*: the game's draws per second (gameplay stays at 60)
@@ -111,7 +153,7 @@ extern Settings g_settings;
 
 static inline int *settings_temporal_mode(void) {
     switch (g_settings.temporal_backend) {
-    case TEMPORAL_FSR3: return &g_settings.fsr3_mode;
+    case TEMPORAL_FSR3: case TEMPORAL_FSR2: return &g_settings.fsr3_mode;
     case TEMPORAL_FSR4: return &g_settings.fsr4_mode;
     case TEMPORAL_XESS: return &g_settings.xess_mode;
     default: return &g_settings.dlss_mode;
@@ -119,7 +161,7 @@ static inline int *settings_temporal_mode(void) {
 }
 static inline int *settings_temporal_sharpness(void) {
     switch (g_settings.temporal_backend) {
-    case TEMPORAL_FSR3: return &g_settings.fsr3_sharpness;
+    case TEMPORAL_FSR3: case TEMPORAL_FSR2: return &g_settings.fsr3_sharpness;
     case TEMPORAL_FSR4: return &g_settings.fsr4_sharpness;
     case TEMPORAL_XESS: return &g_settings.xess_sharpness;
     default: return &g_settings.dlss_rcas_sharpness;
@@ -127,7 +169,7 @@ static inline int *settings_temporal_sharpness(void) {
 }
 static inline bool *settings_temporal_cas(void) {
     switch (g_settings.temporal_backend) {
-    case TEMPORAL_FSR3: return &g_settings.fsr3_cas;
+    case TEMPORAL_FSR3: case TEMPORAL_FSR2: return &g_settings.fsr3_cas;
     case TEMPORAL_FSR4: return &g_settings.fsr4_cas;
     case TEMPORAL_XESS: return &g_settings.xess_cas;
     default: return &g_settings.dlss_cas;
@@ -135,7 +177,7 @@ static inline bool *settings_temporal_cas(void) {
 }
 static inline int *settings_temporal_cas_sharpness(void) {
     switch (g_settings.temporal_backend) {
-    case TEMPORAL_FSR3: return &g_settings.fsr3_cas_sharpness;
+    case TEMPORAL_FSR3: case TEMPORAL_FSR2: return &g_settings.fsr3_cas_sharpness;
     case TEMPORAL_FSR4: return &g_settings.fsr4_cas_sharpness;
     case TEMPORAL_XESS: return &g_settings.xess_cas_sharpness;
     default: return &g_settings.dlss_sharpness;
@@ -146,6 +188,11 @@ void settings_load(void);
 const char *settings_current_file(void);
 void settings_save(void);
 void settings_battery_saver(void);
+// The console mode in effect this run (read once: a change applies at the next start; ODYSSEY_HANDHELD=1 / =0 overrides)
+bool settings_handheld(void);
+// The game's dynamic resolution this run (read once; ODYSSEY_GAME_DYNRES=0 / =1 overrides)
+bool settings_game_dynres(void);
+// The language code to serve the game ("es", "en-US", ...): the setting, or the host locale for LANG_AUTO
 const char *settings_language(void);
 const char *settings_language_name(void);
 bool settings_mod_off(const char *id);

@@ -13,6 +13,7 @@
 #ifdef __linux__
 #include <dirent.h>
 #include <dlfcn.h>
+#include <execinfo.h>
 #include <sys/stat.h>
 #include <pthread.h>
 #include <signal.h>
@@ -29,6 +30,11 @@
 #include "rt.h"
 
 #define MAXS (1 << 20)
+// ODYSSEY_SAMPLE_STACK=1: each sample with its callers (glibc backtrace from the signal handler - the unwind tables;
+// warmed up once before sampling. A debugging tool: not strictly signal-safe)
+#define STK 14
+static int g_stack;
+static uintptr_t (*g_stk)[STK];
 static uintptr_t *g_pcs;
 static _Atomic unsigned g_n;
 static volatile int g_on;
@@ -47,6 +53,11 @@ static void on_prof(int sig, siginfo_t *si, void *uc_) {
 #endif
     unsigned i = atomic_fetch_add(&g_n, 1);
     if (i < MAXS) g_pcs[i] = pc;
+    if (g_stack && i < MAXS) {
+        void *bt[STK + 3];
+        int n = backtrace(bt, STK + 3);  // ([0] this handler, [1] the signal trampoline, [2] the interrupted pc)
+        for (int k = 0; k < STK; k++) g_stk[i][k] = k + 3 < n ? (uintptr_t)bt[k + 3] : 0;
+    }
 }
 
 // The process's busiest thread over half a second (its CPU time: /proc/self/task/<tid>/stat utime + stime) - the
@@ -90,11 +101,33 @@ static pid_t busiest_thread(void) {
     return best;
 }
 
+// ODYSSEY_SAMPLE_THREAD_NAME=<prefix>: the thread whose name (/proc/.../comm: "g83 c0 p45" for guest thread 83,
+// "render", ...) starts with it, instead of the busiest one (0: none found)
+static pid_t thread_by_name(const char *prefix) {
+    char path[64];
+    snprintf(path, sizeof path, "/proc/%d/task", (int)getpid());
+    DIR *d = opendir(path);
+    pid_t found = 0;
+    for (struct dirent *e; d && (e = readdir(d)) && !found;) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        char p[96], name[64] = "";
+        snprintf(p, sizeof p, "/proc/%d/task/%s/comm", (int)getpid(), e->d_name);
+        FILE *f = fopen(p, "r");
+        if (f && fgets(name, sizeof name, f) && !strncmp(name, prefix, strlen(prefix))) found = (pid_t)atoi(e->d_name);
+        if (f) fclose(f);
+    }
+    if (d) closedir(d);
+    return found;
+}
+
 static void *ticker(void *a) {
     (void)a;
     pid_t pid = getpid();
     pid_t presenter = g_tid;
-    g_tid = busiest_thread();
+    const char *want = getenv("ODYSSEY_SAMPLE_THREAD_NAME");
+    // ("present": the thread that presents - the game's main thread - by its id, not a name)
+    pid_t named = want && !strcmp(want, "present") ? presenter : want && *want ? thread_by_name(want) : 0;
+    g_tid = named ? named : busiest_thread();
     LOG("[sample] sampling thread %d (the presenting thread is %d)\n", (int)g_tid, (int)presenter);
     struct timespec ts = {0, 500 * 1000};  // (2 kHz)
     while (g_on) {
@@ -115,6 +148,35 @@ static void dump(void) {
     unsigned n = atomic_load(&g_n);
     if (n > MAXS) n = MAXS;
     Row *r = malloc(sizeof *r * (n ? n : 1));
+    if (g_stack) {  // (the call chains: "count pc <- caller <- ..." per distinct chain, most first)
+        FILE *f = fopen("build/stacks.txt", "w");
+        typedef struct { uintptr_t k[STK + 1]; unsigned c; } Chain;
+        Chain *ch = calloc(n ? n : 1, sizeof *ch);
+        unsigned nc = 0;
+        for (unsigned i = 0; i < n; i++) {
+            uintptr_t key[STK + 1] = {g_pcs[i]};
+            memcpy(key + 1, g_stk[i], sizeof g_stk[i]);
+            unsigned j = 0;
+            for (; j < nc && memcmp(ch[j].k, key, sizeof key); j++) {}
+            if (j == nc && nc < 20000) memcpy(ch[nc++].k, key, sizeof key);
+            if (j < nc) ch[j].c++;
+        }
+        for (unsigned a = 0; a < nc; a++)  // (most first: a simple selection, a debugging tool)
+            for (unsigned b = a + 1; b < nc; b++) if (ch[b].c > ch[a].c) { Chain t = ch[a]; ch[a] = ch[b]; ch[b] = t; }
+        for (unsigned a = 0; f && a < nc && a < 300; a++) {
+            fprintf(f, "%u", ch[a].c);
+            for (int k = 0; k <= STK && ch[a].k[k]; k++) {
+                Dl_info di;
+                if (dladdr((void *)ch[a].k[k], &di) && di.dli_fname)
+                    fprintf(f, " %s+%#lx", strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname,
+                            (unsigned long)(ch[a].k[k] - (uintptr_t)di.dli_fbase));
+                else fprintf(f, " ?+%#lx", (unsigned long)ch[a].k[k]);
+            }
+            fprintf(f, "\n");
+        }
+        if (f) fclose(f);
+        free(ch);
+    }
     for (unsigned i = 0; i < n; i++) r[i] = (Row){g_pcs[i], 1};
     qsort(r, n, sizeof *r, by_pc);
     unsigned m = 0;
@@ -152,6 +214,11 @@ void sampler_frame(uint64_t frame) {
     if ((long)frame == at && !g_on) {
         g_pcs = malloc(sizeof *g_pcs * MAXS);
         if (!g_pcs) { at = -1; return; }
+        if (getenv("ODYSSEY_SAMPLE_STACK") && (g_stk = calloc(MAXS, sizeof *g_stk))) {
+            void *warm[4];
+            backtrace(warm, 4);  // (loads the unwinder now, not inside a signal handler)
+            g_stack = 1;
+        }
         struct sigaction sa = {0};
         sa.sa_sigaction = on_prof;
         sa.sa_flags = SA_SIGINFO | SA_RESTART;

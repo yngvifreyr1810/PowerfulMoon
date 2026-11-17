@@ -21,6 +21,7 @@ typedef struct {
     // of them: replacing a game file / new / also in a mod before it in the list (that one's is used) / in a folder
     // the game doesn't have (left out)
     int replaced, added, shadowed, skipped;
+    unsigned ptbr_paths, ptbr_matches;  // Caminhos conhecidos e hashes reconhecidos, um bit por arquivo.
 } ModInfo;
 
 // One file of a switched-on mod (runtime/services/fs.c): its path in the RomFS and on the host

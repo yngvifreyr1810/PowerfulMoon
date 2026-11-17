@@ -24,3 +24,4 @@ void rq_drain(void);                              // until everything queued so 
 void rq_present_throttle(void);                   // until no present is queued: one frame ahead at most
 uint64_t rq_last_ticket(void);                    // the newest item's ticket
 bool rq_is_done(uint64_t ticket);                 // that item is done (no waiting)
+uint64_t rq_done_ticket(void);                    // the last ticket the render thread finished

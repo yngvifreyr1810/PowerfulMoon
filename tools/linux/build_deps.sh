@@ -29,6 +29,8 @@ fetch https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sd
       6d1bb65e49520344cc0a48af3dc02e993781efff14c7ebdcb8ae9fa23ddf7e83 Vulkan-Headers-1.4.350.1.tar.gz
 fetch https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/archive/refs/tags/v3.3.0.tar.gz \
       c4f6bbe6b5a45c2eb610ca9d231158e313086d5b1a40c9922cb42b597419b14e VulkanMemoryAllocator-3.3.0.tar.gz
+fetch https://github.com/libarchive/libarchive/releases/download/v3.8.11/libarchive-3.8.11.tar.xz \
+      a3dc0872b1b39da34dc18ef1b944f0f11ffd37425d70ae04be679279f1cf43d2 libarchive-3.8.11.tar.xz
 
 # cross build: clang targets aarch64 against the sysroot (the arm64 image's -dev packages)
 CMAKE_CROSS=()
@@ -59,6 +61,20 @@ EOF
               --nm=llvm-nm --ar=llvm-ar --ranlib=llvm-ranlib --strip=llvm-strip)
 else
     FF_CROSS=(--cc=clang --cxx=clang++)
+fi
+
+if [ ! -f "$P/bin/bsdtar" ]; then
+    unpack libarchive-3.8.11.tar.xz libarchive
+    cmake -S "$W/libarchive" -B "$W/libarchive/build-out" -G Ninja "${CMAKE_CROSS[@]}" \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DENABLE_TAR=ON -DENABLE_TAR_SHARED=OFF \
+        -DENABLE_TEST=OFF -DENABLE_INSTALL=OFF -DENABLE_CPIO=OFF -DENABLE_CAT=OFF -DENABLE_UNZIP=OFF \
+        -DENABLE_OPENSSL=OFF -DENABLE_NETTLE=OFF -DENABLE_MBEDTLS=OFF -DENABLE_LIBB2=OFF \
+        -DENABLE_MD=OFF -DENABLE_LZ4=OFF -DENABLE_LZO=OFF -DENABLE_LZMA=OFF -DENABLE_ZSTD=OFF \
+        -DENABLE_ZLIB=OFF -DENABLE_BZip2=OFF -DENABLE_LIBXML2=OFF -DENABLE_BSDXML=OFF \
+        -DENABLE_EXPAT=OFF -DENABLE_PCREPOSIX=OFF -DENABLE_PCRE2POSIX=OFF -DENABLE_ACL=OFF -DENABLE_XATTR=OFF
+    cmake --build "$W/libarchive/build-out" --target bsdtar -j"$JOBS"
+    mkdir -p "$P/bin"
+    cp "$W/libarchive/build-out/bin/bsdtar" "$P/bin/"
 fi
 
 if [ ! -f "$P/include/vulkan/vulkan.h" ]; then

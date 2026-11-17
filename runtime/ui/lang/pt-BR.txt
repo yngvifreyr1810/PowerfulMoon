@@ -1,0 +1,228 @@
+# Brazilian Portuguese (Português do Brasil) for the F1 menu and the configuration page - runtime/ui/i18n.mm.
+# One per line: English ||| Portuguese (keep the English exactly as the menu shows it).
+Display ||| Tela
+Graphics ||| Gráficos
+Performance ||| Desempenho
+Audio ||| Áudio
+Controls ||| Controles
+Mods ||| Mods
+Updates ||| Atualizações
+Quit ||| Sair
+On ||| Ligado
+Off ||| Desligado
+Auto ||| Automático
+None ||| Nenhum
+Default ||| Padrão
+Game ||| Jogo
+English ||| Inglês
+Monitor ||| Monitor
+Moves the game to the selected display. Works in windowed, borderless and exclusive fullscreen. Current display leaves window placement to you. Display numbers follow the connected display list; select again if that list changes. An unavailable display falls back to the primary display. ||| Move o jogo para a tela selecionada. Funciona em janela, sem bordas e em tela cheia exclusiva. "Tela atual" deixa o posicionamento da janela com você. A numeração das telas segue a lista de telas conectadas; selecione de novo se a lista mudar. Uma tela indisponível volta para a tela principal.
+Current display ||| Tela atual
+Display mode ||| Modo de tela
+Borderless uses the desktop's resolution. Exclusive fullscreen requests a monitor display mode. F11 and Alt+Enter toggle between the window and your last fullscreen mode. ||| Sem bordas usa a resolução da área de trabalho. Tela cheia exclusiva pede um modo de vídeo ao monitor. F11 e Alt+Enter alternam entre a janela e o último modo de tela cheia usado.
+Windowed ||| Janela
+Borderless ||| Sem bordas
+Exclusive fullscreen ||| Tela cheia exclusiva
+Display resolution ||| Resolução da tela
+The window's size, or in exclusive fullscreen the monitor's mode - the sizes your monitor offers. Desktop: the current window size, or the desktop's resolution in exclusive fullscreen. Borderless always uses the desktop resolution. ||| O tamanho da janela ou, em tela cheia exclusiva, o modo do monitor - os tamanhos que o seu monitor oferece. Área de trabalho: o tamanho atual da janela, ou a resolução da área de trabalho em tela cheia exclusiva. Sem bordas sempre usa a resolução da área de trabalho.
+Desktop ||| Área de trabalho
+Refresh rate ||| Taxa de atualização
+VSync ||| VSync
+On: no tearing, the game keeps its own steady pace (recommended). Off: frames go out the moment they're done - the lowest latency, with tearing. Strict: each frame waits for the screen's next refresh (classic vsync; a late frame waits a whole refresh). Adaptive: as Strict, but a late frame goes out at once (tearing only then). Where the GPU or driver lacks one, the closest it has is used. ||| Ligado: sem tearing, o jogo mantém o próprio ritmo constante (recomendado). Desligado: os quadros saem assim que ficam prontos - a menor latência, com tearing. Estrito: cada quadro espera a próxima atualização da tela (vsync clássico; um quadro atrasado espera uma atualização inteira). Adaptativo: como o Estrito, mas um quadro atrasado sai na hora (há tearing só nesse caso). Se a GPU ou o driver não tiver um modo, usa-se o mais próximo disponível.
+Off (tearing) ||| Desligado (com tearing)
+Strict ||| Estrito
+Adaptive ||| Adaptativo
+Screen shape ||| Formato da tela
+Aspect ratio ||| Proporção da imagem
+The picture's shape, on any screen. 16:9: the Switch's picture. Fill window: the screen's own shape. 16:10, 21:9, 32:9, 4:3: that shape - where the screen's is different, black bars fill the rest (21:9 on a 16:9 TV: bars above and below; 16:9 on an ultrawide: bars at the sides). A wider shape shows more of the world at the sides, a narrower one a little less; the HUD keeps its shape and stays in the corners of the picture. ||| O formato da imagem, em qualquer tela. 16:9: a imagem do Switch. Preencher janela: o formato da própria tela. 16:10, 21:9, 32:9, 4:3: esse formato - onde o da tela for diferente, faixas pretas preenchem o resto (21:9 numa TV 16:9: faixas em cima e embaixo; 16:9 num ultrawide: faixas nas laterais). Um formato mais largo mostra mais do mundo nas laterais, um mais estreito mostra um pouco menos; a HUD mantém o formato e fica nos cantos da imagem.
+Fill window ||| Preencher janela
+Console mode ||| Modo do console
+What the game is told it runs as. Docked: its TV rendering (1600 x 900 before scaling, docked effects). Handheld: its own handheld rendering (1280 x 720, lighter effects), as on a Switch Lite - much less work for the GPU, for handhelds and low-power PCs. Applies at the next start. ||| O que o jogo acha que é. Dock (TV): a renderização de TV (1600 x 900 antes do escalonamento, efeitos do modo dock). Portátil: a renderização portátil do próprio jogo (1280 x 720, efeitos mais leves), como num Switch Lite - bem menos trabalho para a GPU, para portáteis e PCs de baixo consumo. Vale a partir da próxima inicialização.
+Docked (TV) ||| Dock (TV)
+Handheld ||| Portátil
+Dynamic resolution ||| Resolução dinâmica
+On: as on the Switch - the game lowers its resolution when frames take long. Off: always its full resolution (sharper; needs a fast enough GPU or a higher power limit). Applies at the next start. ||| Ligado: como no Switch - o jogo reduz a resolução quando os quadros demoram. Desligado: sempre a resolução máxima do jogo (mais nítida; exige uma GPU rápida o bastante ou um limite de energia maior). Vale a partir da próxima inicialização.
+Resolution ||| Resolução
+Internal resolution ||| Resolução interna
+Match display ||| Igual à tela
+Dynamic ||| Dinâmica
+Spatial upscaler ||| Escalonador espacial
+How the image is scaled up to the window when it renders at a lower resolution. AMD FSR 1: edge-aware upscaling and sharpening, sharper. Bilinear: plain and soft. ||| Como a imagem é ampliada até a janela quando é renderizada numa resolução menor. AMD FSR 1: ampliação com detecção de bordas e nitidez, mais nítida. Bilinear: simples e suave.
+Bilinear ||| Bilinear
+Anti-aliasing ||| Antisserrilhado
+Smooths jagged edges of the game image before it is scaled to the window. SMAA: finds the edges and blends only along them, so textures stay sharp. Most useful at a lower internal resolution. ||| Suaviza as bordas serrilhadas da imagem do jogo antes de ela ser ampliada até a janela. SMAA: encontra as bordas e mistura só ao longo delas, mantendo as texturas nítidas. Mais útil numa resolução interna menor.
+Temporal upscaling ||| Upscaling temporal
+Temporal upscaler ||| Upscaler temporal
+Selects the temporal anti-aliasing/upscaling technique. Each keeps its own mode and sharpening settings. Changes during play. ||| Escolhe a técnica de antisserrilhado/upscaling temporal. Cada uma guarda o próprio modo e os próprios ajustes de nitidez. Muda durante o jogo.
+DLSS mode ||| Modo DLSS
+DLAA anti-aliases at display resolution. Quality, Balanced and Performance render at progressively lower resolutions. Changes apply during play; history resets while the new mode is prepared. ||| O DLAA aplica antisserrilhado na resolução da tela. Qualidade, Equilibrado e Desempenho renderizam em resoluções progressivamente menores. As mudanças valem durante o jogo; o histórico é reiniciado enquanto o novo modo é preparado.
+Quality ||| Qualidade
+Balanced ||| Equilibrado
+DLSS preset ||| Predefinição DLSS
+Model hint for NVIDIA DLSS. Default uses K for DLAA/Quality/Balanced and M for Performance. Changes during play. ||| Dica de modelo para o NVIDIA DLSS. Padrão usa o K para DLAA/Qualidade/Equilibrado e o M para Desempenho. Muda durante o jogo.
+DLSS sharpness (RCAS) ||| Nitidez do DLSS (RCAS)
+FSR sharpness ||| Nitidez do FSR
+XeSS sharpness (RCAS) ||| Nitidez do XeSS (RCAS)
+Reconstruction sharpening. 0% bypasses it. Saved independently for each technique; changes at once. ||| Nitidez da reconstrução. 0% a desativa. Guardada separadamente para cada técnica; vale na hora.
+CAS sharpening ||| Nitidez CAS
+Optional CAS after reconstruction, independent of the sharpening above. ||| CAS opcional após a reconstrução, independente da nitidez acima.
+CAS sharpness ||| Intensidade do CAS
+Optional CAS strength, saved separately for each technique. 0% bypasses the pass. ||| Intensidade do CAS opcional, guardada separadamente para cada técnica. 0% desativa a etapa.
+Sharpness ||| Nitidez
+Image ||| Imagem
+Anisotropic filtering ||| Filtragem anisotrópica
+Keeps ground, roads and walls seen at a shallow angle sharp into the distance. Only surface textures are raised; shadows and screen effects keep the game's setting. Game: the level the game asks for, as on the Switch. ||| Mantém nítidos até a distância o chão, as estradas e as paredes vistos em ângulo raso. Só as texturas das superfícies são aumentadas; sombras e efeitos de tela mantêm o ajuste do jogo. Jogo: o nível que o jogo pede, como no Switch.
+Smooth gradients ||| Gradientes suaves
+Removes the visible color steps (banding) in skies, fog and dark areas: the game's image keeps more precision until it reaches the screen and gets a fine dither there. Off: as on the Switch. ||| Remove os degraus de cor visíveis (banding) em céus, névoa e áreas escuras: a imagem do jogo mantém mais precisão até chegar à tela e recebe um dither fino ali. Desligado: como no Switch.
+Frame rate ||| Taxa de quadros
+90 and 120 FPS draw up to 90 or 120 frames per second while gameplay runs at its original 60 Hz. Use a display that refreshes at least that fast (90 Hz: Steam Deck OLED). 60 FPS matches the Switch and uses the least power. Changes at once. ||| 90 e 120 FPS desenham até 90 ou 120 quadros por segundo enquanto a jogabilidade continua nos 60 Hz originais. Use uma tela que atualize pelo menos nessa taxa (90 Hz: Steam Deck OLED). 60 FPS equivale ao Switch e gasta menos energia. Vale na hora.
+120 FPS interpolation (experimental) ||| Interpolação a 120 FPS (experimental)
+Experimental: some players' games crashed with it on (NVIDIA and AMD) - turn it off if the game crashes. Available with Frame rate set to 60 FPS and DLSS off. Adds an image between game frames, targeting 120 FPS on a 120 Hz or faster display. Busy scenes can temporarily fall back to 60 FPS. ||| Experimental: o jogo travou para alguns jogadores com isto ligado (NVIDIA e AMD) - desligue se o jogo travar. Disponível com a Taxa de quadros em 60 FPS e o DLSS desligado. Cria uma imagem entre os quadros do jogo, visando 120 FPS numa tela de 120 Hz ou mais. Cenas pesadas podem voltar temporariamente a 60 FPS.
+Power ||| Energia
+Battery saver ||| Economia de bateria
+Sets lighter settings for handhelds and laptops on battery: 75% internal resolution upscaled with FSR 1, no SMAA, no 120 FPS or interpolation, 4x texture filtering. The game itself still runs at its normal speed. On a Steam Deck, also lower the power limit in the Quick Access menu (Performance > TDP Limit) for the biggest savings. Some changes apply at the next start. ||| Aplica ajustes mais leves para portáteis e notebooks na bateria: resolução interna de 75% ampliada com FSR 1, sem SMAA, sem 120 FPS nem interpolação, filtragem de textura 4x. O jogo em si continua na velocidade normal. No Steam Deck, reduza também o limite de energia no menu de acesso rápido (Desempenho > Limite de TDP) para economizar mais. Algumas mudanças valem a partir da próxima inicialização.
+Overlay ||| Overlay
+Show FPS ||| Mostrar FPS
+Shows the frame rate in the top right corner. ||| Mostra a taxa de quadros no canto superior direito.
+Performance overlay ||| Overlay de desempenho
+Shows the frame rate and frame times with a graph, GPU / CPU / memory use, temperatures and power where your PC reports them, the upscaler and resolution, and Mario's position. Hidden while this menu is open. Choose its parts below. ||| Mostra a taxa de quadros e os tempos de quadro com um gráfico, o uso de GPU / CPU / memória, temperaturas e consumo onde o seu PC informar, o upscaler e a resolução, e a posição do Mario. Fica oculto enquanto este menu está aberto. Escolha as partes abaixo.
+Overlay position ||| Posição do overlay
+The corner of the picture the performance overlay sits in. ||| O canto da imagem onde fica o overlay de desempenho.
+Top right ||| Superior direito
+Top left ||| Superior esquerdo
+Bottom right ||| Inferior direito
+Bottom left ||| Inferior esquerdo
+Overlay size ||| Tamanho do overlay
+The size of the performance overlay's text. ||| O tamanho do texto do overlay de desempenho.
+Small ||| Pequeno
+Medium ||| Médio
+Large ||| Grande
+Overlay background ||| Fundo do overlay
+How solid the overlay's background is. 0% shows only the text. ||| Quão opaco é o fundo do overlay. 0% mostra só o texto.
+Show GPU ||| Mostrar GPU
+GPU use, temperature, power draw, video memory and clock speed. Temperature, power and clock need an NVIDIA card, or Linux with an AMD or Intel one. ||| Uso da GPU, temperatura, consumo, memória de vídeo e frequência. Temperatura, consumo e frequência exigem uma placa NVIDIA, ou Linux com uma AMD ou Intel.
+Show CPU ||| Mostrar CPU
+CPU use, the game's own share of it, and on Linux the CPU's temperature. ||| Uso da CPU, a parcela do próprio jogo e, no Linux, a temperatura da CPU.
+Show memory ||| Mostrar memória
+The PC's memory in use, and the game's own. ||| A memória do PC em uso e a do próprio jogo.
+Show frame time graph ||| Mostrar gráfico de tempo de quadro
+A line of the last frames' times: flat when the game runs evenly, a spike at each hitch. ||| Uma linha com os tempos dos últimos quadros: plana quando o jogo roda de forma uniforme, com um pico a cada travada.
+Show hardware names ||| Mostrar nomes do hardware
+The names of the graphics card and the processor. ||| Os nomes da placa de vídeo e do processador.
+Show upscaler and resolution ||| Mostrar upscaler e resolução
+The upscaler and anti-aliasing in use, and the game's internal resolution next to its size on screen. ||| O upscaler e o antisserrilhado em uso, e a resolução interna do jogo ao lado do tamanho dele na tela.
+Show Mario's position ||| Mostrar a posição do Mario
+Mario's position in the kingdom, in metres. Useful for bug reports. ||| A posição do Mario no reino, em metros. Útil para relatar bugs.
+Shaders ||| Shaders
+Memory use ||| Uso de memória
+Normal builds the shaders of everything an area loads ahead of time, for fewer stutters (about 9 GB of RAM with an NVIDIA GPU). Low builds each shader the first time it is drawn: a short stutter the first time, about 6.5 GB. Auto picks Low on a PC with less than 12 GB of RAM. The game itself needs about 3.5 GB, so 4 GB of RAM is not enough. Takes effect at the next start. ||| Normal compila antecipadamente os shaders de tudo o que uma área carrega, para menos travadas (cerca de 9 GB de RAM com uma GPU NVIDIA). Baixo compila cada shader na primeira vez que ele é desenhado: uma travada curta nessa primeira vez, cerca de 6,5 GB. Automático escolhe Baixo num PC com menos de 12 GB de RAM. O jogo em si precisa de cerca de 3,5 GB, então 4 GB de RAM não bastam. Vale a partir da próxima inicialização.
+Normal ||| Normal
+Low ||| Baixo
+Long ||| Longo
+Preload area shaders ||| Pré-carregar shaders da área
+Builds the shaders of everything an area loads right away, to reduce stalls and objects popping in. Uses a lot of memory (the graphics driver keeps them), so it stops at a quarter of your RAM or 8 GB. Shaders the game has drawn before are built ahead either way. Applies to areas loaded from now on. ||| Compila na hora os shaders de tudo o que uma área carrega, para reduzir engasgos e objetos que aparecem do nada. Usa muita memória (o driver gráfico os mantém), então para em um quarto da sua RAM ou 8 GB. Os shaders que o jogo já desenhou antes são compilados antecipadamente de qualquer forma. Vale para as áreas carregadas daqui em diante.
+Asynchronous shader building ||| Compilação assíncrona de shaders
+On: when something is drawn before its shader is ready, the game keeps running and the object appears a moment later (or the picture is held for a frame) - no stutter. Off: nothing is ever missing, but the game pauses while the shader builds (a short hitch). ||| Ligado: quando algo é desenhado antes de o shader ficar pronto, o jogo continua rodando e o objeto aparece um instante depois (ou a imagem fica parada por um quadro) - sem travadas. Desligado: nada nunca fica faltando, mas o jogo pausa enquanto o shader é compilado (uma travada curta).
+Warm-up at start ||| Aquecimento na inicialização
+How long the game spends at start getting the pipelines it has seen ready, so effects don't stutter the first time they appear. Normal: up to 15 s and 3 GB of memory. Long: up to 30 s and 12 GB (at most half of this PC's memory). Auto: Long with 16 GB of memory or more. Applies at the next start. ||| Quanto tempo o jogo gasta, ao iniciar, deixando prontos os pipelines que já viu, para que os efeitos não travem na primeira vez que aparecem. Normal: até 15 s e 3 GB de memória. Longo: até 30 s e 12 GB (no máximo metade da memória deste PC). Automático: Longo com 16 GB de memória ou mais. Vale a partir da próxima inicialização.
+Compile shaders ||| Compilar shaders
+Compiles the game's shader archives and pipeline states recorded during play at the next start. A progress window shows both passes. Use after a driver update or after visiting new areas. ||| Compila, na próxima inicialização, os arquivos de shaders do jogo e os estados de pipeline gravados durante o jogo. Uma janela de progresso mostra as duas etapas. Use depois de atualizar o driver ou de visitar áreas novas.
+Sound ||| Som
+Volume ||| Volume
+The game's volume. 100% is the game's own level; above it, louder. ||| O volume do jogo. 100% é o nível do próprio jogo; acima disso, mais alto.
+Reverb ||| Reverberação
+The game's echo effect in caves and big rooms. ||| O efeito de eco do jogo em cavernas e salas grandes.
+Movie audio ||| Áudio dos vídeos
+Sound in the game's videos (e.g. the control tips). Applies the next time a video starts. ||| O som dos vídeos do jogo (por exemplo, as dicas de controle). Vale na próxima vez que um vídeo começar.
+Mute in background ||| Silenciar em segundo plano
+No sound while the game's window isn't in front (another window is active). The sound comes back as soon as you switch back. ||| Sem som enquanto a janela do jogo não está à frente (outra janela está ativa). O som volta assim que você retorna.
+System language ||| Idioma do sistema
+Language ||| Idioma
+The game's text language. Auto keeps the one your save has (the game's own Options > Language changes it); any other choice replaces it. Applies the next time the game starts. ||| O idioma do texto do jogo. Automático mantém o do seu save (o menu Opções > Idioma do próprio jogo o altera); qualquer outra escolha o substitui. Vale na próxima vez que o jogo iniciar.
+Menu language ||| Idioma do menu
+This menu's own language. Auto: the game's language when the menu has a translation for it (Korean, Brazilian Portuguese), else English. Applies the next time the game starts. ||| Idioma deste menu e da tela de configuração. Automático: o idioma do jogo, quando o menu tem uma tradução para ele (coreano, português do Brasil); senão, inglês. Vale na próxima vez que o jogo iniciar.
+Controller ||| Controle
+Motion controls ||| Controles de movimento
+The controller's gyro and accelerometer for the game's motion moves: shake it to throw Cappy at a target, spin him, or tilt where the game asks. Needs a controller with motion sensors (PlayStation, Switch Pro, Steam Deck). ||| O giroscópio e o acelerômetro do controle para os movimentos do jogo: balance-o para lançar o Cappy num alvo, girá-lo ou incline onde o jogo pedir. Exige um controle com sensores de movimento (PlayStation, Switch Pro, Steam Deck).
+Shake button ||| Botão de balançar
+Shake key ||| Tecla de balançar
+Middle mouse button ||| Botão do meio do mouse
+Mouse button 4 ||| Botão 4 do mouse
+Mouse button 5 ||| Botão 5 do mouse
+Left stick press ||| Pressionar o analógico esquerdo
+Right stick press ||| Pressionar o analógico direito
+Right paddle 1 ||| Paddle direito 1
+Left paddle 1 ||| Paddle esquerdo 1
+Right paddle 2 ||| Paddle direito 2
+Left paddle 2 ||| Paddle esquerdo 2
+Touchpad ||| Touchpad
+Share / Capture ||| Compartilhar / Capturar
+Shake without moving the controller: while this button or key is held, the game sees the controller shaken - the motion cap throw (homing at a target), spins and shake moves. Works with Motion controls off and on controllers or keyboards without motion sensors. If a key is also bound to a game button, it does both. ||| Balançar sem mover o controle: enquanto este botão ou tecla estiver pressionado, o jogo vê o controle balançando - o arremesso do chapéu com movimento (mirando num alvo), giros e movimentos de balançar. Funciona com os Controles de movimento ligados ou desligados, e em controles ou teclados sem sensores de movimento. Se uma tecla também estiver associada a um botão do jogo, ela faz as duas coisas.
+Vibration ||| Vibração
+The controller's rumble, as the game sends it (the Switch's HD rumble on the controller's motors). Turn it off for no rumble at all; DualSense and Switch Pro controllers use their own motors through it. ||| A vibração do controle, como o jogo a envia (a vibração HD do Switch nos motores do controle). Desligue para nenhuma vibração; os controles DualSense e Switch Pro usam os próprios motores por meio dela.
+Stick deadzone ||| Zona morta do analógico
+How far a controller stick moves before it counts. Raise it if Mario or the camera drifts on their own. ||| Quanto o analógico precisa se mover para contar. Aumente se o Mario ou a câmera se mexerem sozinhos.
+Stick camera ||| Câmera pelo analógico
+Stick horizontal speed ||| Velocidade horizontal do analógico
+Stick vertical speed ||| Velocidade vertical do analógico
+Invert stick horizontal ||| Inverter analógico na horizontal
+Invert stick vertical ||| Inverter analógico na vertical
+The main gameplay camera only. Mario's movement and menu navigation keep their normal controls. The game's own camera inversion options also apply. ||| Só a câmera principal do jogo. O movimento do Mario e a navegação nos menus mantêm os controles normais. As opções de inversão de câmera do próprio jogo também valem.
+Mouse ||| Mouse
+Mouse camera ||| Câmera pelo mouse
+Moving the mouse turns the camera. While you play, the pointer stays in the window; it is free again in this menu (Esc) or when you switch to another window. ||| Mover o mouse gira a câmera. Enquanto você joga, o ponteiro fica na janela; ele é liberado de novo neste menu (Esc) ou quando você troca de janela.
+Mouse horizontal speed ||| Velocidade horizontal do mouse
+Mouse vertical speed ||| Velocidade vertical do mouse
+Separate speed for each mouse axis. A quick flick turns the camera faster still. ||| Velocidade separada para cada eixo do mouse. Um movimento rápido gira a câmera ainda mais depressa.
+Invert mouse left / right ||| Inverter mouse esquerda / direita
+Invert mouse up / down ||| Inverter mouse cima / baixo
+Moving the mouse up turns the camera down instead. ||| Mover o mouse para cima gira a câmera para baixo.
+Button prompts ||| Ícones dos botões
+The game's button icons. Auto switches as you play: the keys you bound (and the mouse for the camera) after you use the keyboard or mouse, the controller's own buttons (Xbox, PlayStation or Switch) after you use a controller. Controller always shows the connected controller's; Switch, Xbox and PlayStation always those. ||| Os ícones de botão do jogo. Automático troca conforme você joga: as teclas que você associou (e o mouse para a câmera) depois de usar o teclado ou o mouse, os botões do próprio controle (Xbox, PlayStation ou Switch) depois de usar um controle. Controle sempre mostra os do controle conectado; Switch, Xbox e PlayStation sempre os respectivos.
+Keyboard ||| Teclado
+Skip the start-up controller screen ||| Pular a tela inicial de controles
+Leaves out the wait on the Joy-Con instructions screen before the title screen. Applies at the next start. The game's own tips while playing ("You can also shake the controller", the Joy-Con videos) stay, as on the Switch. ||| Elimina a espera na tela de instruções dos Joy-Con antes da tela de título. Vale a partir da próxima inicialização. As dicas do próprio jogo durante a partida ("Você também pode balançar o controle", os vídeos dos Joy-Con) continuam, como no Switch.
+Menu ||| Menu
+No mods found ||| Nenhum mod encontrado
+Put each mod in its own folder in here, with its romfs folder inside - as mods for the Switch emulators come: mods/<Mod name>/romfs/...\n\nMods made for version 1.0.0 of the game work best. If two mods change the same file, the one higher in the list wins.\n\nCode mods (exefs: IPS / pchtxt patches, Super Mario Odyssey: Online) can't be used: the game code is recompiled from the original game on your PC. ||| Coloque cada mod na própria pasta aqui, com a pasta romfs dentro - como os mods para os emuladores de Switch vêm: mods/<Nome do mod>/romfs/...\n\nMods feitos para a versão 1.0.0 do jogo funcionam melhor. Se dois mods alteram o mesmo arquivo, vale o que estiver mais acima na lista.\n\nMods de código (exefs: patches IPS / pchtxt, Super Mario Odyssey: Online) não podem ser usados: o código do jogo é recompilado a partir do jogo original no seu PC.
+Folder ||| Pasta
+Open mods folder ||| Abrir pasta de mods
+This version ||| Esta versão
+The version of Super Odyssey PC Recomp you're running. ||| A versão do Super Odyssey PC Recomp que você está executando.
+Check for updates ||| Procurar atualizações
+Looks for a newer release on the project's GitHub page. ||| Procura uma versão mais nova na página do projeto no GitHub.
+Check now ||| Procurar agora
+Project page ||| Página do projeto
+Opens the project's GitHub page in your browser. ||| Abre a página do projeto no GitHub no seu navegador.
+Check at start ||| Procurar ao iniciar
+Looks for a new release each time the game starts (in the background; only GitHub is contacted, and nothing about you or your game is sent). ||| Procura uma versão nova a cada vez que o jogo inicia (em segundo plano; só o GitHub é contatado, e nada sobre você ou seu jogo é enviado).
+Quit to Desktop ||| Sair para a área de trabalho
+Closes Super Odyssey PC Recomp after confirmation. ||| Fecha o Super Odyssey PC Recomp após uma confirmação.
+Diagnostics ||| Diagnóstico
+Copy crash report ||| Copiar relatório de falha
+Creates one text file with the saved settings, log, hardware/driver and fault details. Copies its path to paste into the attachment file picker. Includes local paths; nothing is uploaded. ||| Cria um arquivo de texto com as configurações salvas, o log, os detalhes de hardware/driver e da falha. Copia o caminho dele para colar no seletor de anexos. Inclui caminhos locais; nada é enviado.
+Create file ||| Criar arquivo
+Configuration ||| Configuração
+Play ||| Jogar
+Exit ||| Sair
+Show this screen at every start ||| Mostrar esta tela em toda inicialização
+Start: Play ||| Início: Jogar
+Compile the shaders now? ||| Compilar os shaders agora?
+Compiling the shaders ||| Compilando os shaders
+Compile now ||| Compilar agora
+Later ||| Mais tarde
+Stop and play ||| Parar e jogar
+What is compiled so far is kept; the rest is made while you play. ||| O que já foi compilado é mantido; o resto é feito enquanto você joga.
+The game's shaders are turned into ones your GPU runs, once, before playing. Without it they are made the first time each one is needed, which shows as short stutters for a while. It takes a few minutes (about 6 on a Steam Deck) and is only needed again after an update that changes them, or when you ask for it in the menu. ||| Os shaders do jogo são convertidos em shaders que a sua GPU executa, uma vez, antes de jogar. Sem isso, eles são feitos na primeira vez que cada um é necessário, o que aparece como travadas curtas por um tempo. Leva alguns minutos (cerca de 6 num Steam Deck) e só é preciso de novo após uma atualização que os altere, ou quando você pedir no menu.
+Step 1 of 3: translating the game's shaders ||| Etapa 1 de 3: traduzindo os shaders do jogo
+Step 2 of 3: compiling them for your GPU ||| Etapa 2 de 3: compilando para a sua GPU
+Step 3 of 3: compiling the recorded pipelines ||| Etapa 3 de 3: compilando os pipelines gravados
+finding the game's shaders... ||| procurando os shaders do jogo...
+Steam Deck tip: press the ... button, open Performance, turn on Manual GPU Clock Control and set it to 1000 MHz. With a low TDP limit (7-10 W) this keeps the GPU fast enough for a steady 60 FPS. ||| Dica para o Steam Deck: aperte o botão ..., abra Desempenho, ligue o Controle manual de clock da GPU e ajuste para 1000 MHz. Com um limite de TDP baixo (7-10 W), isso mantém a GPU rápida o bastante para 60 FPS estáveis.
+Vibration strength ||| Intensidade da vibração
+The monitor's refresh rate in exclusive fullscreen (windowed and borderless use the desktop's: change it in your system's display settings). Auto: the highest rate your monitor offers that is a multiple of the frame rate (120 Hz on a 144 Hz monitor at 60 FPS), so every frame is shown for the same time - the smoothest picture. Other rates (144 Hz at 60 FPS) show frames for uneven times: judder. ||| A taxa de atualização do monitor em tela cheia exclusiva (janela e sem bordas usam a da área de trabalho: mude nas configurações de vídeo do sistema). Automático: a maior taxa que o monitor oferece e que seja múltipla da taxa de quadros (120 Hz num monitor de 144 Hz a 60 FPS), assim cada quadro aparece pelo mesmo tempo - a imagem mais suave. Outras taxas (144 Hz a 60 FPS) mostram os quadros por tempos desiguais: engasgos.
+Upscaling ||| Upscaling
+Upscale method ||| Método de upscaling
+How the picture is reconstructed and upscaled. Off: the game renders plainly at the internal resolution (the Spatial upscaler above scales it to the window). NVIDIA DLSS, AMD FSR and Intel XeSS: temporal upscaling and anti-aliasing - sharper at a lower internal resolution, needing the GPU and driver for it. Each keeps its own mode and sharpening settings. Changes during play. ||| Como a imagem é reconstruída e ampliada. Desligado: o jogo renderiza normalmente na resolução interna (o Escalonador espacial acima a amplia até a janela). NVIDIA DLSS, AMD FSR e Intel XeSS: upscaling e antisserrilhado temporais - mais nítidos numa resolução interna menor, e exigem a GPU e o driver compatíveis. Cada um guarda o próprio modo e os próprios ajustes de nitidez. Muda durante o jogo.
+Auto ||| Automático
+This covers this menu and the configuration screen. The game's own text language is in Controls > System language. ||| Isto vale para este menu e para a tela de configuração. O idioma do texto do próprio jogo fica em Controles > Idioma do sistema.

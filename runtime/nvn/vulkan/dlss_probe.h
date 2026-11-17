@@ -2,7 +2,7 @@
 
 #include "vk.h"
 
-#ifdef _WIN32
+#ifndef __APPLE__
 typedef struct { float view[12], projection[16]; } DlssCamera;
 void vk_dlss_probe_instance(const char **ext, uint32_t *count, uint32_t capacity);
 void vk_dlss_probe_device(const VkExtensionProperties *have, uint32_t available,

@@ -1,5 +1,6 @@
 #include "settings.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +51,7 @@ Settings g_settings = {
 #endif
     .dlss_sharpness = 20,
     .dlss_rcas_sharpness = 20,
+    .temporal_off = true,
     .fsr3_mode = DLSS_QUALITY,
     .fsr3_sharpness = 20,
     .fsr3_cas_sharpness = 20,
@@ -58,7 +60,10 @@ Settings g_settings = {
     .fsr1_sharpness = 90,
     .deband = true,
     .motion = true, .rumble = true, .hd_rumble = true, .rumble_strength = 1.0f,
+    .motion_shake_pad = -1,
+    .motion_shake_key = 514,  // (BIND_MOUSE_MIDDLE: the middle mouse button - nothing else uses it by default)
     .mouse_camera = true,
+    .game_dynres = true,
     .mouse_sensitivity = 100,
     .mouse_sensitivity_y = 100,
     .stick_camera_x = 100, .stick_camera_y = 100,
@@ -78,6 +83,33 @@ volatile bool g_app_unfocused;
 // gameplay steps once per drawn frame, so a lower frame rate cap would slow the game down, not save power - the savings
 // come from the picture instead: 75% of the display (960 x 600 on a Deck) upscaled with FSR 1, no SMAA, no extra
 // frames (120 FPS, interpolation), 4x anisotropic filtering, the shorter warm-up at start.
+// The Steam Deck's defaults (no settings file yet): the battery saver's, at its own screen's 1280 x 800 rendered and
+// shown 1:1 and filled - the game's view made 16:10 (runtime/hle/odyssey_wide.c) instead of 16:9 with bars (75% + FSR 1
+// before, 2026-11-15).
+static void settings_steam_deck(void) {
+    settings_battery_saver();
+    g_settings.res_mode = RES_DISPLAY;
+    g_settings.aspect = ASPECT_FILL;
+    g_settings.hud_edges = 1;
+    g_settings.console_mode = CONSOLE_HANDHELD;  // (the game's handheld rendering: what a Switch shows on its own screen)
+    g_settings.game_dynres = false;  // (always the full 1280x800: at 7-10 W the game's own drops went to 768x480)
+}
+bool settings_game_dynres(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("ODYSSEY_GAME_DYNRES");
+        v = e && *e ? atoi(e) != 0 : g_settings.game_dynres;
+    }
+    return v;
+}
+bool settings_handheld(void) {
+    static int h = -1;
+    if (h < 0) {
+        const char *e = getenv("ODYSSEY_HANDHELD");
+        h = e && *e ? atoi(e) != 0 : g_settings.console_mode == CONSOLE_HANDHELD;
+    }
+    return h;
+}
 void settings_battery_saver(void) {
     g_settings.res_mode = RES_Q75;
     g_settings.upscaler = UPSCALE_SHARP;
@@ -107,7 +139,7 @@ void settings_warmup_budget(unsigned *ms, unsigned *mb) {
 
 static const char *const dlss_modes[DLSS_MODE_COUNT] = {"off", "dlaa", "quality", "balanced", "performance"};
 static const char *const dlss_presets[DLSS_PRESET_COUNT] = {"default", "k", "l", "m"};
-static const char *const temporal_backends[TEMPORAL_BACKEND_COUNT] = {"dlss", "fsr3", "fsr4", "xess"};
+static const char *const temporal_backends[TEMPORAL_BACKEND_COUNT] = {"dlss", "fsr3", "fsr4", "xess", "fsr2"};
 static const char *const fsr3_modes[DLSS_MODE_COUNT] = {"off", "native", "quality", "balanced", "performance"};
 static const char *const window_modes[WINDOW_MODE_COUNT] = {"windowed", "borderless", "exclusive"};
 static const char *const display_modes[DISPLAY_MODE_COUNT] = {"auto", "1080p", "1440p", "2160p"};
@@ -131,10 +163,10 @@ int settings_aniso_at_start(void) {
 // regionJP/JPja, regionKR/KRkr, regionTW/TWch, regionCN/CNch), and the game picks one from the system language it
 // reads back (runtime/services/am.c), exactly as it does on the console. Codes as the Switch reports them.
 const char *const g_language_codes[N_LANGUAGES] = {"auto", "ja", "en-US", "es", "fr", "de", "it", "nl", "ru", "ko",
-                                                   "zh-CN", "zh-TW"};
+                                                   "zh-CN", "zh-TW", "pt-BR"};
 const char *const g_language_names[N_LANGUAGES] = {"Auto", "Japanese", "English", "Spanish", "French", "German",
                                                    "Italian", "Dutch", "Russian", "Korean", "Chinese (Simplified)",
-                                                   "Chinese (Traditional)"};
+                                                   "Chinese (Traditional)", "Portugu\xc3\xaas (Brasil)"};
 
 // LANG_AUTO: the host's own language (LANG=es_ES.UTF-8 -> es), en-US when it is none of the game's. Linux only:
 // macOS / Windows apps get no locale variables from the system, so Auto is English there (pick one in settings).
@@ -159,10 +191,13 @@ static const char *host_language(void) {
 
 const char *settings_language(void) {
     int i = g_settings.language;
+    // A traducao substitui USen; o jogo nao possui um idioma pt-BR nativo.
+    if (i == LANG_PT_BR) return "en-US";
     return i > LANG_AUTO && i < N_LANGUAGES ? g_language_codes[i] : host_language();
 }
 
 const char *settings_language_name(void) {
+    if (g_settings.language == LANG_PT_BR) return g_language_names[LANG_PT_BR];
     const char *c = settings_language();
     for (int i = 0; i < N_LANGUAGES; i++)
         if (!strcmp(c, g_language_codes[i])) return g_language_names[i];
@@ -242,9 +277,8 @@ void settings_load(void) {
     static bool loaded;
     if (loaded) return;
     loaded = true;
-    // Steam Deck: Dynamic resolution unless chosen otherwise - the game's 1600 x 900 or less, lowered while the GPU can't
-    // hold 60 fps (the screen has 1280 x 800)
-    if (plat_is_steam_deck()) g_settings.res_mode = RES_DYNAMIC;
+    // Steam Deck: the battery saver's settings unless chosen otherwise (the settings file, read below, wins)
+    if (plat_is_steam_deck()) settings_steam_deck();
     FILE *f = fopen(SETTINGS_FILE, "r");
     if (!f && !getenv("ODYSSEY_SETTINGS")) f = fopen("odyssey.ini", "r");  // (the settings of the earlier builds)
     if (!f && !getenv("ODYSSEY_SETTINGS")) f = fopen("larecomp.ini", "r");
@@ -261,12 +295,31 @@ void settings_load(void) {
             g_settings.window_mode = atoi(val) ? BORDERLESS : WINDOWED;
         }
         else if (!strcmp(key, "window_mode")) g_settings.window_mode = named_option(val, window_modes, WINDOW_MODE_COUNT);
-        else if (!strcmp(key, "display_resolution")) g_settings.display_resolution = named_option(val, display_modes, DISPLAY_MODE_COUNT);
+        else if (!strcmp(key, "display_resolution")) {
+            g_settings.display_resolution = named_option(val, display_modes, DISPLAY_MODE_COUNT);
+            if (!g_settings.display_w && settings_display_height(g_settings.display_resolution))  // (the old choices)
+                g_settings.display_h = settings_display_height(g_settings.display_resolution),
+                g_settings.display_w = g_settings.display_h * 16 / 9;
+        }
+        else if (!strcmp(key, "display_size")) {
+            int w = 0, h = 0;
+            if (sscanf(val, "%dx%d", &w, &h) == 2 && w >= 320 && h >= 200 && w <= 16384 && h <= 16384)
+                g_settings.display_w = w, g_settings.display_h = h;
+            else g_settings.display_w = g_settings.display_h = 0;
+        }
+        else if (!strcmp(key, "refresh_rate")) { int r = atoi(val); g_settings.refresh_rate = r >= 0 && r <= 1000 ? r : 0; }
+        else if (!strcmp(key, "vsync")) {
+            static const char *const v[VSYNC_COUNT] = {"on", "off", "strict", "adaptive"};
+            g_settings.vsync = VSYNC_ON;
+            for (int i = 0; i < VSYNC_COUNT; i++) if (!strcmp(val, v[i])) g_settings.vsync = i;
+        }
         else if (!strcmp(key, "monitor")) { int m = atoi(val); g_settings.monitor = m >= 0 && m <= 64 ? m : 0; }
         else if (!strcmp(key, "check_updates")) g_settings.check_updates = atoi(val) != 0;
         else if (!strcmp(key, "mod_off")) settings_set_mod_off(val, true);
         else if (!strcmp(key, "volume")) g_settings.volume = (float)atof(val);
         else if (!strcmp(key, "reverb")) g_settings.reverb = atoi(val) != 0;
+        else if (!strcmp(key, "audio_output"))
+            g_settings.audio_output = !strcmp(val, "stereo") ? AUDIO_OUT_STEREO : !strcmp(val, "5.1") ? AUDIO_OUT_SURROUND : AUDIO_OUT_AUTO;
         else if (!strcmp(key, "movie_audio")) g_settings.movie_audio = atoi(val) != 0;
         else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
         else if (!strcmp(key, "performance_overlay")) g_settings.performance_overlay = atoi(val) != 0;
@@ -280,7 +333,17 @@ void settings_load(void) {
         else if (!strcmp(key, "overlay_hardware")) g_settings.overlay_hardware = atoi(val) != 0;
         else if (!strcmp(key, "overlay_render")) g_settings.overlay_render = atoi(val) != 0;
         else if (!strcmp(key, "overlay_position")) g_settings.overlay_position = atoi(val) != 0;
+        else if (!strcmp(key, "vibration_strength")) { int v = atoi(val); g_settings.rumble_strength = v >= 25 && v <= 100 ? v / 100.0f : 1.0f; }
         else if (!strcmp(key, "motion")) g_settings.motion = atoi(val) != 0;
+        else if (!strcmp(key, "motion_invert_x")) g_settings.motion_invert_x = atoi(val) != 0;
+        else if (!strcmp(key, "motion_invert_y")) g_settings.motion_invert_y = atoi(val) != 0;
+        else if (!strcmp(key, "motion_gyro_bias")) {
+            float b[3];
+            if (sscanf(val, "%f %f %f", &b[0], &b[1], &b[2]) == 3 && fabsf(b[0]) < 0.1f && fabsf(b[1]) < 0.1f && fabsf(b[2]) < 0.1f)
+                memcpy(g_settings.motion_gyro_bias, b, sizeof b);
+        }
+        else if (!strcmp(key, "motion_shake_pad")) { int v = atoi(val); g_settings.motion_shake_pad = v >= -1 && v < 64 ? v : -1; }
+        else if (!strcmp(key, "motion_shake_key")) { int v = atoi(val); g_settings.motion_shake_key = v >= 0 && v < 1024 ? v : 0; }
         else if (!strcmp(key, "stick_deadzone")) g_settings.stick_deadzone = atoi(val) < 0 ? 0 : atoi(val) > 40 ? 40 : atoi(val);
         else if (!strcmp(key, "vibration") || !strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;
         else if (!strcmp(key, "hd_rumble")) g_settings.hd_rumble = atoi(val) != 0;
@@ -288,7 +351,7 @@ void settings_load(void) {
         else if (!strcmp(key, "resolution")) {
             int n = atoi(val);
             g_settings.res_mode = !strcmp(val, "dynamic") ? RES_DYNAMIC : !strcmp(val, "75%") ? RES_Q75 :
-                                  !strcmp(val, "50%") ? RES_Q50 : !strcmp(val, "25%") ? RES_Q25 :
+                                  !strcmp(val, "50%") ? RES_Q50 : !strcmp(val, "25%") ? RES_Q25 : !strcmp(val, "1440p") ? RES_1440 : !strcmp(val, "100%") ? RES_DISPLAY :
                                   (n >= 1 && n <= 4) ? n : n > 4 ? 4 : RES_MATCH;
         }
         else if (!strcmp(key, "upscaler")) g_settings.upscaler = !strcmp(val, "bilinear") ? UPSCALE_BILINEAR : UPSCALE_SHARP;  // (metalfx / fsr1: this OS's)
@@ -296,6 +359,11 @@ void settings_load(void) {
         else if (!strcmp(key, "dlss_mode")) g_settings.dlss_mode = named_option(val, dlss_modes, DLSS_MODE_COUNT);
         else if (!strcmp(key, "dlss_preset")) g_settings.dlss_preset = named_option(val, dlss_presets, DLSS_PRESET_COUNT);
         else if (!strcmp(key, "temporal_backend")) g_settings.temporal_backend = named_option(val, temporal_backends, TEMPORAL_BACKEND_COUNT);
+        else if (!strcmp(key, "upscale_method")) g_settings.temporal_off = !strcmp(val, "off");
+        else if (!strcmp(key, "frame_generation")) g_settings.frame_gen = atoi(val) ? FG_FSR : FG_OFF;  // (0.2.12 dev)
+        else if (!strcmp(key, "frame_gen")) g_settings.frame_gen = !strcmp(val, "fsr") ? FG_FSR : !strcmp(val, "dlss") ? FG_DLSS : FG_OFF;
+        else if (!strcmp(key, "hud_position")) g_settings.hud_edges = strcmp(val, "centered") != 0;
+        else if (!strcmp(key, "low_latency")) { int v = atoi(val); g_settings.low_latency = v >= 0 && v <= 2 ? v : 0; }
         else if (!strcmp(key, "fsr3_mode")) g_settings.fsr3_mode = named_option(val, fsr3_modes, DLSS_MODE_COUNT);
         else if (!strcmp(key, "fsr4_mode")) g_settings.fsr4_mode = named_option(val, fsr3_modes, DLSS_MODE_COUNT);
         else if (!strcmp(key, "xess_mode")) g_settings.xess_mode = named_option(val, fsr3_modes, DLSS_MODE_COUNT);
@@ -329,9 +397,13 @@ void settings_load(void) {
             g_settings.dlss_rcas_sharpness = n < 0 ? 0 : n > 100 ? 100 : n;
         }
         else if (!strcmp(key, "deband")) g_settings.deband = atoi(val) != 0;
-        else if (!strcmp(key, "aspect")) g_settings.aspect = !strcmp(val, "fill") ? ASPECT_FILL : ASPECT_16_9;
+        else if (!strcmp(key, "aspect")) {
+            g_settings.aspect = ASPECT_16_9;
+            for (int i = 0; i < ASPECT_COUNT; i++) if (!strcmp(val, ASPECT_NAMES[i])) g_settings.aspect = i;
+        }
+        else if (!strcmp(key, "console_mode")) g_settings.console_mode = !strcmp(val, "handheld") ? CONSOLE_HANDHELD : CONSOLE_DOCKED;
+        else if (!strcmp(key, "game_dynres")) g_settings.game_dynres = atoi(val) != 0;
         else if (!strcmp(key, "interpolation_output")) g_settings.interpolation_output = !strcmp(val, "120") ? 120 : 0;
-        else if (!strcmp(key, "vsync")) g_settings.vsync = !strcmp(val, "on") ? 1 : !strcmp(val, "off") ? 2 : 0;
         else if (!strcmp(key, "frame_interp")) g_settings.frame_interp = atoi(val) != 0;
         else if (!strcmp(key, "aniso")) {
             int n = atoi(val);
@@ -341,7 +413,13 @@ void settings_load(void) {
         else if (!strcmp(key, "memory"))
             g_settings.memory = !strcmp(val, "normal") ? MEMORY_NORMAL : !strcmp(val, "low") ? MEMORY_LOW : MEMORY_AUTO;
         else if (!strcmp(key, "shader_wait")) g_settings.shader_wait = atoi(val) != 0;
-        else if (!strcmp(key, "frame_rate")) g_settings.frame_rate = atoi(val) == 60 ? FPS_60 : atoi(val) == 90 ? FPS_90 : FPS_120;
+        else if (!strcmp(key, "frame_rate")) {  // (frames per second; another number: the nearest offered)
+            int want = atoi(val), best = FPS_60;
+            if (!strcmp(val, "display")) want = -1, best = FPS_AUTO;
+            for (int i = 0; i < FPS_AUTO && want >= 0; i++)
+                if (abs(settings_fps_hz(i) - want) < abs(settings_fps_hz(best) - want)) best = i;
+            g_settings.frame_rate = best;
+        }
         else if (!strcmp(key, "skip_intro")) g_settings.skip_intro = atoi(val) != 0;
         else if (!strcmp(key, "warmup")) g_settings.warmup = named_option(val, warmups, WARMUP_COUNT);
         else if (!strcmp(key, "mute_unfocused")) g_settings.mute_unfocused = atoi(val) != 0;
@@ -372,6 +450,13 @@ void settings_load(void) {
             for (int i = 1; i < N_LANGUAGES; i++)
                 if (!strcmp(val, g_language_codes[i])) g_settings.language = i;
         }
+        else if (!strcmp(key, "menu_language"))
+        {
+            g_settings.menu_language = MENU_LANG_AUTO;
+            const char *code = !strcmp(val, "en") ? "en-US" : val;  // (the earlier values: "en", "ko")
+            for (int i = 1; i < N_LANGUAGES; i++)
+                if (!strcmp(code, g_language_codes[i])) g_settings.menu_language = i;
+        }
         else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c (others: ignored)
     }
     fclose(f);
@@ -390,10 +475,19 @@ void settings_save(void) {
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen);
     fprintf(f, "window_mode = %s\n", window_modes[g_settings.window_mode]);
     fprintf(f, "display_resolution = %s\n", display_modes[g_settings.display_resolution]);
+    if (g_settings.display_w) fprintf(f, "display_size = %dx%d\n", g_settings.display_w, g_settings.display_h);
+    else fprintf(f, "display_size = auto\n");
+    fprintf(f, "refresh_rate = %d\n", g_settings.refresh_rate);
+    {
+        static const char *const v[VSYNC_COUNT] = {"on", "off", "strict", "adaptive"};
+        fprintf(f, "vsync = %s\n", v[g_settings.vsync >= 0 && g_settings.vsync < VSYNC_COUNT ? g_settings.vsync : 0]);
+    }
     fprintf(f, "monitor = %d\n", g_settings.monitor);
     fprintf(f, "check_updates = %d\n", g_settings.check_updates);
     fprintf(f, "volume = %.2f\n", g_settings.volume);
     fprintf(f, "reverb = %d\n", g_settings.reverb);
+    fprintf(f, "audio_output = %s\n", g_settings.audio_output == AUDIO_OUT_STEREO ? "stereo" :
+                                      g_settings.audio_output == AUDIO_OUT_SURROUND ? "5.1" : "auto");
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
     fprintf(f, "performance_overlay = %d\n", g_settings.performance_overlay);
@@ -404,14 +498,25 @@ void settings_save(void) {
     fprintf(f, "overlay_hardware = %d\noverlay_render = %d\noverlay_position = %d\n", g_settings.overlay_hardware,
             g_settings.overlay_render, g_settings.overlay_position);
     fprintf(f, "vibration = %d\n", g_settings.rumble);
+    fprintf(f, "vibration_strength = %d\n", (int)roundf(g_settings.rumble_strength * 100));
     fprintf(f, "motion = %d\n", g_settings.motion);
     fprintf(f, "hd_rumble = %d\n", g_settings.hd_rumble);
     fprintf(f, "rumble_strength = %.2f\n", g_settings.rumble_strength);
+    fprintf(f, "motion_invert_x = %d\n", g_settings.motion_invert_x);
+    fprintf(f, "motion_invert_y = %d\n", g_settings.motion_invert_y);
+    fprintf(f, "motion_gyro_bias = %.5f %.5f %.5f\n", g_settings.motion_gyro_bias[0], g_settings.motion_gyro_bias[1],
+            g_settings.motion_gyro_bias[2]);
+    fprintf(f, "motion_shake_pad = %d\n", g_settings.motion_shake_pad);
+    fprintf(f, "motion_shake_key = %d\n", g_settings.motion_shake_key);
     fprintf(f, "stick_deadzone = %d\n", g_settings.stick_deadzone);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_METALFX ? "metalfx" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
     fprintf(f, "antialias = %s\n", g_settings.antialias == AA_SMAA ? "smaa" : "off");
     fprintf(f, "dlss_mode = %s\n", dlss_modes[g_settings.dlss_mode]);
     fprintf(f, "dlss_preset = %s\n", dlss_presets[g_settings.dlss_preset]);
+    fprintf(f, "upscale_method = %s\n", g_settings.temporal_off ? "off" : temporal_backends[g_settings.temporal_backend]);
+    fprintf(f, "frame_gen = %s\n", g_settings.frame_gen == FG_FSR ? "fsr" : g_settings.frame_gen == FG_DLSS ? "dlss" : "off");
+    fprintf(f, "low_latency = %d\n", g_settings.low_latency);
+    fprintf(f, "hud_position = %s\n", g_settings.hud_edges ? "edges" : "centered");
     fprintf(f, "temporal_backend = %s\n", temporal_backends[g_settings.temporal_backend]);
     fprintf(f, "fsr3_mode = %s\n", fsr3_modes[g_settings.fsr3_mode]);
     fprintf(f, "fsr3_sharpness = %d\n", g_settings.fsr3_sharpness);
@@ -426,13 +531,15 @@ void settings_save(void) {
     fprintf(f, "dlss_rcas_sharpness = %d\n", g_settings.dlss_rcas_sharpness);
     fprintf(f, "fsr1_sharpness = %d\n", g_settings.fsr1_sharpness);
     fprintf(f, "deband = %d\n", g_settings.deband);
-    fprintf(f, "aspect = %s\n", g_settings.aspect == ASPECT_FILL ? "fill" : "16:9");
+    fprintf(f, "aspect = %s\n", ASPECT_NAMES[g_settings.aspect >= 0 && g_settings.aspect < ASPECT_COUNT ? g_settings.aspect : 0]);
+    fprintf(f, "console_mode = %s\n", g_settings.console_mode == CONSOLE_HANDHELD ? "handheld" : "docked");
+    fprintf(f, "game_dynres = %d\n", g_settings.game_dynres);
     fprintf(f, "frame_interp = %d\n", g_settings.frame_interp);
     fprintf(f, "interpolation_output = %s\n", g_settings.interpolation_output == 120 ? "120" : "auto");
-    fprintf(f, "vsync = %s\n", g_settings.vsync == 1 ? "on" : g_settings.vsync == 2 ? "off" : "auto");
     if (g_settings.aniso) fprintf(f, "aniso = %d\n", g_settings.aniso);
     else fprintf(f, "aniso = game\n");
-    fprintf(f, "frame_rate = %d\n", g_settings.frame_rate == FPS_60 ? 60 : g_settings.frame_rate == FPS_90 ? 90 : 120);
+    if (g_settings.frame_rate == FPS_AUTO) fprintf(f, "frame_rate = display\n");
+    else fprintf(f, "frame_rate = %d\n", settings_fps_hz(g_settings.frame_rate));
     fprintf(f, "shader_preload = %d\n", g_settings.shader_preload);
     fprintf(f, "memory = %s\n", g_settings.memory == MEMORY_NORMAL ? "normal" : g_settings.memory == MEMORY_LOW ? "low" : "auto");
     fprintf(f, "shader_wait = %d\n", g_settings.shader_wait);
@@ -458,10 +565,13 @@ void settings_save(void) {
     else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");
     else if (g_settings.res_mode == RES_Q25) fprintf(f, "resolution = 25%%\n");
     else if (g_settings.res_mode == RES_Q50) fprintf(f, "resolution = 50%%\n");
+    else if (g_settings.res_mode == RES_1440) fprintf(f, "resolution = 1440p\n");
+    else if (g_settings.res_mode == RES_DISPLAY) fprintf(f, "resolution = 100%%\n");
     else if (g_settings.res_mode >= 1 && g_settings.res_mode <= 8) fprintf(f, "resolution = %dx\n", g_settings.res_mode);
     else fprintf(f, "resolution = match\n");
     fprintf(f, "language = %s\n", g_language_codes[g_settings.language > LANG_AUTO && g_settings.language < N_LANGUAGES
                                                      ? g_settings.language : LANG_AUTO]);
+    fprintf(f, "menu_language = %s\n", g_settings.menu_language > 0 && g_settings.menu_language < N_LANGUAGES ? g_language_codes[g_settings.menu_language] : "auto");
     for (int i = 0; i < g_nmod_off; i++) fprintf(f, "mod_off = %s\n", g_mod_off[i]);
     bind_settings_save(f);
     fclose(f);
@@ -482,3 +592,22 @@ bool settings_low_memory(void) {
     }
     return low;
 }
+
+volatile int g_display_hz;
+// Match display (FPS_AUTO): the highest rate up to 120 the display's refresh is a whole multiple of - every frame on
+// screen equally long, at a rate PCs hold (144 Hz -> 72, 240 -> 120, 180 -> 90, 120 -> 120, 60 -> 60); none: the
+// refresh itself when it is one of the rates (165), else 60. Measured 2026-11-16, RTX 4090, 144 Hz, borderless: 60 FPS
+// alternates 2 and 3 refreshes (p99 19 ms); 72: 2 refreshes each (p99 16 ms, 0-2 held per 10 s); 144: busy stretches
+// at ~113 FPS (235 held per 10 s).
+int settings_fps_hz(int frame_rate) {
+    static const int hz[FPS_AUTO] = {60, 90, 120, 72, 100, 144, 165, 180, 240};
+    if (frame_rate == FPS_AUTO) {
+        int d = g_display_hz, best = 0;
+        for (int i = 0; i < FPS_AUTO; i++)
+            if (d > 0 && hz[i] <= 120 && d % hz[i] == 0 && hz[i] > best) best = hz[i];
+        for (int i = 0; !best && i < FPS_AUTO; i++) if (hz[i] == d) best = d;
+        return best ? best : 60;
+    }
+    return frame_rate >= 0 && frame_rate < FPS_AUTO ? hz[frame_rate] : 60;
+}
+int settings_game_hz(void) { return settings_fps_hz(g_settings.frame_rate); }

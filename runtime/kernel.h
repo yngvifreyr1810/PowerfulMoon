@@ -41,6 +41,7 @@ struct KThread {
     // taken over at the thread's next gate change), whether it holds that core now
     int gate, gate_want;
     bool gate_held, gate_queued;
+    int ungated;           // (kernel_ungated_begin / _end) running guest code off the gate: no SVC exit takes it back
     uint64_t gate_ticket;
     KThread *gnext;        // the gate's waiters
 };

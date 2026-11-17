@@ -36,6 +36,7 @@ static _Thread_local uint64_t tick_buttons;
 static _Thread_local bool tick_input_active;
 static _Atomic int32_t key_lx, key_ly, key_rx, key_ry, pad_lx, pad_ly, pad_rx, pad_ry;
 static uint8_t keys_down[BIND_KEY_CODE_COUNT];  // (keys, then the mouse buttons: input_bind.h)
+static _Atomic bool shake_pad_down;  // (the shake button: event thread -> hid_sixaxis_states)
 static SDL_Gamepad *pad;
 static atomic_uint primary_id;
 static uint32_t style_events[8]; // readable guest handles, checked again when signaling
@@ -165,6 +166,8 @@ static void mouse_tilt(float *ox, float *oy) {
 // The mouse's share of the right stick (nn::hid units), when the game's camera isn't taking it itself
 static void mouse_stick(int32_t *rx, int32_t *ry) {
     if (plat_now_ns() - atomic_load(&g_camera_asked_ns) < 100000000ull) return;  // (the camera has it: below)
+    extern _Atomic uint64_t g_mouse_direct_ns;
+    if (plat_now_ns() - atomic_load(&g_mouse_direct_ns) < 100000000ull) return;  // (the follow camera takes it directly)
     float x, y;
     mouse_tilt(&x, &y);
     float r = sqrtf(x * x + y * y);
@@ -179,6 +182,27 @@ static void mouse_stick(int32_t *rx, int32_t *ry) {
 // CameraPoserFollowLimitFunction::getRotateStickThreshold): a smaller movement is kept and given with the next ones
 // once they add up past it (and forgotten after a pause), so slow movements turn the camera too.
 #define CAMERA_THRESHOLD 0.32f
+// The follow camera turned by the mouse directly (odyssey_120.c follow_update, #52): each camera update takes the
+// horizontal movement since the last as degrees (MOUSE_DEG_PER_COUNT at 100% speed), added to that update's turn as it
+// is - no easing, no threshold. While it does, the stick path below leaves the horizontal movement alone.
+#define MOUSE_DEG_PER_COUNT 0.2f
+_Atomic uint64_t g_mouse_direct_ns;  // the follow camera last took the mouse
+bool input_mouse_direct(float *dh, float *dv) {
+    *dh = *dv = 0;
+    extern bool menu_input_captured(void);
+    if (!(atomic_load(&mouse_held) || (host_test && g_settings.mouse_camera)) || menu_input_captured()) return false;
+    uint64_t now = plat_now_ns();
+    static uint64_t last;
+    bool stale = now - last > 250000000ull;  // (after a pause: what piled up meanwhile is old)
+    last = now;
+    float cx = atomic_exchange(&mouse_acc_x, 0) / 16.0f, cy = atomic_exchange(&mouse_acc_y, 0) / 16.0f;
+    atomic_store(&g_mouse_direct_ns, now);
+    if (stale) return true;
+    float k = MOUSE_DEG_PER_COUNT * g_settings.mouse_sensitivity / 100.0f;
+    *dh = -cx * k * (g_settings.mouse_invert_x ? -1 : 1);  // (the game's angle grows to the left)
+    *dv = cy * MOUSE_DEG_PER_COUNT * g_settings.mouse_sensitivity_y / 100.0f * (g_settings.mouse_invert_y ? -1 : 1);
+    return true;
+}
 static void mouse_camera_frame(float *ox, float *oy) {
     static uint64_t last;
     static float fx, fy, cx, cy;  // this update's tilt; the counts not given yet
@@ -186,7 +210,9 @@ static void mouse_camera_frame(float *ox, float *oy) {
     if (now - last > 6000000ull) {  // (a new update: more than 6 ms since the last read)
         if (now - last > 250000000ull) cx = cy = 0;  // (after a pause: what was left over is old)
         last = now;
-        cx += atomic_exchange(&mouse_acc_x, 0) / 16.0f, cy += atomic_exchange(&mouse_acc_y, 0) / 16.0f;
+        bool direct = now - atomic_load(&g_mouse_direct_ns) < 100000000ull;  // (horizontal: the follow camera's own)
+        if (direct) cx = cy = 0;
+        else cx += atomic_exchange(&mouse_acc_x, 0) / 16.0f, cy += atomic_exchange(&mouse_acc_y, 0) / 16.0f;
         static float full = 0;
         if (!full) { const char *f = getenv("ODYSSEY_MOUSE_FULL"); full = f && atof(f) > 0 ? (float)atof(f) : MOUSE_FULL; }
         float k = 60.0f / 100.0f / full;  // counts in a 60th of a second -> tilt
@@ -316,10 +342,311 @@ int input_pad_family(void) {
     return env >= 0 ? env : pad_family;
 }
 
-void input_motion_settle(void) {
-    pm_motion_reset();
+// ---------------------------------------------------------------- motion (the game's six-axis sensor)
+// Odyssey reads the controller's motion for its motion moves (a shake throws the cap at a homing target, spins,
+// tilting): nn::hid GetSixAxisSensorStates. It comes from the active controller's gyro and accelerometer (SDL),
+// turned into the Switch's axes and units (as Switch emulators do: acceleration in G, rotation in turns a second,
+// the angle and orientation integrated from it). Controls tab "Motion controls" (`motion` in powermoon.ini).
+static pthread_mutex_t motion_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    bool on;              // the active pad has a gyro or an accelerometer
+    float accel[3], gyro[3], angle[3], dir[9];
+    uint64_t gyro_ns;     // the last gyro sample's time (sensor clock)
+    int64_t sampling;
+    uint64_t last_read_ns;
+    MotionGate gate;
+    MotionBias bias;
+    uint64_t calibrate_until_ns;  // (Calibrate gyro: learning the offset at rest until then)
+    bool calibrated;
+    bool has_gyro;
+    float err_i[3];               // (the orientation filter's integral term)
+    // The Switch's sensor history: the hid service samples the controller every 5 ms (200 Hz) and the game reads
+    // the last 16 states each frame (Odyssey asks for 16), each with its sampling number - a flick between two frames
+    // is in it. Filled at the sensor's own clock while it sends (motion_event), else at the game's (hid_sixaxis_states).
+    struct { float f[18]; int64_t sampling; } hist[32];
+    int hist_n, hist_head;
+    uint64_t tick_sensor_ns, last_push_ns;
+    unsigned shake_ticks;
+} mot = {.dir = {1, 0, 0, 0, 1, 0, 0, 0, 1},
+         .gate.last = {[2] = -1, [9] = 1, [13] = 1, [17] = 1}};
+
+#define MOTION_TICK_NS 5000000ull  // (200 Hz, as the Switch's)
+// One 5 ms state into the history (motion_lock held): the readings now, through the menu gate, or the shake
+static void motion_push(uint64_t now) {
+    float f[18] = {0};
+    bool live = mot.on && g_settings.motion && !menu_input_captured();
+    if (live) {
+        memcpy(f, mot.accel, 12);
+        memcpy(f + 3, mot.gyro, 12);
+        memcpy(f + 6, mot.angle, 12);
+        memcpy(f + 9, mot.dir, 36);
+    } else {
+        f[2] = -1;  // (no motion: a controller lying still, so the game sees no shake)
+        f[9] = f[13] = f[17] = 1;
+    }
+    // Preserve the last pose rather than injecting a sudden gravity/orientation change when the menu takes control;
+    // discard menu movement on resume.
+    motion_gate_sample(&mot.gate, f, !live, now);
+    // The shake button / key (Controls: Shake button, Shake key - #39, #27): while held, the controller is shaken hard
+    // up and down (+-3.5 G, the direction flipping every 15 ms) - the game's motion cap throw, spin and shake moves -
+    // with or without a gyro, and with Motion controls off.
+    bool held = atomic_load(&shake_pad_down) || held_key(g_settings.motion_shake_key);
+    if (held && !menu_input_captured()) {
+        bool flip = (mot.shake_ticks++ / 3) & 1;
+        f[0] = 0, f[1] = flip ? 3.5f : -3.5f, f[2] = -1;
+        f[3] = 0, f[4] = 0, f[5] = flip ? 1.5f : -1.5f;
+    } else mot.shake_ticks = 0;
+    mot.hist_head = (mot.hist_head + 1) % 32;
+    memcpy(mot.hist[mot.hist_head].f, f, sizeof f);
+    mot.hist[mot.hist_head].sampling = ++mot.sampling;
+    if (mot.hist_n < 32) mot.hist_n++;
+    mot.last_push_ns = now;
 }
 
+void input_motion_settle(void) {
+    pm_motion_reset();
+    pthread_mutex_lock(&motion_lock);
+    motion_gate_settle(&mot.gate, plat_now_ns());
+    mot.gyro_ns = 0;
+    pthread_mutex_unlock(&motion_lock);
+}
+
+// Calibrate gyro (Controls tab, #53): the controller lies still for 2 s; the offset its gyro reports at rest is learned
+// (as at every settle, motion_bias_sample) from scratch, then kept in powermoon.ini (motion_gyro_bias).
+// input_motion_calibration: 0 none, 1 running, 2 done, -1 this controller has no gyro.
+void input_motion_calibrate(void) {
+    pthread_mutex_lock(&motion_lock);
+    uint64_t now = plat_now_ns();
+    memset(&mot.bias, 0, sizeof mot.bias);
+    motion_gate_settle(&mot.gate, now);
+    mot.gate.settle_until_ns = now + 2000000000ull;
+    mot.calibrate_until_ns = now + 2000000000ull;
+    mot.calibrated = false;
+    pthread_mutex_unlock(&motion_lock);
+}
+int input_motion_calibration(void) {
+    pthread_mutex_lock(&motion_lock);
+    int r = !mot.on ? -1 : mot.calibrate_until_ns ? 1 : mot.calibrated ? 2 : 0;
+    pthread_mutex_unlock(&motion_lock);
+    return r;
+}
+
+static void motion_open(void) {
+    bool a = false, g = false;
+    if (pad) {
+        a = SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL) && SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_ACCEL, true);
+        g = SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO) && SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_GYRO, true);
+    }
+    pthread_mutex_lock(&motion_lock);
+    mot.on = a || g;
+    memset(mot.accel, 0, sizeof mot.accel);
+    mot.accel[2] = -1;  // (at rest, lying flat)
+    memset(mot.gyro, 0, sizeof mot.gyro);
+    memset(mot.angle, 0, sizeof mot.angle);
+    static const float id[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    memcpy(mot.dir, id, sizeof id);
+    mot.gyro_ns = 0;
+    motion_gate_init(&mot.gate);
+    memset(&mot.bias, 0, sizeof mot.bias);
+    memcpy(mot.bias.bias, g_settings.motion_gyro_bias, sizeof mot.bias.bias);  // (a saved calibration, else 0)
+    motion_gate_settle(&mot.gate, plat_now_ns());
+    mot.has_gyro = g;
+    memset(mot.err_i, 0, sizeof mot.err_i);
+    mot.tick_sensor_ns = 0;
+    pthread_mutex_unlock(&motion_lock);
+    if (pad) LOG("[input] motion: %s%s%s\n", a ? "accelerometer" : "", a && g ? " and " : "", g ? "gyro" : a ? "" : "none on this controller");
+}
+
+// A rotation of the orientation by w (radians) about each axis: R' = R * exp([w]x) (Rodrigues), kept orthonormal
+static void rotate_dir(float *R, const float w[3]) {
+    float th = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+    if (th < 1e-9f) return;
+    float k[3] = {w[0] / th, w[1] / th, w[2] / th}, c = cosf(th), s = sinf(th), t = 1 - c;
+    float M[9] = {t * k[0] * k[0] + c,        t * k[0] * k[1] - s * k[2], t * k[0] * k[2] + s * k[1],
+                  t * k[0] * k[1] + s * k[2], t * k[1] * k[1] + c,        t * k[1] * k[2] - s * k[0],
+                  t * k[0] * k[2] - s * k[1], t * k[1] * k[2] + s * k[0], t * k[2] * k[2] + c};
+    float o[9];
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) o[i * 3 + j] = R[i * 3] * M[j] + R[i * 3 + 1] * M[3 + j] + R[i * 3 + 2] * M[6 + j];
+    for (int i = 0; i < 3; i++) {  // (Gram-Schmidt on the rows)
+        float *a = o + i * 3;
+        for (int j = 0; j < i; j++) {
+            float *b = o + j * 3, d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+            for (int q = 0; q < 3; q++) a[q] -= d * b[q];
+        }
+        float n = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+        if (n > 1e-6f) for (int q = 0; q < 3; q++) a[q] /= n;
+    }
+    memcpy(R, o, sizeof o);
+}
+
+static void motion_event(const SDL_GamepadSensorEvent *e) {
+    if (!pad || SDL_GetGamepadID(pad) != e->which) return;
+    const float G = SDL_STANDARD_GRAVITY, TURN = 6.28318531f;
+    pthread_mutex_lock(&motion_lock);
+    // SDL: x right, y up, z toward the player (m/s^2, rad/s). The Switch: x = -x, y = z, z = -y (a mirror: the
+    // rotation's axes the other way round)
+    if (menu_input_captured()) mot.gate.blocked = true;
+    if (e->sensor == SDL_SENSOR_ACCEL) {
+        mot.accel[0] = -e->data[0] / G, mot.accel[1] = e->data[2] / G, mot.accel[2] = -e->data[1] / G;
+        for (int i = 0; i < 3; i++) mot.accel[i] = fmaxf(-7.0f, fminf(7.0f, mot.accel[i]));  // (the sensor's range)
+    } else if (e->sensor == SDL_SENSOR_GYRO) {
+        float g[3] = {e->data[0], -e->data[2], e->data[1]};  // rad/s
+        for (int i = 0; i < 3; i++) mot.gyro[i] = fmaxf(-5.0f, fminf(5.0f, g[i] / TURN));
+        uint64_t host_now = plat_now_ns();
+        motion_bias_sample(&mot.bias, mot.accel, mot.gyro, host_now < mot.gate.settle_until_ns, host_now);
+        if (mot.calibrate_until_ns && host_now >= mot.calibrate_until_ns) {  // (Calibrate gyro: the learned offset kept)
+            mot.calibrate_until_ns = 0;
+            memcpy(g_settings.motion_gyro_bias, mot.bias.bias, sizeof mot.bias.bias);
+            mot.calibrated = true;
+            LOG("[input] motion: gyro calibrated, offset %.4f %.4f %.4f turns/s\n", mot.bias.bias[0], mot.bias.bias[1],
+                mot.bias.bias[2]);
+        }
+        // (#53) Invert gyro X / Y: pitch (tilting forward / back: the Switch's x) and yaw (turning: its z) the other way
+        if (g_settings.motion_invert_x) mot.gyro[0] = -mot.gyro[0];
+        if (g_settings.motion_invert_y) mot.gyro[2] = -mot.gyro[2];
+        // a controller at rest reports 0 (the noise left after the offset, under 0.007 turns/s: as Switch emulators)
+        if (mot.gyro[0] * mot.gyro[0] + mot.gyro[1] * mot.gyro[1] + mot.gyro[2] * mot.gyro[2] < 0.007f * 0.007f)
+            memset(mot.gyro, 0, sizeof mot.gyro);
+        uint64_t t = e->sensor_timestamp;
+        bool integrate = g_settings.motion && !menu_input_captured() && !mot.gate.blocked &&
+                         (!mot.gate.resume_ns || plat_now_ns() - mot.gate.resume_ns >= 250000000ull);
+        if (integrate && mot.gyro_ns && t > mot.gyro_ns && t - mot.gyro_ns < 100000000ull) {
+            float dt = (float)(t - mot.gyro_ns) / 1e9f;
+            float w[3] = {mot.gyro[0] * TURN, mot.gyro[1] * TURN, mot.gyro[2] * TURN};  // rad/s
+            for (int i = 0; i < 3; i++) mot.angle[i] += mot.gyro[i] * dt;
+            // Orientation drift corrected by gravity (a Mahony filter): where the orientation says gravity is, in the
+            // controller's axes (R^T (0, 0, -1): -the third row), against where the accelerometer feels it; their cross
+            // product turns the orientation towards it (gains 0.3 / 0.005 - the Switch emulators'). Only while the
+            // accelerometer reads about 1 G (not during a shake).
+            float an = sqrtf(mot.accel[0] * mot.accel[0] + mot.accel[1] * mot.accel[1] + mot.accel[2] * mot.accel[2]);
+            if (an > 0.75f && an < 1.25f) {
+                float a[3] = {mot.accel[0] / an, mot.accel[1] / an, mot.accel[2] / an};
+                float v[3] = {-mot.dir[6], -mot.dir[7], -mot.dir[8]};
+                float err[3] = {a[1] * v[2] - a[2] * v[1], a[2] * v[0] - a[0] * v[2], a[0] * v[1] - a[1] * v[0]};
+                float en = err[0] * err[0] + err[1] * err[1] + err[2] * err[2];
+                for (int i = 0; i < 3; i++) {
+                    if (en > 0.05f * 0.05f) mot.err_i[i] += err[i]; else mot.err_i[i] = 0;
+                    w[i] += 0.3f * err[i] + 0.005f * mot.err_i[i];
+                }
+            }
+            for (int i = 0; i < 3; i++) w[i] *= dt;
+            rotate_dir(mot.dir, w);
+        }
+        mot.gyro_ns = t;
+        // the 200 Hz history at the sensor's clock: the states due up to this sample, with what it reads
+        if (!mot.tick_sensor_ns || t < mot.tick_sensor_ns - MOTION_TICK_NS || t - mot.tick_sensor_ns > 100000000ull)
+            mot.tick_sensor_ns = t;
+        for (int n = 0; mot.tick_sensor_ns <= t && n < 32; n++, mot.tick_sensor_ns += MOTION_TICK_NS) motion_push(host_now);
+    }
+    static int log = -1;  // ODYSSEY_LOG_MOTION=1: the readings once a second
+    static uint64_t logged;
+    if (log < 0) log = getenv("ODYSSEY_LOG_MOTION") != NULL;
+    if (log && plat_now_ns() - logged > 1000000000ull) {
+        logged = plat_now_ns();
+        LOG("[input] motion: accel %.2f %.2f %.2f G, gyro %.3f %.3f %.3f turns/s\n", mot.accel[0], mot.accel[1],
+            mot.accel[2], mot.gyro[0], mot.gyro[1], mot.gyro[2]);
+    }
+    pthread_mutex_unlock(&motion_lock);
+}
+
+// GetSixAxisSensorHandles(SixAxisSensorHandle *out, int count, const NpadIdType &id, NpadStyleSet) -> how many:
+// one (a Pro Controller's), two for a pair of Joy-Cons. The handle: style index, player, device index.
+HLE_FUNC("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE",
+         hid_sixaxis_handles) {
+    uint32_t *out = (uint32_t *)(uintptr_t)c->x[0];
+    int count = (int)c->x[1];
+    uint32_t id = *(uint32_t *)(uintptr_t)c->x[2], style = (uint32_t)c->x[3];
+    int n = style & 4 ? 2 : 1;  // (JoyDual: left and right)
+    if (n > count) n = count < 0 ? 0 : count;
+    for (int i = 0; i < n; i++) out[i] = (style & 4 ? 5u : style & 2 ? 4u : 3u) | (id & 0xFF) << 8 | (uint32_t)i << 16;
+    static int nlog;
+    if (nlog++ < 4) LOG("[input] six-axis handles for player %u, style %#x: %d\n", id, style, n);
+    c->x[0] = (uint64_t)n;
+}
+HLE_FUNC("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", hid_sixaxis_start) {
+    if (((*(uint32_t *)(uintptr_t)c->x[0] >> 8) & 0xff) == 0) input_motion_settle();
+    static int nlog;
+    if (nlog++ < 4) LOG("[input] six-axis sensor %#x started\n", *(uint32_t *)(uintptr_t)c->x[0]);
+}
+
+// GetSixAxisSensorStates(SixAxisSensorState *out, int count, const SixAxisSensorHandle &) -> how many, newest first.
+// SixAxisSensorState (0x60): s64 delta time (ns), s64 sampling number, float acceleration[3], angular velocity[3],
+// angle[3], direction[3][3], u32 attributes (1: connected), u32 reserved.
+HLE_FUNC("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", hid_sixaxis_states) {
+    uint8_t *s = (uint8_t *)(uintptr_t)c->x[0];
+    if ((int)c->x[1] < 1) { c->x[0] = 0; return; }
+    memset(s, 0, 0x60);
+    uint32_t player = (*(uint32_t *)(uintptr_t)c->x[2] >> 8) & 0xff;
+    if (player != 0) {
+        // Secondary motion is not implemented; never route Mario's sensor to Cappy.
+        static _Atomic int64_t secondary_sample;
+        *(int64_t *)s = 5000000;
+        *(int64_t *)(s + 8) = ++secondary_sample;
+        float *f = (float *)(s + 0x10);
+        f[2] = -1; f[9] = f[13] = f[17] = 1;
+        *(uint32_t *)(s + 0x58) = player == 1 && input_cappy_id();
+        c->x[0] = 1;
+        return;
+    }
+    uint64_t now = plat_now_ns();
+    pthread_mutex_lock(&motion_lock);
+    bool live = mot.on && g_settings.motion && !menu_input_captured();
+    if (!mot.last_read_ns || (now > mot.last_read_ns && now - mot.last_read_ns > 500000000ull)) {
+        motion_gate_settle(&mot.gate, now);
+        mot.gyro_ns = 0;
+    }
+    mot.last_read_ns = now;
+    // No sensor sending (no gyro, the motion setting off, a still controller's quiet sensor): the 5 ms states at the
+    // game's own clock since the last one (at most the 16 it reads)
+    bool sensor_live = live && mot.has_gyro && mot.last_push_ns && now - mot.last_push_ns < 20000000ull;
+    if (!sensor_live) {
+        uint64_t due = mot.last_push_ns && now > mot.last_push_ns ? (now - mot.last_push_ns) / MOTION_TICK_NS : 1;
+        if (due > 16) due = 16;
+        if (!due && !mot.hist_n) due = 1;
+        for (uint64_t i = 0; i < due; i++) motion_push(now);
+    }
+    // newest first, as many as asked for and kept
+    int want = (int)c->x[1], n = want < mot.hist_n ? want : mot.hist_n;
+    for (int i = 0; i < n; i++) {
+        uint8_t *o = s + 0x60 * i;
+        int k = (mot.hist_head - i + 32) % 32;
+        memset(o, 0, 0x60);
+        *(int64_t *)o = (int64_t)MOTION_TICK_NS;
+        *(int64_t *)(o + 8) = mot.hist[k].sampling;
+        memcpy(o + 0x10, mot.hist[k].f, sizeof mot.hist[k].f);
+        *(uint32_t *)(o + 0x58) = 1;
+    }
+    float *f = (float *)(s + 0x10);
+    {   // ODYSSEY_LOG_MOTION=1: what the game reads, once a second (how many samples it asks for, the values)
+        static int log = -1;
+        static uint64_t logged;
+        if (log < 0) log = getenv("ODYSSEY_LOG_MOTION") ? atoi(getenv("ODYSSEY_LOG_MOTION")) : 0;  // (2: every read that moves)
+        static int64_t seen;
+        float peak = 0;
+        int fresh = 0;
+        for (int i = 0; i < n; i++) {
+            int k = (mot.hist_head - i + 32) % 32;
+            if (mot.hist[k].sampling <= seen) break;
+            fresh++;
+            const float *h = mot.hist[k].f;
+            float m = sqrtf(h[0] * h[0] + h[1] * h[1] + h[2] * h[2]);
+            if (m > peak) peak = m;
+        }
+        seen = mot.hist[mot.hist_head].sampling;
+        if (log && (now - logged > 1000000000ull || (log >= 2 && (peak > 1.5f || fabsf(f[5]) > 0.05f)))) {
+            logged = now;
+            LOG("[input] game reads motion (asks %d, %d new, peak %.2f G, handle %#x, %s): accel %.2f %.2f %.2f gyro %.3f %.3f %.3f "
+                "angle %.3f %.3f %.3f\n", (int)c->x[1], fresh, peak, *(uint32_t *)(uintptr_t)c->x[2], live ? "live" : "at rest",
+                f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8]);
+        }
+    }
+    pthread_mutex_unlock(&motion_lock);
+    c->x[0] = (uint64_t)(n > 0 ? n : 1);
+}
+
+// The active controller: the first one found, then whichever one a button was last pressed on (a second controller
+// takes over at its first press; its icons and motion follow)
 static void use_pad(SDL_Gamepad *p) {
     if (!p || p == pad || SDL_GetGamepadID(p) == input_cappy_id()) return;
     if (pad) pm_controller_detach();
@@ -328,6 +655,7 @@ static void use_pad(SDL_Gamepad *p) {
     LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad));
     note_family();
     pm_controller_attach(pad);
+    motion_open();
 }
 
 void input_cappy_test_primary(uint32_t id) { use_pad(SDL_GetGamepadFromID(id)); }
@@ -399,6 +727,16 @@ void input_handle_event(const SDL_Event *e) {
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_UP:
         if (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 16000) kbprompts_note_device(false);
         recompute_pad();
+        {   // the shake button (Controls: "Shake button"): held -> the game sees a shaken controller (hid_sixaxis_states)
+            int b = g_settings.motion_shake_pad;
+            bool down = false;
+            if (pad && b >= 0) {
+                if (b == PADB_LTRIGGER) down = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000;
+                else if (b == PADB_RTRIGGER) down = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000;
+                else if (b < SDL_GAMEPAD_BUTTON_COUNT) down = SDL_GetGamepadButton(pad, (SDL_GamepadButton)b);
+            }
+            atomic_store(&shake_pad_down, down);
+        }
         break;
     case SDL_EVENT_MOUSE_MOTION:
         if (mouse_held) {
@@ -587,8 +925,43 @@ RT_ON_RESET(input_reboot_reset) {
     memset(style_events, 0, sizeof style_events);
     pthread_mutex_unlock(&g_klock);
 } // (reboot: the controller object and style-event handles were guest-owned)
+// ODYSSEY_MOTION_TEST=<frame> (tests): a virtual controller with an accelerometer and a gyro appears at that frame,
+// lies still 2 s, then is shaken (up / down +-3 G at 8 Hz, 0.5 s), lies still 2 s, then turns (yaw, half a turn a
+// second, 1 s) - its samples at 200 Hz on its own clock, as a real one's
+static void motion_test_frame(uint64_t frame) {
+    static long at = -2;
+    if (at == -2) at = getenv("ODYSSEY_MOTION_TEST") ? atol(getenv("ODYSSEY_MOTION_TEST")) : -1;
+    if (at < 0 || (long)frame < at) return;
+    static SDL_Joystick *vj;
+    static uint64_t t0, sent;
+    if (!vj) {
+        static const SDL_VirtualJoystickSensorDesc sensors[2] = {{SDL_SENSOR_ACCEL, 200.0f}, {SDL_SENSOR_GYRO, 200.0f}};
+        SDL_VirtualJoystickDesc d;
+        SDL_INIT_INTERFACE(&d);
+        d.type = SDL_JOYSTICK_TYPE_GAMEPAD, d.naxes = 6, d.nbuttons = SDL_GAMEPAD_BUTTON_COUNT, d.name = "motion test pad";
+        d.nsensors = 2, d.sensors = sensors;
+        SDL_JoystickID id = SDL_AttachVirtualJoystick(&d);
+        vj = id ? SDL_OpenJoystick(id) : NULL;
+        SDL_Gamepad *gp = id ? SDL_OpenGamepad(id) : NULL;
+        LOG("[input] motion test controller %s\n", vj && gp ? "attached" : SDL_GetError());
+        if (gp) use_pad(gp);
+        t0 = SDL_GetTicksNS();
+        return;
+    }
+    uint64_t now = SDL_GetTicksNS();
+    for (; t0 + sent * 5000000ull <= now; sent++) {
+        double t = sent * 0.005;
+        float a[3] = {0, 9.80665f, 0}, g[3] = {0, 0, 0};  // (SDL axes: lying flat, gravity felt along +y)
+        if (t >= 2.0 && t < 2.5) a[1] += 3.0f * 9.80665f * (float)sin(2 * 3.14159265 * 8 * (t - 2.0)), g[0] = 6.0f * (float)sin(2 * 3.14159265 * 8 * (t - 2.0));
+        if (t >= 4.5 && t < 5.5) g[1] = 3.14159265f;  // (yaw: half a turn a second)
+        SDL_SendJoystickVirtualSensorData(vj, SDL_SENSOR_ACCEL, t0 + sent * 5000000ull, a, 3);
+        SDL_SendJoystickVirtualSensorData(vj, SDL_SENSOR_GYRO, t0 + sent * 5000000ull, g, 3);
+    }
+}
+
 void input_frame(uint64_t frame) {
     pm_controller_tick();
+    motion_test_frame(frame);
     for (int i = 0; i < 2; i++) {  // a wheel turn's press ends
         uint64_t at = atomic_load(&wheel_release_ns[i]);
         if (at && plat_now_ns() >= at && atomic_compare_exchange_strong(&wheel_release_ns[i], &at, 0)) {
@@ -804,10 +1177,26 @@ void input_vibration(uint32_t handle, float amp_low, float amp_high) {
     lo[player][side] = isfinite(amp_low) ? amp_low : 0, hi[player][side] = isfinite(amp_high) ? amp_high : 0;
     float l = fmaxf(lo[player][0], lo[player][1]), h = fmaxf(hi[player][0], hi[player][1]);
     if (!g_settings.rumble) l = h = 0;
-    // (the Joy-Cons' actuators are strong: the game's amplitudes are mostly 0.02-0.2, which a gamepad's motors barely
-    // turn at - small ones get a boost, (a + a^0.4) / 2: 0.04 -> 0.2, 0.17 -> 0.37, 1 -> 1; below 0.015, nothing)
-    l = l < 0.015f ? 0 : (fminf(l, 1) + powf(fminf(l, 1), 0.4f)) * 0.5f;
-    h = h < 0.015f ? 0 : (fminf(h, 1) + powf(fminf(h, 1), 0.4f)) * 0.5f;
+    // (the Joy-Cons' actuators are strong: the game's amplitudes are mostly 0.02-0.2, which an Xbox-style gamepad's
+    // motors barely turn at - small ones get a boost there, (a + a^0.4) / 2: 0.04 -> 0.2, 0.17 -> 0.37, 1 -> 1; below
+    // 0.015, nothing. Not on controllers with HD rumble or voice coils - Switch Pro, Joy-Con, DualSense: they take the
+    // game's amplitudes as on the Switch. Boosted there, the game's steady footstep rumble (~0.1 while walking) became
+    // a constant strong buzz on a Pro Controller - owner, 2026-11-15)
+    SDL_Gamepad *gp = pad;
+    SDL_GamepadType gt = gp ? SDL_GetGamepadType(gp) : SDL_GAMEPAD_TYPE_UNKNOWN;
+    bool fine = gt == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO || gt == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT ||
+                gt == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT || gt == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR ||
+                gt == SDL_GAMEPAD_TYPE_PS5;
+    if (fine) {
+        l = l < 0.015f ? 0 : fminf(l, 1);
+        h = h < 0.015f ? 0 : fminf(h, 1);
+    } else {
+        l = l < 0.015f ? 0 : (fminf(l, 1) + powf(fminf(l, 1), 0.4f)) * 0.5f;
+        h = h < 0.015f ? 0 : (fminf(h, 1) + powf(fminf(h, 1), 0.4f)) * 0.5f;
+    }
+    float strength = g_settings.rumble_strength > 2.0f ? g_settings.rumble_strength / 100.0f
+                   : g_settings.rumble_strength > 0.0f ? g_settings.rumble_strength : 1.0f;
+    l *= strength, h *= strength;
     uint16_t L = (uint16_t)(l * 65535.0f), H = (uint16_t)(h * 65535.0f);
     uint64_t now = plat_now_ns();
     if (L == last_l[player] && H == last_h[player] && (!(L | H) || now - last_ns[player] < 100000000ull)) return;

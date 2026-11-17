@@ -85,6 +85,7 @@ typedef struct {
     Mix *mix;
     uint32_t nmix;
     uint8_t sink_used, sink_inputs, sink_input[6];
+    int nch;  // output channels: 2 or 6 (audio_channels)
     Effect *fx;
     SDL_AudioStream *stream;
     FILE *wav;
@@ -98,6 +99,26 @@ typedef struct {
 } Renderer;
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+// 5.1 (#35): the channels the game is told its TV output has (IAudioDevice GetActiveChannelCount) and the renderer's
+// output: 6 (FL FR FC LFE BL BR - the device sink's order and SDL's) with Audio output 5.1, or Auto on a device that
+// has 6 or more channels; else 2 (the game's 5.1 mix, if any, folded down to stereo). Fixed at the first ask (the game
+// reads it once). ODYSSEY_AUDIO_CHANNELS=2/6 overrides.
+static int audio_channels(void) {
+    static int n;
+    if (n) return n;
+    const char *e = getenv("ODYSSEY_AUDIO_CHANNELS");
+    if (e && *e) n = atoi(e) == 6 ? 6 : 2;
+    else if (g_settings.audio_output == AUDIO_OUT_SURROUND) n = 6;
+    else if (g_settings.audio_output == AUDIO_OUT_STEREO) n = 2;
+    else {
+        SDL_AudioSpec dev;
+        n = SDL_WasInit(SDL_INIT_AUDIO) && SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &dev, NULL) &&
+            dev.channels >= 6 ? 6 : 2;
+    }
+    LOG("[audio] output: %d channels (%s)\n", n, n == 6 ? "5.1" : "stereo");
+    return n;
+}
 
 // One sample of DSP ADPCM at absolute sample index s (frames of 8 bytes: header + 14 nibbles).
 static int16_t adpcm_next(const uint8_t *data, uint64_t size, uint32_t s, const int16_t *coefs, ChanState *cs) {
@@ -689,7 +710,7 @@ static void apply_effects(Renderer *r, int32_t mix_id, Mix *m) {
 static int hf_log = -1;
 static double hf[1024];
 
-static void render_frame(Renderer *r, float *stereo) {
+static void render_frame(Renderer *r, float *stereo, int nch) {
     if (hf_log < 0) hf_log = getenv("ODYSSEY_AUDIO_HF") ? 1 : 0;
     uint32_t N = r->sample_count;
     for (uint32_t m = 0; m < r->nmix; m++)
@@ -809,6 +830,22 @@ static void render_frame(Renderer *r, float *stereo) {
         if (f && r->sink_used)
             for (int c = 0; c < r->sink_inputs && c < 6; c++)
                 if (r->sink_input[c] < f->bufs) ch[c] = f->buf[r->sink_input[c] * N + i] * f->volume;
+        if (nch == 6) {  // (5.1: each channel as the game mixed it; a stereo mix keeps the other four silent)
+            static float peak[6];
+            static uint32_t frames;
+            static int lv = -1;  // ODYSSEY_AUDIO_LEVELS=1: each channel's peak every ~2 s
+            if (lv < 0) lv = getenv("ODYSSEY_AUDIO_LEVELS") != NULL;
+            for (int c = 0; c < 6; c++) {
+                stereo[i * 6 + c] = clampf(ch[c] / 32768.f, -1, 1);
+                if (lv && fabsf(stereo[i * 6 + c]) > peak[c]) peak[c] = fabsf(stereo[i * 6 + c]);
+            }
+            if (lv && i == 0 && ++frames % 400 == 0) {
+                LOG("[audio] 5.1 peaks FL %.3f FR %.3f FC %.3f LFE %.3f BL %.3f BR %.3f\n", peak[0], peak[1], peak[2],
+                    peak[3], peak[4], peak[5]);
+                memset(peak, 0, sizeof peak);
+            }
+            continue;
+        }
         float L = ch[0], R = ch[1];
         if (r->sink_inputs >= 6) {
             L += 0.707f * ch[2] + 0.251f * ch[3] + 0.707f * ch[4];
@@ -837,9 +874,10 @@ static void wav_header(FILE *f, uint32_t bytes) {
 
 static void *renderer_tick(void *arg) {
     Renderer *r = arg;
-    float out[2 * 4096];
+    float out[6 * 4096];
     uint32_t N = r->sample_count > 4096 ? 4096 : r->sample_count;
-    int frame_bytes = (int)(N * 2 * sizeof(float));
+    int nch = r->nch == 6 ? 6 : 2;
+    int frame_bytes = (int)(N * nch * sizeof(float));
     uint64_t next = 0;
     struct timespec now;
     int target = 4 * frame_bytes;  // queued audio to keep ahead of the device: >= 2 device periods
@@ -847,10 +885,10 @@ static void *renderer_tick(void *arg) {
         SDL_AudioSpec dev;
         int dev_frames = 0;
         if (SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(r->stream), &dev, &dev_frames) && dev_frames > 0) {
-            int t = (2 * dev_frames * (int)r->sample_rate / (dev.freq ? dev.freq : 48000) + (int)N) * 2 * (int)sizeof(float);
+            int t = (2 * dev_frames * (int)r->sample_rate / (dev.freq ? dev.freq : 48000) + (int)N) * nch * (int)sizeof(float);
             if (t > target) target = t;
             LOG("[audren] device %d Hz (%s), %d frames/period; queue target %d samples\n", dev.freq,
-                SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?", dev_frames, target / (2 * (int)sizeof(float)));
+                SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?", dev_frames, target / (nch * (int)sizeof(float)));
         }
     }
     while (!r->quit) {
@@ -878,14 +916,14 @@ static void *renderer_tick(void *arg) {
         }
         pthread_mutex_lock(&r->lock);
         if (r->state == 0) {
-            render_frame(r, out);
+            render_frame(r, out, nch);
             r->elapsed_frames++;
         } else {
             memset(out, 0, frame_bytes);
         }
         pthread_mutex_unlock(&r->lock);
         if (r->stream) { apply_gain(r->stream); SDL_PutAudioStreamData(r->stream, out, frame_bytes); }
-        if (r->wav && r->state == 0) {
+        if (r->wav && r->state == 0 && nch == 2) {
             fwrite(out, 1, frame_bytes, r->wav);
             r->wav_bytes += frame_bytes;
             if ((r->elapsed_frames & 255) == 0) { wav_header(r->wav, r->wav_bytes); fflush(r->wav); }
@@ -1142,8 +1180,11 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
             r->sink_used = s[1];
             uint32_t n;
             memcpy(&n, s + 0x20 + 0x100, 4);
+            uint8_t was = r->sink_inputs;
             r->sink_inputs = n > 6 ? 6 : n;
             memcpy(r->sink_input, s + 0x124, 6);
+            if (r->sink_inputs != was)
+                LOG("[audren] device sink: %u channels from the game (output %d)\n", r->sink_inputs, r->nch ? r->nch : 2);
         }
     }
     uint64_t elapsed = r->elapsed_frames;
@@ -1167,8 +1208,9 @@ static void renderer_open_output(Renderer *r) {
         if (r->wav) wav_header(r->wav, 0);
     }
     if (getenv("ODYSSEY_NO_AUDIO") && strcmp(getenv("ODYSSEY_NO_AUDIO"), "0")) return;
-    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) { LOG("[audren] SDL audio init failed: %s\n", SDL_GetError()); return; }
-    SDL_AudioSpec spec = {SDL_AUDIO_F32, 2, (int)r->sample_rate};
+    if (!SDL_WasInit(SDL_INIT_AUDIO)) return;
+    r->nch = audio_channels();
+    SDL_AudioSpec spec = {SDL_AUDIO_F32, r->nch, (int)r->sample_rate};
     r->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
     if (!r->stream) { LOG("[audren] SDL audio open failed: %s\n", SDL_GetError()); return; }
     if (getenv("ODYSSEY_AUDIO_GAIN")) SDL_SetAudioStreamGain(r->stream, (float)atof(getenv("ODYSSEY_AUDIO_GAIN")));
@@ -1214,7 +1256,7 @@ static void audio_device(Service *s, IpcReq *req, IpcResp *resp) {
         break;
     }
     case 4: case 11: case 12: resp->copy_handles[resp->ncopy++] = new_event_handle(); break;
-    case 5: OUT(uint32_t, 0) = 2; resp_size(resp, 4); break;  // GetActiveChannelCount
+    case 5: OUT(uint32_t, 0) = (uint32_t)audio_channels(); resp_size(resp, 4); break;  // GetActiveChannelCount
     case 8: OUT(float, 0) = 1.0f; resp_size(resp, 4); break;
     default: break;
     }

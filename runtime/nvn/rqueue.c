@@ -17,7 +17,7 @@
 #include "../platform.h"
 #include "nvn.h"
 #include "rqueue.h"
-#ifdef _WIN32
+#ifndef __APPLE__  // (the temporal upscalers: every Vulkan build)
 #include "vulkan/dlss_probe.h"
 #endif
 
@@ -45,8 +45,15 @@ bool rq_enabled(void) {
 }
 bool rq_on_thread(void) { return on_thread; }
 
+#ifdef __linux__  // (thread names: what a profiler or /proc/<pid>/task/*/comm shows)
+#include <sys/prctl.h>
+#define RT_THREAD_NAME(...) do { char tn_[16]; snprintf(tn_, sizeof tn_, __VA_ARGS__); prctl(PR_SET_NAME, tn_); } while (0)
+#else
+#define RT_THREAD_NAME(...) do { } while (0)
+#endif
 static void *render_thread(void *arg) {
     (void)arg;
+    RT_THREAD_NAME("render");
     on_thread = true;
     { extern void sampler_render_thread(void); sampler_render_thread(); }
     for (;;) {
@@ -63,7 +70,16 @@ static void *render_thread(void *arg) {
         uint64_t t0 = rt_log ? plat_now_ns() : 0;
         switch (it.type) {
         case RQ_EXEC: backend_execute(it.a); break;
-        case RQ_FENCE: { NvnSync *s = it.p; s->seq = renderer_fence_seq(); __atomic_store_n(&s->signaled, 1, __ATOMIC_RELEASE); break; }
+        case RQ_FENCE: {
+            extern uint64_t renderer_guest_write_seq(void);
+            NvnSync *s = it.p;
+            s->seq = renderer_fence_seq();
+            extern bool renderer_fence_point(uint64_t *mark);
+            s->gw_ok = renderer_fence_point(&s->gw_mark);  // (guarded compute writes: may end the submission)
+            s->write_seq = renderer_guest_write_seq();
+            __atomic_store_n(&s->signaled, 1, __ATOMIC_RELEASE);
+            break;
+        }
         case RQ_FRAME: backend_frame_done(it.p, it.a); break;
         case RQ_PRESENT: backend_present(it.p); atomic_fetch_sub(&q_presents, 1); break;
         case RQ_ODYSSEY_POSE: odyssey_pose_render_frame(it.p); break;
@@ -74,7 +90,7 @@ static void *render_thread(void *arg) {
             RqPaintWrite *w = it.p; renderer_paint_cpu_written(w->addr, w->size); break;
         }
 #endif
-#ifdef _WIN32
+#ifndef __APPLE__  // (the temporal upscalers: every Vulkan build)
         case RQ_DLSS_CAMERA: vk_dlss_set_camera(it.p); free(it.p); break;
 #endif
         }
@@ -121,6 +137,7 @@ uint64_t rq_push(int type, void *p, uint64_t a) {
 }
 
 bool rq_is_done(uint64_t ticket) { return atomic_load(&q_done) >= ticket; }
+uint64_t rq_done_ticket(void) { return atomic_load(&q_done); }
 
 uint64_t rq_last_ticket(void) {
     pthread_mutex_lock(&q_mx);

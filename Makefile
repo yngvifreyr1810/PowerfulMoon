@@ -92,7 +92,7 @@ OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S 
 GENARCH  ?= -march=x86-64-v3  # AVX2 + FMA for the lifted FP/SIMD code (simd.h); override for older CPUs
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
-            -lvulkan-1 -lwinmm -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared \
+            -lvulkan-1 -lwinmm -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared -lpdh -lbcrypt -lwinhttp -lwintrust -lcrypt32 \
             $(if $(CONSOLE),,-Wl$(comma)--subsystem$(comma)windows)  # no console window (log -> PowerfulMoon.log); CONSOLE=1: one
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
@@ -204,6 +204,20 @@ gen-objs: $(GEN_OBJ)
 # Runtime objects only (no generated code, no link): quick compile check
 runtime-objs: $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ)
 
+$(B)/ptbr-test-main.o: runtime/main.c $(RT_HDRS)
+	$(CC) $(RTFLAGS) -Dmain=ptbr_runtime_main -c $< -o $@
+
+$(B)/ptbr-test.o: tools/test_ptbr_install.c runtime/ptbr_install.h
+	$(CC) $(RTFLAGS) -c $< -o $@
+
+PTBR_TEST := $(B)/test_ptbr_install$(if $(filter windows,$(PLATFORM)),.exe)
+$(PTBR_TEST): $(filter-out $(B)/rt/main.o,$(RT_OBJ)) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(B)/ptbr-test-main.o $(B)/ptbr-test.o
+	$(CXX) -o $@ $^ $(filter-out -Wl$(comma)--out-implib% -Wl$(comma)--subsystem%,$(LDFLAGS))
+
+.PHONY: test-ptbr-installer
+test-ptbr-installer: $(PTBR_TEST)
+	$(PY) tools/test_ptbr_install.py $(PTBR_TEST)
+
 $(B)/rt/platform/windows_rc.o: runtime/platform/windows.rc docs/icon/icon.ico
 	@mkdir -p $(dir $@)
 	$(WINDRES) -I docs/icon -O coff $< -o $@
@@ -288,6 +302,8 @@ dist:
 	cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
 	    "$(DIST)/gamelib-src/"
 	cp runtime/nvn/vulkan/known_programs.txt third_party/imgui/misc/fonts/Roboto-Medium.ttf data/pipeline-seed.bin 	    README.md LICENSE "$(DIST)/"
+	mkdir -p "$(DIST)/lang" && cp runtime/ui/lang/*.txt "$(DIST)/lang/"  # (the menu's translations: runtime/ui/i18n.mm)
+	mkdir -p "$(DIST)/fsr2" && cp third_party/fsr2/shaders/* third_party/fsr2/LICENSE.txt "$(DIST)/fsr2/"  # (FSR 2: runtime/nvn/vulkan/fsr2.c)
 	cp build/upscalers/*.dll "$(DIST)/"  # (loaded only when chosen in the menu)
 	tools/dist_licenses.sh "$(DIST)"  # (every shipped component's licence and source: licenses/README.txt)
 	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/PowerfulMoon.exe | awk '(/ucrt64/ || /deps-win/) && !/vulkan-1/ {print $$3}' | \

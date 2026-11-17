@@ -1,14 +1,23 @@
 #include "dlss_probe.h"
 #include "fsr3_sdk.h"
 #include "xess_sdk.h"
+#include "fsr2.h"
+#include "sl_glue.h"
 
-#ifdef _WIN32
+#ifndef __APPLE__
+// (the temporal upscalers' common pipeline - scene detection, jitter, depth, motion vectors - on every Vulkan build;
+// NVIDIA's DLSS (NGX) and the Windows DLL runtimes only on Windows: FSR 2 (fsr2.c) is the one off Windows)
 #include <math.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#ifdef _WIN32
 #include <windows.h>
+#else
+typedef void *HMODULE;
+#endif
 
 #include "../../platform.h"
 #include "../../settings.h"
@@ -46,13 +55,15 @@ static int temporal_mode(void) {
 }
 
 bool vk_temporal_enabled(void) {
+    if (g_settings.temporal_off) return false;  // (the menu's Upscale method: Off - the default)
     if (g_settings.temporal_backend == TEMPORAL_FSR3)
         return g_settings.fsr3_mode != DLSS_OFF && vk_fsr3_available();
     if (g_settings.temporal_backend == TEMPORAL_FSR4)
         return g_settings.fsr4_mode != DLSS_OFF && (vk_fsr4_available() || vk_fsr3_available());
     if (g_settings.temporal_backend == TEMPORAL_XESS)
         return g_settings.xess_mode != DLSS_OFF && vk_xess_available();
-    return !forced_off && g_settings.dlss_mode != DLSS_OFF && atomic_load_explicit(&available, memory_order_relaxed);
+    if (g_settings.temporal_backend == TEMPORAL_FSR2) return g_settings.fsr3_mode != DLSS_OFF && vk_fsr2_available();
+    return !forced_off && g_settings.dlss_mode != DLSS_OFF && atomic_load_explicit(&available, memory_order_acquire);
 }
 
 double vk_temporal_scale(void) {
@@ -66,7 +77,9 @@ double vk_temporal_scale(void) {
 }
 
 static void close_ngx(void) {
+#ifdef _WIN32
     if (ngx.library) FreeLibrary(ngx.library);
+#endif
     memset(&ngx, 0, sizeof ngx);
 }
 
@@ -95,6 +108,10 @@ void vk_dlss_probe_instance(const char **ext, uint32_t *count, uint32_t capacity
     const char *override = getenv("ODYSSEY_DLSS");  // tests can disable the driver path
     forced_off = override && !strcmp(override, "0");
     if (forced_off) return;
+#ifndef _WIN32
+    (void)ext, (void)count, (void)capacity;
+}
+#else
     // Probe capability even when initially Off, so enabling it in the menu can
     // use the Vulkan extensions already enabled on this device.
     wchar_t path[1024];
@@ -137,6 +154,7 @@ void vk_dlss_probe_instance(const char **ext, uint32_t *count, uint32_t capacity
         !add_extensions(have, available, ext, count, capacity, needed, required)) close_ngx();
     free(have);
 }
+#endif
 
 void vk_dlss_probe_device(const VkExtensionProperties *have, uint32_t available,
                           const char **ext, uint32_t *count, uint32_t capacity) {
@@ -165,6 +183,7 @@ typedef struct {
 } DlssMake;
 static DlssMake mk;
 
+#ifdef _WIN32
 static DWORD WINAPI dlss_make_thread(void *arg) {
     (void)arg;
     uint64_t t0 = plat_now_ns();
@@ -218,8 +237,10 @@ static DWORD WINAPI dlss_make_thread(void *arg) {
     return 0;
 }
 
+#endif
 void vk_dlss_probe_run(void) {
     if (!ngx.library) return;
+#ifdef _WIN32
     wchar_t dir[1024];
     DWORD len = GetModuleFileNameW(NULL, dir, sizeof dir / sizeof *dir);
     wchar_t *last = len && len < sizeof dir / sizeof *dir ? wcsrchr(dir, L'\\') : NULL;
@@ -244,13 +265,15 @@ void vk_dlss_probe_run(void) {
                 VkPhysicalDeviceFeatures features;
                 vkGetPhysicalDeviceFeatures(g_vk.phys, &features);
                 if (features.shaderStorageImageExtendedFormats) {
-                    atomic_store_explicit(&available, true, memory_order_relaxed);
+                    atomic_store_explicit(&available, true, memory_order_release);  // (ngx.* set before: device.c
+                    // runs this probe on a thread of its own while the game starts)
                     return;
                 }
             }
             ngx.shutdown(g_vk.dev);
         } else LOG("[dlss] Vulkan NGX initialization failed (%08x)\n", r);
     } else LOG("[dlss] cannot locate the application folder\n");
+#endif
     // The instance and device have consumed their extension names by now.
     close_ngx();
 }
@@ -407,6 +430,7 @@ static bool reset_output(void) {
     if (dlss.output_seq) vk_wait_seq(dlss.output_seq);
     vk_fsr3_release();
     vk_xess_release();
+    vk_fsr2_release();
     if (dlss.feature) ngx.release(dlss.feature);
     destroy_image(&dlss.output);
     dlss.feature = NULL;
@@ -566,7 +590,11 @@ static VkImageView evaluate(VkCommandBuffer cb, const TexBackend *color, VkImage
     if (!motion_init(cb)) return VK_NULL_HANDLE;
     bool fsr3 = g_settings.temporal_backend == TEMPORAL_FSR3 || g_settings.temporal_backend == TEMPORAL_FSR4;
     bool xess = g_settings.temporal_backend == TEMPORAL_XESS;
-    bool nvidia = !fsr3 && !xess;
+    bool fsr2 = g_settings.temporal_backend == TEMPORAL_FSR2;
+    bool nvidia = !fsr3 && !xess && !fsr2;
+#ifndef _WIN32
+    nvidia = false;  // (no DLSS here)
+#endif
     if (nvidia && !dlss.parameters) {
         unsigned r = ngx.allocate(&dlss.parameters);
         if (r != 1 || !dlss.parameters) { failed("parameter allocation", r); return VK_NULL_HANDLE; }
@@ -584,6 +612,7 @@ static VkImageView evaluate(VkCommandBuffer cb, const TexBackend *color, VkImage
         dlss.feature_backend = g_settings.temporal_backend;
         dlss.feature_ml = g_settings.temporal_backend == TEMPORAL_FSR4 && vk_fsr4_available();
     }
+#ifdef _WIN32
     if (nvidia && !dlss.feature) {
         set_uint(p, "CreationNodeMask", 1);
         set_uint(p, "VisibilityNodeMask", 1);
@@ -634,6 +663,7 @@ static VkImageView evaluate(VkCommandBuffer cb, const TexBackend *color, VkImage
         dlss.feature_mode = mode; dlss.feature_preset = preset;
         LOG("[dlss] %s created: %ux%u -> %ux%u, preset hint %u\n", names[mode], dlss.w, dlss.h, ow, oh, model);
     }
+#endif
 
     float matrix[16] = {0};
     uint64_t now = plat_now_ns();
@@ -664,7 +694,7 @@ static VkImageView evaluate(VkCommandBuffer cb, const TexBackend *color, VkImage
     motion_dispatch(cb, matrix);
     unsigned r;
     uint64_t t0 = stamp >= 0 ? plat_now_ns() : 0;
-    if (fsr3 || xess) {
+    if (fsr3 || xess || fsr2) {
         const float *proj = dlss.scene.projection;
         float near_z = fabsf(proj[11] / (proj[10] - 1)), far_z = fabsf(proj[11] / (proj[10] + 1));
         if (!isfinite(near_z) || near_z < 0.001f) near_z = 10;
@@ -675,7 +705,13 @@ static VkImageView evaluate(VkCommandBuffer cb, const TexBackend *color, VkImage
             .near_z = near_z, .far_z = far_z, .fov_y = 2 * atanf(1 / fabsf(proj[5])),
             .sharpness = *settings_temporal_sharpness() * 0.01f, .reset = reset,
             .ml = g_settings.temporal_backend == TEMPORAL_FSR4};
-        if (xess) {
+        if (fsr2) {
+            Fsr2Frame g = {.color_view = view, .depth_view = dlss.depth.view, .motion_view = dlss.motion.view,
+                .output_view = dlss.output.view, .output = dlss.output.image, .w = dlss.w, .h = dlss.h, .ow = ow, .oh = oh,
+                .jitter = {f.jitter[0], f.jitter[1]}, .dt_ms = f.dt_ms, .near_z = f.near_z, .far_z = f.far_z,
+                .fov_y = f.fov_y, .sharpness = f.sharpness, .reset = reset};
+            r = vk_fsr2_dispatch(cb, &g) ? 1 : 0;
+        } else if (xess) {
             XessFrame x = {.frame = f, .color_view = view, .depth_view = dlss.depth.view,
                 .motion_view = dlss.motion.view, .output_view = dlss.output.view, .mode = temporal_mode()};
             r = vk_xess_dispatch(cb, &x) ? 1 : 0;
@@ -717,6 +753,34 @@ static VkImageView evaluate(VkCommandBuffer cb, const TexBackend *color, VkImage
     dlss.history = true;
     dlss.last_eval = frame;
     dlss.last_eval_ns = now;
+    if (vk_fg_active()) {  // (FSR frame generation: this frame's depth and motion vectors, as the upscaler had them)
+        const float *proj = dlss.scene.projection;
+        float near_z = fabsf(proj[11] / (proj[10] - 1)), far_z = fabsf(proj[11] / (proj[10] + 1));
+        if (!isfinite(near_z) || near_z < 0.001f) near_z = 10;
+        if (!isfinite(far_z) || far_z <= near_z) far_z = 1000000;
+        FgFrame g = {.depth = dlss.depth.image, .motion = dlss.motion.image, .w = dlss.w, .h = dlss.h,
+            .jitter = {dlss.scene_jitter[0], dlss.scene_jitter[1]},
+            .dt_ms = elapsed_ms > 0 && elapsed_ms < 100 ? (float)elapsed_ms : 16.667f,
+            .near_z = near_z, .far_z = far_z, .fov_y = 2 * atanf(1 / fabsf(proj[5])), .reset = reset};
+        vk_fg_prepare(cb, &g);
+    }
+#ifdef _WIN32
+    if (vk_sl_dlssg_available()) {  // (NVIDIA DLSS frame generation: this frame's depth, motion vectors and camera)
+        const float *proj = dlss.scene.projection;
+        SlFrame s = {.depth = {dlss.depth.image, dlss.depth.view, VK_FORMAT_D32_SFLOAT, dlss.w, dlss.h,
+                               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT},
+                     .mvec = {dlss.motion.image, dlss.motion.view, VK_FORMAT_R16G16_SFLOAT, dlss.w, dlss.h,
+                              VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT},
+                     .jitter = {dlss.scene_jitter[0], dlss.scene_jitter[1]}, .aspect = (float)dlss.w / dlss.h, .reset = reset};
+        for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) s.view_to_clip[r * 4 + c] = proj[c * 4 + r];  // (row vectors)
+        memcpy(s.clip_to_prev_clip, matrix, sizeof s.clip_to_prev_clip);  // (the motion pass's, column major: = row vectors)
+        s.near_z = fabsf(proj[11] / (proj[10] - 1)), s.far_z = fabsf(proj[11] / (proj[10] + 1));
+        if (!isfinite(s.near_z) || s.near_z < 0.001f) s.near_z = 10;
+        if (!isfinite(s.far_z) || s.far_z <= s.near_z) s.far_z = 1000000;
+        s.fov_y = 2 * atanf(1 / fabsf(proj[5]));
+        vk_sl_frame(frame, cb, &s);
+    }
+#endif
     if (++dlss.eval_count == 1 || dlss.eval_count % 240 == 0)
         LOG("[%s] frame %llu: %llu evaluated frames\n", xess ? "xess" : fsr3 ?
             (g_settings.temporal_backend == TEMPORAL_FSR4 && vk_fsr4_available() ? "fsr4" : "fsr3") : "dlss",

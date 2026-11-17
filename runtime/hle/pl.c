@@ -18,6 +18,12 @@
 
 typedef struct { uint64_t addr, size; } Font;
 static Font fonts[2];  // [0] Standard (every type), [1] NintendoExt when a dump provides it
+// Korean and Chinese (types 1-4): their own fonts - the Standard substitute (Yu Gothic, Arial, DejaVu) has no Hangul,
+// so every Korean text the game draws in a system font showed "???" (#46: the map's brochure). Loaded when the game
+// first asks for that type; one file serves every type that uses it.
+static Font cjk[5];
+static int cjk_tried[5];
+static struct { char path[600]; Font f; } cjk_seen[5];  // (the file each type loaded: another type with it shares it)
 
 static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
 static void put32(uint8_t *p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
@@ -107,7 +113,11 @@ static int load_one(const char *path, Font *ft) {
 }
 
 static int g_fonts_loaded;
-RT_ON_RESET(pl_reset) { g_fonts_loaded = 0; memset(fonts, 0, sizeof fonts); }  // (they were in the HLE heap)
+RT_ON_RESET(pl_reset) {
+    g_fonts_loaded = 0;
+    memset(fonts, 0, sizeof fonts);
+    memset(cjk, 0, sizeof cjk), memset(cjk_tried, 0, sizeof cjk_tried), memset(cjk_seen, 0, sizeof cjk_seen);
+}  // (they were in the HLE heap)
 
 static void load_fonts(void) {
     if (g_fonts_loaded) return;
@@ -138,9 +148,49 @@ static void load_fonts(void) {
     if (!load_one("fonts/nintendo_ext_003.bfttf", &fonts[1])) load_one("fonts/nintendo_ext_003.ttf", &fonts[1]);
 }
 
+// A font for Korean / Chinese: a dump from the user's console in fonts/, else a system font with the script in TrueType
+// outlines (the game's font engine crashes on CFF - Noto Sans CJK): Windows' Malgun Gothic / YaHei / JhengHei, the
+// Go Noto Kurrent that Steam ships (Steam Deck, Linux Steam: Hangul, CJK and kana), Nanum Gothic.
+static void load_cjk(int type) {
+    if (cjk_tried[type]) return;
+    cjk_tried[type] = 1;
+    char steam1[600] = "", steam2[600] = "";
+    const char *home = getenv("HOME");
+    if (home) {
+        snprintf(steam1, sizeof steam1, "%s/.local/share/Steam/clientui/fonts/GoNotoKurrent-Regular.ttf", home);
+        snprintf(steam2, sizeof steam2, "%s/.steam/steam/clientui/fonts/GoNotoKurrent-Regular.ttf", home);
+    }
+    const char *ko[] = {"fonts/nintendo_udsg-r_ko_003.bfttf", "fonts/nintendo_udsg-r_ko_003.ttf", "C:/Windows/Fonts/malgun.ttf",
+                        steam1, steam2, "/usr/share/fonts/nanum/NanumGothic.ttf", "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+                        "/usr/share/fonts/naver-nanum/NanumGothic.ttf", "/System/Library/Fonts/AppleSDGothicNeo.ttc"};
+    const char *cn[] = {"fonts/nintendo_udjxh-db_zh-cn_003.bfttf", "fonts/nintendo_udjxh-db_zh-cn_003.ttf", "C:/Windows/Fonts/msyh.ttc",
+                        steam1, steam2, "/System/Library/Fonts/PingFang.ttc"};
+    const char *tw[] = {"fonts/nintendo_udjxh-db_zh-tw_003.bfttf", "fonts/nintendo_udjxh-db_zh-tw_003.ttf", "C:/Windows/Fonts/msjh.ttc",
+                        steam1, steam2, "/System/Library/Fonts/PingFang.ttc"};
+    const char **list = type == 4 ? ko : type == 3 ? tw : cn;
+    size_t n = type == 4 ? sizeof ko / sizeof *ko : type == 3 ? sizeof tw / sizeof *tw : sizeof cn / sizeof *cn;
+    for (size_t i = 0; i < n && !cjk[type].addr; i++) {
+        if (!list[i] || !*list[i]) continue;
+        FILE *f = fopen(list[i], "rb");
+        if (!f) continue;
+        fclose(f);
+        for (int t = 1; t <= 4; t++) if (cjk_seen[t].f.addr && !strcmp(cjk_seen[t].path, list[i])) cjk[type] = cjk_seen[t].f;
+        if (!cjk[type].addr && load_one(list[i], &cjk[type])) {
+            snprintf(cjk_seen[type].path, sizeof cjk_seen[type].path, "%s", list[i]);
+            cjk_seen[type].f = cjk[type];
+        }
+    }
+    if (!cjk[type].addr) LOG("[pl] no %s font found: that text uses the standard font (dump yours into fonts/)\n",
+                             type == 4 ? "Korean" : "Chinese");
+}
+
 // SharedFontType: 0 Standard, 1 ChineseSimple, 2 ChineseSimpleExt, 3 ChineseTraditional, 4 Korean, 5 NintendoExt
 static const Font *font_for(uint64_t type) {
     load_fonts();
+    if (type >= 1 && type <= 4) {
+        load_cjk((int)type);
+        if (cjk[type].addr) return &cjk[type];
+    }
     return type == 5 && fonts[1].addr ? &fonts[1] : &fonts[0];
 }
 

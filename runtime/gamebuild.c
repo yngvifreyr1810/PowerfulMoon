@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 
 #include "gamelib.h"
+#include "gamelib_cpu.h"
 #include "paths.h"
 #include "platform.h"
 #include "rt.h"
@@ -293,7 +294,10 @@ static void add_cflags(Args *a, const Tools *t) {
     char buf[1024];
     snprintf(buf, sizeof buf, "%s", GAMELIB_CFLAGS);
     char *save = NULL;
+    const char *march = gamelib_cpu_march();  // (an older CPU than the build's target: what it has - gamelib.c)
+    char own[128];
     for (char *f = strtok_r(buf, " ", &save); f; f = strtok_r(NULL, " ", &save)) {
+        if (march && !strncmp(f, "-march=", 7)) snprintf(own, sizeof own, "-march=%s", march), f = own;
         if (t->zig && !strncmp(f, "-march=", 7)) {
             char cpu[128];
             snprintf(cpu, sizeof cpu, "-mcpu=%s", f + 7);
@@ -314,7 +318,9 @@ static PlatProc start_compile(const Tools *t, const Unit *u, bool entry) {
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);
     add(&a, inc);
-    add(&a, "-DGAMELIB_ID=\"" GAMELIB_ID "\"");
+    char idd[160];
+    snprintf(idd, sizeof idd, "-DGAMELIB_ID=\"%s\"", gamelib_id());  // (with the CPU level below the build's target)
+    add(&a, idd);
     if (entry) add(&a, g_modules_def);
     add(&a, "-c");
     add(&a, u->src);
@@ -354,8 +360,9 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         setenv("ZIG_LOCAL_CACHE_DIR", zc, 1);
 #endif
     }
-    LOG("[gamebuild] generator %s%s%s, compiler %s%s, %d jobs\n", t.gen, t.gen_script[0] ? " " : "", t.gen_script,
-        t.cc, t.zig ? " cc" : "", o->jobs);
+    LOG("[gamebuild] generator %s%s%s, compiler %s%s, %d jobs, for a CPU with %s%s%s\n", t.gen, t.gen_script[0] ? " " : "",
+        t.gen_script, t.cc, t.zig ? " cc" : "", o->jobs, gamelib_cpu_name(), gamelib_cpu_march() ? ": -march=" : "",
+        gamelib_cpu_march() ? gamelib_cpu_march() : "");
 
     // 1. the generator, all modules at once; their finished files are compiled while it goes on
     Gen gens[NMOD];
@@ -559,7 +566,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         char idp[1100];
         snprintf(idp, sizeof idp, "%s.id", lib);
         FILE *f = NULL;
-        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", GAMELIB_ID) < 0) {
+        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", gamelib_id()) < 0) {
             snprintf(why, why_size, "the game code couldn't be saved");
             ok = false;
         }

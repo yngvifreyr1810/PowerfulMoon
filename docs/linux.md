@@ -8,7 +8,7 @@ containers) and published with the releases; reports welcome.
     ./"Power Moon Recomp-<version>-linux-x86_64.AppImage"
 
 Needs: a distribution with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36, Arch, SteamOS, ...), a Vulkan 1.3
-driver (Mesa RADV / ANV / NVK, or NVIDIA's), a CPU with AVX2 (2013 or newer), about 7 GB free space, and your own copy
+driver (Mesa RADV / ANV / NVK, or NVIDIA's), a 64-bit x86 CPU (AVX2, 2013 or newer, recommended; older ones work, slower), about 12 GB free space, and your own copy
 of Super Mario Odyssey 1.0.0 (extracted: `exefs` and `romfs`). The setup page asks for that folder on the first start
 and builds the game code on your PC (a few minutes, once).
 
@@ -19,6 +19,13 @@ Everything the app writes lives in `~/.local/share/power-moon-recomp` (`$XDG_DAT
 
 If the AppImage won't start with a FUSE error, install your distribution's `fuse3` package, or run it with
 `APPIMAGE_EXTRACT_AND_RUN=1`. On a Steam Deck, put `APPIMAGE_EXTRACT_AND_RUN=1 %command%` in the game's launch options.
+
+## Brazilian Portuguese fan translation
+
+The [Brazilian Portuguese installer](PT-BR.md) also uses the system's `curl`.
+AppImages include `bsdtar` for the authors' RAR package. For a source build,
+install your distribution's `libarchive-tools` package instead. GNU tar cannot
+extract this package. No translation assets ship in the AppImage.
 
 ## Reporting a problem
 Open an issue with your distribution, GPU and driver version, what happened, and the log file. Never attach game files.

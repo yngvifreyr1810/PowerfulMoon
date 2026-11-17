@@ -12,6 +12,7 @@
 
 #include "../hle.h"
 #include "../settings.h"
+#include "../localization.h"
 
 static uint64_t code_mem;
 
@@ -52,7 +53,9 @@ void hle__ZN14GameDataHolder44readFromSaveDataBufferCommonFileOnlyLanguageEv(Cpu
         }
     }
     const char *code = g_settings.language > LANG_AUTO && g_settings.language < N_LANGUAGES
-                       ? game_code(g_language_codes[g_settings.language]) : NULL;
+                       ? game_code(settings_language()) : NULL;
+    if (g_settings.language == LANG_PT_BR)
+        LOG("[language] %s\n", localization_ptbr_message());
     if (code) {
         if (!code_mem) code_mem = (uint64_t)(uintptr_t)hle_alloc(0x40);
         memcpy((void *)(uintptr_t)code_mem, code, strlen(code) + 1);

@@ -39,10 +39,14 @@ U=$APPDIR/usr/bin
 cp "$B/PowerMoonRecomp" "$U/"
 llvm-strip --strip-debug "$U/PowerMoonRecomp"  # (symbols stay: crash backtraces name functions)
 cp docs/icon/icon_512.png "$U/icon.png"
-cp third_party/imgui/misc/fonts/Roboto-Medium.ttf runtime/nvn/vulkan/known_programs.txt README.md LICENSE "$U/"
+cp third_party/imgui/misc/fonts/Roboto-Medium.ttf runtime/nvn/vulkan/known_programs.txt data/pipeline-seed.bin README.md \
+   LICENSE "$U/"
+mkdir -p "$U/lang" && cp runtime/ui/lang/*.txt "$U/lang/"  # (the menu's translations: runtime/ui/i18n.mm)
+mkdir -p "$U/fsr2" && cp third_party/fsr2/shaders/* third_party/fsr2/LICENSE.txt "$U/fsr2/"  # (FSR 2: runtime/nvn/vulkan/fsr2.c)
 [ -d "$L/helper/odysseygen" ] || { echo "no game code generator helper: tools/linux/gen_helper.sh $ARCH first"; exit 1; }
 cp -R "$L/helper/odysseygen" build/zig "$U/"
 mkdir "$U/gamelib-src"
+cp "$P/bin/bsdtar" "$U/"
 cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
    "$U/gamelib-src/"
 cp tools/linux/AppRun "$APPDIR/" && chmod +x "$APPDIR/AppRun"
@@ -63,6 +67,7 @@ cp "$W/ffmpeg/COPYING.LGPLv2.1" "$D/FFmpeg-LGPL-2.1.txt"
 cp "$W/ffmpeg/COPYING.GPLv2" "$D/GPL-2.0.txt"
 cp "$W/shaderc/LICENSE" "$D/shaderc-Apache-2.0.txt"
 cp build/zig/LICENSE "$D/Zig-MIT.txt"
+cp "$W/libarchive/COPYING" "$D/libarchive.txt"
 SP=$(echo "$L"/gen-venv/lib/python3.12/site-packages)
 cp "$SP"/pyinstaller-*.dist-info/licenses/COPYING.txt "$D/PyInstaller.txt"
 cp "$SP"/capstone-*.dist-info/LICENSE.TXT "$D/Capstone-BSD.txt" 2>/dev/null || true
@@ -71,6 +76,7 @@ cp /usr/share/doc/python3.12/copyright "$D/Python-PSF.txt" 2>/dev/null || true
 cat > "$D/README.txt" <<'EOF'
 Power Moon Recomp - third-party components in this AppImage and their licences
 - SDL 3.4.16 (zlib) - SDL3-zlib.txt
+- libarchive/bsdtar 3.8.11 (BSD; translation package extraction) - libarchive.txt
 - FFmpeg 9.0.2, an LGPL-only build, linked dynamically (usr/lib) - FFmpeg-LGPL-2.1.txt; source:
   https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz, configured as tools/linux/build_deps.sh in the source repository
 - shaderc 2026.3 (Apache 2.0) - shaderc-Apache-2.0.txt; Vulkan Memory Allocator (MIT); Dear ImGui (MIT); SMAA (MIT);
@@ -85,7 +91,7 @@ EOF
 # libraries: what the app needs (DT_NEEDED, recursively) that deps/ provides; anything else must be a system one
 needed() { readelf -d "$1" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'; }
 SYSTEM_LIBS='^(libc|libm|libdl|libpthread|librt|libresolv|libstdc\+\+|libgcc_s|libvulkan)\.so|^ld-linux'
-todo=("$U/PowerMoonRecomp")
+todo=("$U/PowerMoonRecomp" "$U/bsdtar")
 while [ ${#todo[@]} -gt 0 ]; do
     f=${todo[0]}; todo=("${todo[@]:1}")
     for n in $(needed "$f"); do
@@ -100,6 +106,7 @@ while [ ${#todo[@]} -gt 0 ]; do
     done
 done
 patchelf --set-rpath '$ORIGIN/../lib' "$U/PowerMoonRecomp"
+patchelf --set-rpath '$ORIGIN/../lib' "$U/bsdtar"
 if ls "$APPDIR/usr/lib" | grep -iE 'x264|x265|xvid|postproc|vulkan'; then  # (no GPL codecs, no Vulkan loader)
     echo "package: library that must not ship"; exit 1
 fi

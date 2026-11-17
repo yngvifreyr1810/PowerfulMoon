@@ -228,6 +228,17 @@ static CmdRec *rec(Cpu *c, NvnCmdBuf *cb, uint32_t op, uint32_t extra) {
     return r;
 }
 
+// (runtime/hle/odyssey_hud.c) the game's layout drawing begins / ends in this command buffer: the renderer draws the HUD
+// at the output resolution (exec.c "HUD layer")
+void nvn_ui_mark(Cpu *c, uint64_t guest_cmdbuf, int on, uint64_t anchored) {
+    if (guest_cmdbuf < 0x1000) return;
+    NvnCmdBuf *cb = cb_of(guest_cmdbuf);
+    if (!cb || cb->guest != guest_cmdbuf || !cb->recording || !cb->arena) return;
+    CmdRec *r = rec(c, cb, CMD_UI_MARK, 0);
+    r->x[0] = on ? 1 : 0;
+    r->x[1] = on ? anchored : 0;
+}
+
 NVN(nvnCommandBufferBeginRecording) {
     NvnCmdBuf *cb = cb_of(A(0));
     cb->recording = true;
@@ -447,7 +458,7 @@ PLAIN(nvnCommandBufferSetPointSize, CMD_SET_POINT_SIZE, "")
 PLAIN(nvnCommandBufferSetSampleMask, CMD_SET_SAMPLE_MASK, "i")
 PLAIN(nvnCommandBufferSetRenderEnable, CMD_SET_RENDER_ENABLE, "b")
 NVN(nvnCommandBufferSetRenderEnableConditional) { (void)c; }
-NVN(nvnCommandBufferSetDepthClamp) { (void)c; }
+PLAIN(nvnCommandBufferSetDepthClamp, CMD_SET_DEPTH_CLAMP, "b")
 NVN(nvnCommandBufferSetRasterizerDiscard) { (void)c; }
 NVN(nvnCommandBufferSetConservativeRasterEnable) { (void)c; }
 NVN(nvnCommandBufferSetConservativeRasterDilate) { (void)c; }
