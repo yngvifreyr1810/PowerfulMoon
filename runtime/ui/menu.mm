@@ -37,6 +37,7 @@ extern "C" {
 #include "../settings.h"
 #include "../controller_motion.h"
 #include "../update_launcher.h"
+#include "../updater.h"
 #include "../release_info.h"
 #include "menu.h"
 #include "setup.h"
