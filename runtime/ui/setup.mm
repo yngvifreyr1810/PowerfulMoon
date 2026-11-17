@@ -319,6 +319,7 @@ void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool, void (*pr
 #ifndef __APPLE__
 extern "C" bool vk_prepare_due(void);
 extern "C" void vk_prepare_skip_this_start(void);
+extern "C" int vk_prepare_install(void (*progress)(int phase, int done, int total), volatile int *cancel);
 enum { PREP_NONE, PREP_ASK, PREP_RUN, PREP_DONE };
 static std::atomic<int> g_prep{PREP_NONE}, g_prep_phase{0}, g_prep_done{0}, g_prep_total{0}, g_prep_code{0};
 static volatile int g_prep_cancel;
