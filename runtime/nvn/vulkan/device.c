@@ -1105,7 +1105,14 @@ static void image_copy(const TexBackend *src, const TexBackend *dst) {
 static float display_hz(void) {
     SDL_DisplayID d = window ? SDL_GetDisplayForWindow(window) : 0;
     const SDL_DisplayMode *m = d ? SDL_GetCurrentDisplayMode(d) : NULL;
-    return m ? m->refresh_rate : 0;
+    const SDL_DisplayMode *desktop = d ? SDL_GetDesktopDisplayMode(d) : NULL;
+    // Windows can report the instantaneous VRR rate here. Borderless uses the
+    // desktop mode's nominal rate; exclusive fullscreen uses its selected mode.
+    const SDL_DisplayMode *fullscreen = window ? SDL_GetWindowFullscreenMode(window) : NULL;
+    float hz = m ? m->refresh_rate : 0;
+    if (fullscreen && fullscreen->refresh_rate > 0) return fullscreen->refresh_rate;
+    if (desktop && desktop->refresh_rate > hz) hz = desktop->refresh_rate;
+    return hz;
 }
 
 // The presenter: shows queued images at their times, in order. They are window images composed ahead (compose: the

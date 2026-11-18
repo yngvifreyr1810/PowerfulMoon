@@ -61,6 +61,37 @@ int main(void) {
     gyro[0] = 0; gyro[1] = 0.01f; gyro[2] = 0;
     motion_bias_sample(&b, accel, gyro, false, 8600000000ull);
     near(b.bias[1], saved_bias); near(gyro[1], 0.01f - saved_bias);
-    puts("motion gate: menu/load settling, gyro bias and intentional motion passed");
+    // Raising the controller gently before a downward flick must not send the
+    // preparatory gyro pulse. The following sharp flick keeps its direction.
+    MotionFilter filter = {0};
+    float gesture[18] = {[2] = -1, [9] = 1};
+    motion_filter_sample(&filter, gesture, 2, true);
+    gesture[1] = -0.38f; gesture[2] = -1.43f; gesture[3] = 0.959f;
+    motion_filter_sample(&filter, gesture, 2, true);
+    assert(fabsf(gesture[1]) < 0.05f);
+    near(gesture[3], 0);
+    assert(gesture[2] > -1.05f);
+    near(gesture[9], 1);
+    gesture[1] = -0.65f; gesture[2] = 2.73f; gesture[3] = -1.861f;
+    motion_filter_sample(&filter, gesture, 2, true);
+    near(gesture[1], -0.65f);
+    near(gesture[2], 2.73f);
+    near(gesture[3], -1.861f);
+    gesture[3] = 0.1f;
+    motion_filter_sample(&filter, gesture, 0, true);
+    near(gesture[3], 0.1f);
+    assert(!filter.ready);
+
+    // Pitch the controller 90 degrees, then turn about its local Z axis.
+    // The accelerometer's gravity must rotate in the same local axes.
+    float direction[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1}, down[3];
+    const float pitch[3] = {1.57079633f, 0, 0}, yaw[3] = {0, 0, 1.57079633f};
+    motion_rotate_direction(direction, pitch);
+    motion_gravity(direction, down);
+    near(down[0], 0); near(down[1], -1); near(down[2], 0);
+    motion_rotate_direction(direction, yaw);
+    motion_gravity(direction, down);
+    near(down[0], -1); near(down[1], 0); near(down[2], 0);
+    puts("motion gate: menu/load settling, gyro bias and gesture filtering passed");
     return 0;
 }

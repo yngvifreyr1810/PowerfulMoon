@@ -280,8 +280,10 @@ extern "C" void vk_sl_before_present(uint64_t frame, uint32_t w, uint32_t h) {
         shown += st.numFramesActuallyPresented;
         if (++n % 600 == 0) {
             SLOG("[streamline] DLSS-G: %llu frames presented for the last 600 rendered (status %u, max generated %u, "
-                 "min size %u, vsync %d, %d)\n", (unsigned long long)shown, (unsigned)st.status, st.numFramesToGenerateMax,
-                 st.minWidthOrHeight, (int)st.bIsVsyncSupportAvailable, (int)r);
+                 "min size %u, vsync %d, %d; preset %d FPS, enabled %d, scene age %llu)\n",
+                 (unsigned long long)shown, (unsigned)st.status, st.numFramesToGenerateMax,
+                 st.minWidthOrHeight, (int)st.bIsVsyncSupportAvailable, (int)r,
+                 settings_game_hz(), sl_.dlssg_on, (unsigned long long)(frame - sl_.scene_frame));
             shown = 0;
         }
     }

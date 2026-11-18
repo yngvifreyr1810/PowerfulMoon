@@ -284,8 +284,9 @@ void settings_load(void) {
         else if (!strcmp(key, "overlay_render")) g_settings.overlay_render = atoi(val) != 0;
         else if (!strcmp(key, "overlay_position")) g_settings.overlay_position = atoi(val) != 0;
         else if (!strcmp(key, "vibration")) g_settings.rumble = atoi(val) != 0;
-        else if (!strcmp(key, "vibration_strength")) { int v = atoi(val); g_settings.rumble_strength = v >= 25 && v <= 100 ? v : 100; }
+        else if (!strcmp(key, "vibration_strength")) { int v = atoi(val); g_settings.rumble_strength = v >= 25 && v <= 200 ? v : 100; }
         else if (!strcmp(key, "motion")) g_settings.motion = atoi(val) != 0;
+        else if (!strcmp(key, "motion_filter")) { int v = atoi(val); g_settings.motion_filter = v >= 0 && v <= 2 ? v : 0; }
         else if (!strcmp(key, "motion_invert_x")) g_settings.motion_invert_x = atoi(val) != 0;
         else if (!strcmp(key, "motion_invert_y")) g_settings.motion_invert_y = atoi(val) != 0;
         else if (!strcmp(key, "motion_gyro_bias")) {
@@ -452,6 +453,7 @@ void settings_save(void) {
     fprintf(f, "vibration = %d\n", g_settings.rumble);
     fprintf(f, "vibration_strength = %d\n", g_settings.rumble_strength);
     fprintf(f, "motion = %d\n", g_settings.motion);
+    fprintf(f, "motion_filter = %d\n", g_settings.motion_filter);
     fprintf(f, "motion_invert_x = %d\n", g_settings.motion_invert_x);
     fprintf(f, "motion_invert_y = %d\n", g_settings.motion_invert_y);
     fprintf(f, "motion_gyro_bias = %.5f %.5f %.5f\n", g_settings.motion_gyro_bias[0], g_settings.motion_gyro_bias[1],

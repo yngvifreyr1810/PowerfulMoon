@@ -485,6 +485,7 @@ static struct {
     int64_t sampling;
     uint64_t last_read_ns;
     MotionGate gate;
+    MotionFilter filter;
     MotionBias bias;
     uint64_t calibrate_until_ns;  // (Calibrate gyro: learning the offset at rest until then)
     bool calibrated;
@@ -514,6 +515,7 @@ static void motion_push(uint64_t now) {
         f[2] = -1;  // (no motion: a controller lying still, so the game sees no shake)
         f[9] = f[13] = f[17] = 1;
     }
+    motion_filter_sample(&mot.filter, f, g_settings.motion_filter, live && !mot.gate.blocked);
     // Preserve the last pose rather than injecting a sudden gravity/orientation change when the menu takes control;
     // discard menu movement on resume.
     motion_gate_sample(&mot.gate, f, !live, now);
@@ -576,6 +578,7 @@ static void motion_open(void) {
     memcpy(mot.dir, id, sizeof id);
     mot.gyro_ns = 0;
     motion_gate_init(&mot.gate);
+    mot.filter.ready = false;
     memset(&mot.bias, 0, sizeof mot.bias);
     memcpy(mot.bias.bias, g_settings.motion_gyro_bias, sizeof mot.bias.bias);  // (a saved calibration, else 0)
     motion_gate_settle(&mot.gate, plat_now_ns());
@@ -587,27 +590,6 @@ static void motion_open(void) {
 }
 
 // A rotation of the orientation by w (radians) about each axis: R' = R * exp([w]x) (Rodrigues), kept orthonormal
-static void rotate_dir(float *R, const float w[3]) {
-    float th = sqrtf(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
-    if (th < 1e-9f) return;
-    float k[3] = {w[0] / th, w[1] / th, w[2] / th}, c = cosf(th), s = sinf(th), t = 1 - c;
-    float M[9] = {t * k[0] * k[0] + c,        t * k[0] * k[1] - s * k[2], t * k[0] * k[2] + s * k[1],
-                  t * k[0] * k[1] + s * k[2], t * k[1] * k[1] + c,        t * k[1] * k[2] - s * k[0],
-                  t * k[0] * k[2] - s * k[1], t * k[1] * k[2] + s * k[0], t * k[2] * k[2] + c};
-    float o[9];
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++) o[i * 3 + j] = R[i * 3] * M[j] + R[i * 3 + 1] * M[3 + j] + R[i * 3 + 2] * M[6 + j];
-    for (int i = 0; i < 3; i++) {  // (Gram-Schmidt on the rows)
-        float *a = o + i * 3;
-        for (int j = 0; j < i; j++) {
-            float *b = o + j * 3, d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-            for (int q = 0; q < 3; q++) a[q] -= d * b[q];
-        }
-        float n = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
-        if (n > 1e-6f) for (int q = 0; q < 3; q++) a[q] /= n;
-    }
-    memcpy(R, o, sizeof o);
-}
 
 static void motion_event(const SDL_GamepadSensorEvent *e) {
     if (!pad || SDL_GetGamepadID(pad) != e->which) return;
@@ -645,26 +627,30 @@ static void motion_event(const SDL_GamepadSensorEvent *e) {
             float w[3] = {mot.gyro[0] * TURN, mot.gyro[1] * TURN, mot.gyro[2] * TURN};  // rad/s
             for (int i = 0; i < 3; i++) mot.angle[i] += mot.gyro[i] * dt;
             // Orientation drift corrected by gravity (a Mahony filter): where the orientation says gravity is, in the
-            // controller's axes (R^T (0, 0, -1): -the third row), against where the accelerometer feels it; their cross
-            // product turns the orientation towards it (gains 0.3 / 0.005 - the Switch emulators'). Only while the
-            // accelerometer reads about 1 G (not during a shake).
+            // controller's axes, against where the accelerometer feels it; their cross
+            // product turns the orientation towards it. Integrate in seconds so correction does not grow with
+            // the controller's sample rate. Only correct near 1 G (not during a shake).
             float an = sqrtf(mot.accel[0] * mot.accel[0] + mot.accel[1] * mot.accel[1] + mot.accel[2] * mot.accel[2]);
             if (an > 0.75f && an < 1.25f) {
                 float a[3] = {mot.accel[0] / an, mot.accel[1] / an, mot.accel[2] / an};
-                float v[3] = {-mot.dir[6], -mot.dir[7], -mot.dir[8]};
+                float v[3];
+                motion_gravity(mot.dir, v);
                 float err[3] = {a[1] * v[2] - a[2] * v[1], a[2] * v[0] - a[0] * v[2], a[0] * v[1] - a[1] * v[0]};
                 float en = err[0] * err[0] + err[1] * err[1] + err[2] * err[2];
                 for (int i = 0; i < 3; i++) {
-                    if (en > 0.05f * 0.05f) mot.err_i[i] += err[i]; else mot.err_i[i] = 0;
-                    w[i] += 0.3f * err[i] + 0.005f * mot.err_i[i];
+                    if (en > 0.05f * 0.05f)
+                        mot.err_i[i] = fmaxf(-0.25f, fminf(0.25f, mot.err_i[i] + err[i] * dt));
+                    else mot.err_i[i] = 0;
+                    w[i] += 0.3f * err[i] + mot.err_i[i];
                 }
-            }
+            } else memset(mot.err_i, 0, sizeof mot.err_i);  // don't carry correction through a shake
             for (int i = 0; i < 3; i++) w[i] *= dt;
-            rotate_dir(mot.dir, w);
+            motion_rotate_direction(mot.dir, w);
         }
         mot.gyro_ns = t;
         // the 200 Hz history at the sensor's clock: the states due up to this sample, with what it reads
-        if (!mot.tick_sensor_ns || t < mot.tick_sensor_ns - MOTION_TICK_NS || t - mot.tick_sensor_ns > 100000000ull)
+        if (!mot.tick_sensor_ns ||
+            (t < mot.tick_sensor_ns ? mot.tick_sensor_ns - t > MOTION_TICK_NS : t - mot.tick_sensor_ns > 100000000ull))
             mot.tick_sensor_ns = t;
         for (int n = 0; mot.tick_sensor_ns <= t && n < 32; n++, mot.tick_sensor_ns += MOTION_TICK_NS) motion_push(host_now);
     }
@@ -1338,8 +1324,8 @@ void input_vibration(uint32_t handle, float amp_low, float amp_high) {
         l = l < 0.015f ? 0 : (fminf(l, 1) + powf(fminf(l, 1), 0.4f)) * 0.5f;
         h = h < 0.015f ? 0 : (fminf(h, 1) + powf(fminf(h, 1), 0.4f)) * 0.5f;
     }
-    float strength = g_settings.rumble_strength > 0 && g_settings.rumble_strength <= 100 ? g_settings.rumble_strength / 100.0f : 1.0f;
-    l *= strength, h *= strength;
+    float strength = g_settings.rumble_strength >= 25 && g_settings.rumble_strength <= 200 ? g_settings.rumble_strength / 100.0f : 1.0f;
+    l = fminf(l * strength, 1.0f), h = fminf(h * strength, 1.0f);
     uint16_t L = (uint16_t)(l * 65535.0f), H = (uint16_t)(h * 65535.0f);
     uint64_t now = plat_now_ns();
     if (L == last_l[player] && H == last_h[player] && (!(L | H) || now - last_ns[player] < 100000000ull)) return;

@@ -984,19 +984,19 @@ static void tab_graphics(void) {
         static const char *fgn[FG_COUNT] = {"Off", "AMD FSR", "NVIDIA DLSS (Beta)"};
         int was = g_settings.frame_gen;
         if (opt_choice("Frame generation", &g_settings.frame_gen, fgn, FG_COUNT, FG_OFF,
-                       "A generated frame between each two the game renders: 120 FPS shown from the game's 60 - smoother "
-                       "motion on a 120 Hz or faster display, a little more input delay (Performance > Low latency takes most of it "
-                       "back). AMD FSR: any GPU; changes during play. NVIDIA DLSS: GeForce RTX 40 series or newer, with "
-                       "Reflex; applies the next time the game starts. Intel XeSS frame generation exists only for "
-                       "DirectX 12, not for this Vulkan renderer. Needs Frame rate 60 FPS. "
+                       "Adds one frame between rendered frames. AMD FSR needs the 60 FPS preset. NVIDIA DLSS works with "
+                       "the 60 or 90 FPS preset (up to 120 or 180 FPS shown), needs a supported Vulkan runtime and "
+                       "applies the next time the game starts. Keep an upscale method enabled. "
                        "The HUD can shimmer slightly on generated frames.")) {
             if (was == FG_FSR || g_settings.frame_gen == FG_FSR) vk_request_swapchain_remake();
         }
-        if (g_settings.frame_gen && settings_game_hz() != 60) {
+        int fps = settings_game_hz();
+        if ((g_settings.frame_gen == FG_FSR && fps != 60) ||
+            (g_settings.frame_gen == FG_DLSS && fps != 60 && fps != 90)) {
             opt_disable_next();
-            opt_action("Frame generation status", "Off: set Frame rate 60 FPS",
-                       "Frame generation waits until the game renders 60 FPS without its own extra frames (Performance > "
-                       "Frame rate).");
+            opt_action("Frame generation status",
+                       g_settings.frame_gen == FG_DLSS ? "Set Frame rate to 60 or 90 FPS" : "Set Frame rate to 60 FPS",
+                       "Choose a supported preset in Performance > Frame rate.");
         }
     }
     int backend = g_settings.temporal_backend;
@@ -1640,6 +1640,10 @@ static void tab_about(void) {
     ImGui::Spacing();
     header("Controller");
     toggle("Motion controls", &g_settings.motion);
+    static const char *const motion_filters[] = {"Off", "Moderate", "Strong"};
+    opt_choice("Gesture filter", &g_settings.motion_filter, motion_filters, 3, 0,
+               "Filters small movements before they reach the game's motion controls. Try Strong if a gentle lift "
+               "still throws Cappy, or Moderate if flicks are hard to trigger.");
     hint("The controller's gyro and accelerometer for the game's motion moves: shake it to throw Cappy at a target, "
          "spin him, or tilt where the game asks. Needs a controller with motion sensors (PlayStation, Switch Pro, "
          "Steam Deck).");
@@ -1681,11 +1685,11 @@ static void tab_about(void) {
          "controllers or keyboards without motion sensors. If a key is also bound to a game button, it does both.");
     toggle("Vibration", &g_settings.rumble);
     {
-        static const int pct[] = {25, 50, 75, 100};
-        static const char *const names[] = {"25%", "50%", "75%", "100%"};
+        static const int pct[] = {25, 50, 75, 100, 125, 150, 175, 200};
+        static const char *const names[] = {"25%", "50%", "75%", "100%", "125%", "150%", "175%", "200%"};
         int i = 3;
-        for (int k = 0; k < 4; k++) if (pct[k] == g_settings.rumble_strength) i = k;
-        if (choice("Vibration strength", &i, names, 4)) g_settings.rumble_strength = pct[i];
+        for (int k = 0; k < 8; k++) if (pct[k] == g_settings.rumble_strength) i = k;
+        if (choice("Vibration strength", &i, names, 8)) g_settings.rumble_strength = pct[i];
     }
     hint("The controller's rumble, as the game sends it (the Switch's HD rumble on the controller's motors). Turn it off "
          "for no rumble at all; DualSense and Switch Pro controllers use their own motors through it.");
