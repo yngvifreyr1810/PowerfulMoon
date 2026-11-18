@@ -1256,9 +1256,9 @@ static void tab_performance(void) {
         static const char *wn[WARMUP_COUNT] = {"Auto", "Normal", "Long"};
         opt_choice("Warm-up at start", &g_settings.warmup, wn, WARMUP_COUNT, WARMUP_AUTO,
                    "How long the game spends at start getting the pipelines it has seen ready, so effects don't stutter "
-                   "the first time they appear. Normal: up to 15 s and 3 GB of memory. Long: up to 30 s and 12 GB "
-                   "(at most half of this PC's memory): the fewest first-time stutters, but each pipeline keeps some "
-                   "graphics driver memory. Auto (the default): Long with 32 GB of memory or more, else Normal. Applies "
+                   "the first time they appear. Each one keeps some graphics driver memory. Auto (the default): up to "
+                   "1 GB, the first scene's and the most recent - as smooth as more in our tests, with the least memory. "
+                   "Normal: up to 15 s and 3 GB. Long: up to 30 s and 12 GB (at most half of this PC's memory). Applies "
                    "at the next start.", false);
     }
     opt_toggle("Only set up shaders seen before", &g_settings.shader_known_only, false,

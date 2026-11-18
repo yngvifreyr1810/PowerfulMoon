@@ -58,6 +58,7 @@ bool vk_frame_begin(const float clear[4]);
 void vk_frame_end(const char *shot_path);
 void *vk_frame_cmd(void);
 int vk_prepare_install(void (*progress)(int phase, int done, int total), volatile int *cancel);
+void vk_shader_cache_reset(void);
 #endif
 void ui_window_init(void);
 SDL_Window *ui_window(void);
@@ -1202,7 +1203,13 @@ bool setup_run(const char *root) {
             bool ok = true;
             if (!dest.empty() && norm(dest) != norm(g_here)) {
                 ok = rt_set_data_root(dest.c_str());
-                if (ok) g_here = rt_data_root(), g_dest.clear();
+                if (ok) {
+#ifndef __APPLE__
+                    vk_shader_cache_reset();
+#endif
+                    g_here = rt_data_root();
+                    g_dest.clear();
+                }
                 else g_notice = "That folder can't be used (Program Files needs admin rights). Choose a folder you own, "
                                 "e.g. in Documents or on another drive.", g_notice_row = ROW_DEST;
             }

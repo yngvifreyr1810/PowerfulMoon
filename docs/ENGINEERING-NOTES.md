@@ -110,8 +110,24 @@ Players reported the frame rate falling after a while. On Linux and the Steam De
 - **Allocator fragmentation:** glibc made an arena per thread and never gave memory back. `M_ARENA_MAX` 4 and a
   `malloc_trim` every 30 s: allocations flat over a session, growth down to about 12 MB a minute and bounded.
 - **The driver's share:** NVIDIA's driver keeps about 1 MB for every pipeline prepared ahead. Preparing all of them
-  suits a PC with 32 GB; on 16 GB it pushes the game into the page file. The warm-up is now **Auto**: everything only
-  with 30 GB of RAM or more.
+  suits a PC with 32 GB; on 16 GB it pushes the game into the page file. Measured on routes through six kingdoms, the
+  extra pipelines bought almost nothing: 8,925 prepared (14.7 GB in RAM at the start), 1,883 (11.3 GB) and 304
+  (10.8 GB) gave the same frame rate and the same hitches. The warm-up's **Auto** is now 1 GB on every PC
+  ([#94](https://github.com/Simon3Sarkis/super-odyssey-pc-recomp/issues/94): the old Auto took 32 GB PCs to 10 GB).
+- **Shaders built whole when the game sets them up:** each costs about 4 MB of driver memory, and the boot set up
+  ~1,450 at once. Only those a scene needs in its first frames ("warm") still are; the rest at their first draw, from
+  binaries on disk: about 2 GB less with the same stutter.
+- **Pipeline binaries cost NVIDIA memory:** a shader library created from a saved `VK_KHR_pipeline_binary` held
+  far more driver memory than the same library from a pipeline cache. Turning binaries off on NVIDIA (the preparation
+  fills the pipeline cache instead, as on GPUs without binaries): a new player 6.0 -> 9.1 GB became 4.6 -> 6.1 GB, the
+  120 FPS routes 9.3 -> 12.4 GB became 5.8 -> 6.6 GB, with the same frame rate and no more stutter. On an AMD GPU the
+  same switch changed nothing (4.1 -> 4.8 GB either way), so other GPUs keep them.
+- **One packed shader cache:** the SPIR-V (17,000-54,000 files, 0.9-4.7 GB) went into one zstd file, ~4.3x smaller
+  (Odyssey Recomp's design); with only the shaders a run through the game draws compiled before the first start
+  (their list merged with ours), a first start's preparation went from 98 s to 51 s and its cache from 2.2 GB to 0.7 GB.
+- **Measure, don't guess:** a memory trace every half second from launch (`ODYSSEY_MEM_TRACE=1`) showed which step of
+  the start-up each gigabyte came from; three plausible suspects (bulk set-ups, shaders never drawn, preloading) turned
+  out to cost almost nothing.
 - **A fix we reverted:** joining finished game threads to free them coincided with the game stopping itself with its
   own heap assertion in scripted tours. Reverted until understood.
 - **Committed is not resident.** One report showed 22.5 GB committed and 4.1 GB in RAM. Logs and crash reports now

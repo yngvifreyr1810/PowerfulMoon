@@ -1,5 +1,10 @@
 // GLSL -> SPIR-V (shaderc), descriptor layouts from the SPIR-V itself, translated NVN programs, built-in shaders.
 #include <dirent.h>
+#include <fcntl.h>
+#include <stdio.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #include <pthread.h>
 #include <shaderc/shaderc.h>
 #include <stdlib.h>
@@ -18,41 +23,123 @@ static shaderc_shader_kind kind_of(int stage) {
     return stage == STAGE_VERTEX ? shaderc_vertex_shader : stage == STAGE_FRAGMENT ? shaderc_fragment_shader : shaderc_compute_shader;
 }
 
-// SPIR-V disk cache: cache/spirv/<hash of stage + source>.spv, so a known shader costs a file read instead of a
-// GLSL compile (the driver's pipeline cache only covers the step after this one).
+// SPIR-V disk cache: one file, cache/shaders.pack, so a known shader costs a read instead of a GLSL compile (the
+// driver's pipeline cache only covers the step after this one). The design is Odyssey Recomp's (0.2.6,
+// github.com/rwwo8/OdysseyRecomp, MIT): records {"SPK1", words, key, packed size, check} each followed by the module
+// packed with zstd, appended with one write, so the preparation's processes and the game add to it at the same time; an
+// index in memory (key -> where) built by reading the record headers once, and again from where it stopped when a key
+// isn't in it (another process may have added it). A record that doesn't check out (a crash mid-write) ends the file's
+// usable part. zstd level 9: 4.3x on our modules (level 3: 3.9x, 19: 5.5x but 18 ms a module; decoding ~0.3 ms at
+// any level). Windows opens it with append-only access (the C runtime's O_APPEND seeks then writes: two processes
+// could overwrite each other). Before: one file per module in cache/spirv (17,000+ files, 919 MB after a few tours) -
+// still read when a key isn't in the pack, and moved into it in the background at the game's start
+// (vk_shader_cache_migrate), so a player's cache stays valid.
+// The key: the stage + GLSL source's hash.
 uint64_t vk_spirv_source_key(const char *src, int stage) {
     uint64_t h = (0xcbf29ce484222325ull ^ (uint64_t)stage) + 3;  // + version of the post-processing (no_contraction)
     for (const char *p = src; *p; p++) { h ^= (uint8_t)*p; h *= 0x100000001B3ull; }
     return h;
 }
 
-bool vk_spirv_cache_available(void) {
-    DIR *dir = opendir("cache/spirv");
-    if (!dir) return false;
-    bool found = false;
-    // This is a startup probe. Each shader is checked by its source hash when actually loaded.
-    for (int i = 0; i < 64 && !found; i++) {
-        const struct dirent *entry = readdir(dir);
-        if (!entry) break;
-        const char *name = entry->d_name;
-        if (strlen(name) != 20 || strcmp(name + 16, ".spv") ||
-            strspn(name, "0123456789abcdef") != 16) continue;
-        char path[64];
-        snprintf(path, sizeof path, "cache/spirv/%s", name);
-        struct stat st;
-        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 20 || st.st_size % 4) continue;
-        FILE *f = fopen(path, "rb");
-        if (f) {
-            uint32_t magic;
-            found = fread(&magic, sizeof magic, 1, f) == 1 && magic == 0x07230203;
-            fclose(f);
-        }
-    }
-    closedir(dir);
-    return found;
+#include <zstd.h>
+#include <SDL3/SDL_thread.h>
+#include <SDL3/SDL_timer.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+#define PACK_PATH "cache/shaders.pack"
+#define PACK_LEVEL 9
+typedef struct { uint32_t magic, words; uint64_t key; uint32_t packed, check; } PackRec;  // 24 bytes
+typedef struct { uint64_t key, off; uint32_t packed, words; } PackEnt;
+static pthread_mutex_t pk_lock = PTHREAD_MUTEX_INITIALIZER;
+static PackEnt *pk_tab;      // (open addressing, key | 1)
+static uint32_t pk_cap, pk_n;
+static uint64_t pk_scanned;  // (bytes of the file read into the index)
+#ifdef _WIN32
+static HANDLE pk_out = INVALID_HANDLE_VALUE;
+#else
+static int pk_out = -1;
+#endif
+
+static uint32_t pk_check(const void *d, size_t n) {
+    const uint8_t *b = d;
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i += 61) h = (h ^ b[i]) * 16777619u;  // (a sample: enough to tell a torn write)
+    return h ^ (uint32_t)n;
 }
 
-static uint32_t *cache_load(uint64_t h, size_t *nwords) {
+static void pk_put(uint64_t key, uint64_t off, uint32_t packed, uint32_t words) {  // (pk_lock)
+    if ((pk_n + 1) * 2 > pk_cap) {
+        uint32_t nc = pk_cap ? pk_cap * 2 : 1 << 15;
+        PackEnt *t = calloc(nc, sizeof *t);
+        if (!t) return;
+        for (uint32_t i = 0; i < pk_cap; i++)
+            if (pk_tab[i].key) {
+                uint32_t j = (uint32_t)(pk_tab[i].key * 0x9E3779B97F4A7C15ull >> 40) & (nc - 1);
+                while (t[j].key) j = (j + 1) & (nc - 1);
+                t[j] = pk_tab[i];
+            }
+        free(pk_tab);
+        pk_tab = t, pk_cap = nc;
+    }
+    key |= 1;
+    uint32_t j = (uint32_t)(key * 0x9E3779B97F4A7C15ull >> 40) & (pk_cap - 1);
+    while (pk_tab[j].key && pk_tab[j].key != key) j = (j + 1) & (pk_cap - 1);
+    if (!pk_tab[j].key) pk_n++;
+    pk_tab[j] = (PackEnt){key, off, packed, words};
+}
+
+static PackEnt *pk_find(uint64_t key) {  // (pk_lock)
+    if (!pk_cap) return NULL;
+    key |= 1;
+    uint32_t j = (uint32_t)(key * 0x9E3779B97F4A7C15ull >> 40) & (pk_cap - 1);
+    while (pk_tab[j].key) { if (pk_tab[j].key == key) return &pk_tab[j]; j = (j + 1) & (pk_cap - 1); }
+    return NULL;
+}
+
+static void pk_scan(void) {  // (pk_lock) records added since the last look (whole ones only: a write in progress waits)
+    FILE *f = fopen(PACK_PATH, "rb");
+    if (!f) return;
+    fseeko(f, 0, SEEK_END);
+    uint64_t size = (uint64_t)ftello(f), off = pk_scanned;
+    PackRec r;
+    while (off + sizeof r <= size && fseeko(f, (off_t)off, SEEK_SET) == 0 && fread(&r, sizeof r, 1, f) == 1 &&
+           r.magic == 0x314B5053 /* SPK1 */ && r.packed && r.words && off + sizeof r + r.packed <= size) {
+        pk_put(r.key, off + sizeof r, r.packed, r.words);
+        off += sizeof r + r.packed;
+    }
+    pk_scanned = off;
+    fclose(f);
+}
+
+static PackEnt pk_lookup(uint64_t h) {
+    pthread_mutex_lock(&pk_lock);
+    PackEnt *e = pk_find(h);
+    if (!e) { pk_scan(); e = pk_find(h); }
+    PackEnt ent = e ? *e : (PackEnt){0};
+    pthread_mutex_unlock(&pk_lock);
+    return ent;
+}
+
+static uint32_t *pack_load(uint64_t h, size_t *nwords) {
+    PackEnt ent = pk_lookup(h);
+    if (!ent.key) return NULL;
+    void *z = malloc(ent.packed);
+    uint32_t *d = malloc((size_t)ent.words * 4);
+    FILE *f = fopen(PACK_PATH, "rb");
+    bool ok = f && z && d && fseeko(f, (off_t)ent.off, SEEK_SET) == 0 && fread(z, 1, ent.packed, f) == ent.packed;
+    if (f) fclose(f);
+    if (ok) {
+        size_t got = ZSTD_decompress(d, (size_t)ent.words * 4, z, ent.packed);
+        ok = !ZSTD_isError(got) && got == (size_t)ent.words * 4 && d[0] == 0x07230203;
+    }
+    free(z);
+    if (!ok) { free(d); return NULL; }
+    *nwords = ent.words;
+    return d;
+}
+
+static uint32_t *legacy_load(uint64_t h, size_t *nwords) {  // (cache/spirv: one file per module, before the pack)
     char path[64];
     snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)h);
     FILE *f = fopen(path, "rb");
@@ -68,19 +155,121 @@ static uint32_t *cache_load(uint64_t h, size_t *nwords) {
     return d;
 }
 
+static uint32_t *cache_load(uint64_t h, size_t *nwords) {
+    uint32_t *d = pack_load(h, nwords);
+    if (!d) d = legacy_load(h, nwords);
+    if (!d) d = pack_load(h, nwords);  // (moved into the pack meanwhile: vk_shader_cache_migrate stores, then deletes)
+    return d;
+}
+
+bool vk_spirv_cache_available(void) {
+    struct stat st;
+    if (stat(PACK_PATH, &st) == 0 && st.st_size > (long long)sizeof(PackRec)) return true;
+    DIR *dir = opendir("cache/spirv");
+    if (!dir) return false;
+    bool found = false;
+    for (int i = 0; i < 64 && !found; i++) {
+        const struct dirent *entry = readdir(dir);
+        if (!entry) break;
+        found = strlen(entry->d_name) == 20 && !strcmp(entry->d_name + 16, ".spv");
+    }
+    closedir(dir);
+    return found;
+}
+
 _Atomic bool vk_spirv_cache_failed;  // a SPIR-V couldn't be written: what is stored can't be counted on (exec.c modules)
-static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
-    static int made;
-    if (!made) { made = 1; mkdir("cache", 0755); mkdir("cache/spirv", 0755); }
-    char path[64], tmp[80];
-    snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)h);
-    snprintf(tmp, sizeof tmp, "%s.%llx", path, (unsigned long long)(uintptr_t)&made ^ (unsigned long long)(uintptr_t)spv);
-    FILE *f = fopen(tmp, "wb");
-    if (!f) { vk_spirv_cache_failed = true; return; }
-    bool ok = fwrite(spv, 4, nwords, f) == nwords;
-    if (fclose(f) != 0) ok = false;
+
+// Called by the installer after it switches data folders, before the game starts.
+// The menu may already have opened and indexed a shader pack in the launcher's folder.
+void vk_shader_cache_reset(void) {
+    pthread_mutex_lock(&pk_lock);
+#ifdef _WIN32
+    if (pk_out != INVALID_HANDLE_VALUE) CloseHandle(pk_out);
+    pk_out = INVALID_HANDLE_VALUE;
+#else
+    if (pk_out >= 0) close(pk_out);
+    pk_out = -1;
+#endif
+    free(pk_tab);
+    pk_tab = NULL;
+    pk_cap = pk_n = 0;
+    pk_scanned = 0;
+    vk_spirv_cache_failed = false;
+    pthread_mutex_unlock(&pk_lock);
+}
+
+static void cache_store_at(uint64_t h, const uint32_t *spv, size_t nwords, int level) {
+    size_t cap = ZSTD_compressBound(nwords * 4);
+    uint8_t *buf = malloc(sizeof(PackRec) + cap);
+    if (!buf) { vk_spirv_cache_failed = true; return; }
+    size_t packed = ZSTD_compress(buf + sizeof(PackRec), cap, spv, nwords * 4, level);
+    if (ZSTD_isError(packed)) { free(buf); vk_spirv_cache_failed = true; return; }
+    PackRec r = {0x314B5053, (uint32_t)nwords, h, (uint32_t)packed, 0};
+    r.check = pk_check(buf + sizeof(PackRec), packed);
+    memcpy(buf, &r, sizeof r);
+    size_t total = sizeof(PackRec) + packed;
+    bool ok = false;
+    pthread_mutex_lock(&pk_lock);
+#ifdef _WIN32
+    if (pk_out == INVALID_HANDLE_VALUE) {
+        CreateDirectoryA("cache", NULL);
+        // FILE_APPEND_DATA without FILE_WRITE_DATA: every write goes to the end, atomically between processes
+        pk_out = CreateFileA(PACK_PATH, FILE_APPEND_DATA | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+    DWORD wrote = 0;
+    if (pk_out != INVALID_HANDLE_VALUE) ok = WriteFile(pk_out, buf, (DWORD)total, &wrote, NULL) && wrote == total;
+#else
+    if (pk_out < 0) { mkdir("cache", 0755); pk_out = open(PACK_PATH, O_WRONLY | O_CREAT | O_APPEND, 0644); }
+    if (pk_out >= 0) ok = write(pk_out, buf, total) == (ssize_t)total;
+#endif
+    pthread_mutex_unlock(&pk_lock);
+    free(buf);  // (the index learns it at its next scan: its offset is the file's)
     if (!ok) vk_spirv_cache_failed = true;
-    if (!ok || rename(tmp, path) != 0) remove(tmp);  // (another thread may have stored it first)
+}
+static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) { cache_store_at(h, spv, nwords, PACK_LEVEL); }
+
+// (game process, once, in the background) the modules of cache/spirv moved into the pack, the folder removed: a cache
+// from before the pack stays valid and shrinks ~4x. A module is in the pack before its file goes (cache_load).
+// (low priority, a pause between files and zstd level 3 - 3.9x instead of 4.3x for a third of the CPU time: on a Steam
+// Deck the move at full speed beside the game cost frames of 26-51 ms)
+static void *migrate_thread(void *a) {
+    (void)a;
+    SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_LOW);
+    DIR *dir = opendir("cache/spirv");
+    if (!dir) return NULL;
+    unsigned moved = 0;
+    uint64_t t0 = plat_now_ns();
+    const struct dirent *e;
+    while ((e = readdir(dir))) {
+        if (strlen(e->d_name) != 20 || strcmp(e->d_name + 16, ".spv")) continue;
+        unsigned long long key = strtoull(e->d_name, NULL, 16);
+        char path[64];
+        snprintf(path, sizeof path, "cache/spirv/%s", e->d_name);
+        if (!pk_lookup(key).key) {
+            size_t n;
+            uint32_t *d = legacy_load(key, &n);
+            if (!d) continue;
+            cache_store_at(key, d, n, 3);
+            free(d);
+            SDL_Delay(2);
+            if (vk_spirv_cache_failed || !pk_lookup(key).key) break;  // (couldn't write: the files stay)
+            moved++;
+        }
+        remove(path);
+    }
+    closedir(dir);
+    rmdir("cache/spirv");
+    LOG("[shader] %u SPIR-V modules moved into %s in %.1f s\n", moved, PACK_PATH, (plat_now_ns() - t0) / 1e9);
+    return NULL;
+}
+void vk_shader_cache_migrate(void) {
+    static bool started;
+    struct stat st;
+    if (started || stat("cache/spirv", &st) != 0 || getenv("ODYSSEY_NO_PACK_MIGRATE")) return;
+    started = true;
+    pthread_t t;
+    if (pthread_create(&t, NULL, migrate_thread, NULL) == 0) pthread_detach(t);
 }
 
 // Vertex shaders: every float add/sub/mul/div/fma gets NoContraction, so no compiler fuses or splits them. Depth
@@ -305,10 +494,11 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
 __thread uint64_t vk_spirv_last_key;
 uint32_t *vk_spirv_by_key(uint64_t key, size_t *nwords) { return cache_load(key, nwords); }
 bool vk_spirv_has_key(uint64_t key) {
+    if (pk_lookup(key).key) return true;
     char path[64];
     snprintf(path, sizeof path, "cache/spirv/%016llx.spv", (unsigned long long)key);
     struct stat st;
-    return stat(path, &st) == 0 && st.st_size > 20 && st.st_size % 4 == 0;
+    return (stat(path, &st) == 0 && st.st_size > 20 && st.st_size % 4 == 0) || pk_lookup(key).key;
 }
 
 static uint32_t *vk_glsl_to_spirv_(const char *src, int stage, const char *name, size_t *nwords) {

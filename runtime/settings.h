@@ -118,7 +118,7 @@ typedef struct {
     int rumble_strength;  // 25..200 (%): gain before clamping to the controller's output range
     int stick_deadzone;  // percent of a controller stick's travel that counts as rest (runtime/hle/input.c), 0: none
     bool mouse_camera;   // the mouse turns the camera (the right stick; the pointer is held in the window while playing)
-    bool mouse_menus;    // in the game's menus, unbound mouse buttons are A / B and the wheel the D-pad (hle/input.c, #64)
+    bool mouse_menus;    // in the game's menus, the mouse buttons are A / B (bound or not) and an unbound wheel the D-pad (hle/input.c, #64)
     int mouse_sensitivity;  // percent, 25..400 (runtime/hle/input.c mouse_stick)
     int mouse_sensitivity_y; // independent vertical speed; old mouse_sensitivity files initialize both axes
     bool mouse_invert_x;

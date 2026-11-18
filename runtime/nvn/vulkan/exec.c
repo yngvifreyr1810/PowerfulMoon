@@ -3316,6 +3316,8 @@ static void compile_program(void *arg) {
         free(p->vi->msl); p->vi->msl = NULL;
         free(p->fi->msl); p->fi->msl = NULL;
         if (!sv || !sf) { free(sv); free(sf); prog_failed(p); return; }
+        // If writing the pack failed during compilation, use the SPIR-V we still have.
+        lazy = lazy && lazy_modules();
         p->nbinds = vk_reflect(sv, nv, p->binds, MAX_BIND);
         p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
         tcache_save(p);
@@ -3723,14 +3725,19 @@ static void remember_frame_hold(Prog *p) {
 // shader of an effect resource - ~25,000 at boot, a few hundred ever drawn) only when drawn before.
 // A model's material set up as a stage loads that was drawn before (in any run, any scene) is built whole right away
 // too: a new player's first frame of the Sand Kingdom (2026-11-02, cold caches) stood 2.4 s for the 450 libraries of
-// such programs (all drawn then), the loading screen before it 10 s long. ODYSSEY_PREWARM_KNOWN=0: as before.
+// such programs (all drawn then), the loading screen before it 10 s long. Off by default since 2026-11-17: with the
+// pipeline binaries and the warm-up that came after, only warm programs (drawn in a scene's first frames) are built whole;
+// the others get their libraries at their first draw. Each built whole holds ~4 MB of NVIDIA driver memory and the boot
+// alone set up ~1,450 of them: 16 GB PC settings, Cap -> Sand -> Metro -> Wooded, 2 runs each with an empty driver
+// cache: in RAM 11.7 -> 10.3 GB at start, 13.6-14.2 -> 11.7-12.3 GB after three kingdoms; worst frames and frames over
+// 50 ms the same (437 / 439 ms vs 428 / 496 ms once, an empty-cache effect in both). ODYSSEY_PREWARM_KNOWN=1: built whole.
 // ODYSSEY_PREWARM=0: programs build when first drawn; =2: bulk ones too.
 static _Atomic uint64_t prog_setups;  // programs the game set up so far (backend_execute: when to prefetch)
 void renderer_program_hint(NvnProgram *np, bool bulk) {
     atomic_fetch_add(&prog_setups, 1);
     static int on = -1, known_whole = -1;
     if (on < 0) { const char *e = getenv("ODYSSEY_PREWARM"); on = e ? atoi(e) : 1; }
-    if (known_whole < 0) { const char *e = getenv("ODYSSEY_PREWARM_KNOWN"); known_whole = e ? atoi(e) != 0 : 1; }
+    if (known_whole < 0) { const char *e = getenv("ODYSSEY_PREWARM_KNOWN"); known_whole = e ? atoi(e) != 0 : 0; }
     if (!on || !g_vk.dev || (np->stage_mask & 3) != 3) return;
     // Low memory (settings: Memory use): nothing set up ahead - each program is translated and built at its first draw
     // (from the driver's cache when it has it: a few ms; 6.5 GB in RAM instead of 9.4, Cascade, NVIDIA)
@@ -3740,6 +3747,11 @@ void renderer_program_hint(NvnProgram *np, bool bulk) {
                                           np->stages[1].code_addr, np->stages[1].const_offset ? np->stages[1].const_offset : 0x10000),
                            &warm);
     if (bulk && !known && on < 2) return;
+    // ODYSSEY_PREWARM_BULK=0 (tests): no bulk set-ups at all, also those drawn before - the boot hands over every
+    // kingdom's programs at once; a stage load still sets up its own
+    static int bulk_on = -1;
+    if (bulk_on < 0) { const char *e = getenv("ODYSSEY_PREWARM_BULK"); bulk_on = e ? atoi(e) != 0 : 1; }
+    if (bulk && !bulk_on) return;
     // ODYSSEY_PREWARM=3: only programs drawn before (in any run: drawn_tab). A stage load hands over thousands of
     // programs (every material of every model), most never drawn; a Steam Deck sets them up at ~70 a second on its 4
     // cores - about a core busy for minutes after each kingdom change. Deck, 3 tours each (2026-11-16): Metro 52.3 ->
@@ -3749,7 +3761,9 @@ void renderer_program_hint(NvnProgram *np, bool bulk) {
     if ((on == 3 || (on == 1 && g_settings.shader_known_only && !getenv("ODYSSEY_PREWARM"))) && !known) return;
     ShaderKey vkey, fkey;
     base_keys(&vkey, &fkey);
-    program_for(np, &vkey, &fkey, warm || (known && !bulk && known_whole) ? PF_AHEAD_WARM : PF_AHEAD);
+    static int warm_whole = -1;  // (ODYSSEY_PREWARM_WARM=0, tests: warm programs too get their libraries at their first draw)
+    if (warm_whole < 0) { const char *e = getenv("ODYSSEY_PREWARM_WARM"); warm_whole = e ? atoi(e) != 0 : 1; }
+    program_for(np, &vkey, &fkey, (warm && warm_whole) || (known && !bulk && known_whole) ? PF_AHEAD_WARM : PF_AHEAD);
 }
 
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
@@ -4079,7 +4093,10 @@ static VkPrimitiveTopology topo_class_base(uint8_t c) {
 static void build_pipeline(void *arg) {
     Pipe *pp = arg;
     PipeKey *k = &pp->k;
-    prog_modules(k->prog);  // (made here when its set-up didn't: a null module fails this pipeline as any error does)
+    if (!prog_modules(k->prog)) {
+        atomic_store(&pp->state, 2);
+        return;
+    }
     VkPipelineShaderStageCreateInfo stages[2] = {
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = k->prog->vs, .pName = "main"},
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = k->prog->fs, .pName = "main"}};
@@ -4795,7 +4812,7 @@ static void *pm_worker(void *arg) {
 
 // The game's RomFS contains NintendoWare BNSH and agl BAHS programs, some inside Yaz0/SARC containers.
 typedef struct { const uint8_t *code; uint32_t size; } PcStage;
-typedef struct { PcStage stages[2]; uint32_t local[3]; } PcProg;
+typedef struct { PcStage stages[2]; uint32_t local[3]; bool known; } PcProg;  // (known: compiled for the GPU, pc_add)
 
 enum { PC_SEEN_SIZE = 1 << 18, PC_ASSET_LIMIT = 512u << 20 };
 static PcProg *pc_progs;
@@ -4804,6 +4821,14 @@ static int pc_n, pc_cap, pc_bnsh, pc_bahs, pc_compute;
 static _Atomic int pc_next, pc_done, pc_items_n, pc_compute_translated;
 static FullPrepItem *pc_items;
 static long pc_huge_limit;
+// Which programs the GPU compile takes (as Odyssey Recomp 0.2.6 / 0.2.7 does, github.com/rwwo8/OdysseyRecomp, MIT): every
+// program is translated and its SPIR-V kept, but the driver compiles - a binary each, minutes on slower PCs, and most
+// of the cache - only the programs drawn before (the shipped list: known_programs.txt, and this player's own:
+// drawn_has), the compute programs, and the whole effects archive (EffectPtcl / EffectDataBase: a first box smashed
+// or enemy hit could freeze where no tour drew that effect). The rest compile if the game ever draws them.
+// ODYSSEY_PRECOMPILE_ALL=1: every program, as before.
+static bool pc_file_all;     // (the file being scanned is the effects archive)
+static int pc_all = -1, pc_known_n;
 
 static uint32_t pc_le32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static uint64_t pc_le64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
@@ -4832,6 +4857,15 @@ static bool pc_add(PcStage first, PcStage second, const uint32_t local[3]) {
     if (second.size) memcpy(code + first.size, second.code, second.size);
     PcProg *prog = &pc_progs[pc_n++];
     *prog = (PcProg){.stages = {{code, first.size}, {code + first.size, second.size}}};
+    if (pc_all < 0) pc_all = getenv("ODYSSEY_PRECOMPILE_ALL") && atoi(getenv("ODYSSEY_PRECOMPILE_ALL"));
+    if (local || pc_all || pc_file_all) prog->known = true;
+    else {  // (hashed as a draw hashes it: prog_code_hash, the first 2 KB of each stage up to its constants)
+        bool warm;
+        uint64_t ph = hash_words(0x9e3779b97f4a7c15ull, first.code, first.size < 2048 ? first.size : 2048);
+        ph = hash_words(ph, second.code, second.size < 2048 ? second.size : 2048);
+        prog->known = drawn_has(ph | 1, &warm);
+    }
+    if (prog->known) pc_known_n++;
     if (local) { memcpy(prog->local, local, sizeof prog->local); pc_compute++; }
     pc_seen[slot] = h;
     return true;
@@ -4977,6 +5011,7 @@ static bool pc_scan_asset(const uint8_t *data, size_t size, void *arg) {
     unsigned depth = *(const unsigned *)arg;
     if (size < 4) return true;
     unsigned next = depth + 1;
+    if (!depth) pc_file_all = !strncmp(romfs_visit_name, "EffectPtcl", 10) || !strncmp(romfs_visit_name, "EffectDataBase", 14);
     if (!memcmp(data, "Yaz0", 4)) {
         if (depth == 8 || size < 16 || data[4] >= PC_ASSET_LIMIT >> 24) return false;
         size_t n;
@@ -5031,6 +5066,16 @@ static void *pc_worker(void *arg) {
             if (cs) maxwell_free(cs);
             continue;
         }
+        // Only the programs compiled for the GPU are translated here too; the rest are translated if the game sets them
+        // up (in the background, then saved: translations.bin). A first start, RTX 4090: 59 -> 44 s; Steam Deck: ~370 ->
+        // 193 s, cache 455 -> 254 MB; the Deck's Cap Kingdom bench and the PC's kingdom route the same (FPS, hitches).
+        // ODYSSEY_PRECOMPILE_TRANSLATE=all: every program, as before.
+        static int tr_known = -1;
+        if (tr_known < 0) {
+            const char *e = getenv("ODYSSEY_PRECOMPILE_TRANSLATE");
+            tr_known = !(e && !strcmp(e, "all")) && pc_all <= 0;
+        }
+        if (tr_known && !pp->known) continue;
         ShaderKey fk = fkey;
         ShaderInfo *vi = maxwell_translate(stages[0].code, stages[0].size, STAGE_VERTEX, &vkey), *fi = NULL;
         if (vi && vi->msl) {
@@ -5045,7 +5090,7 @@ static void *pc_worker(void *arg) {
             uint64_t kv = vk_spirv_last_key;
             uint32_t *sf = sv ? vk_glsl_to_spirv(fi->msl, STAGE_FRAGMENT, "fs", &nf) : NULL;
             uint64_t kf = vk_spirv_last_key;
-            if (sv && sf) pc_items[atomic_fetch_add(&pc_items_n, 1)] = (FullPrepItem){.program = {{kv, kf}}, .huge = huge};
+            if (sv && sf && pp->known) pc_items[atomic_fetch_add(&pc_items_n, 1)] = (FullPrepItem){.program = {{kv, kf}}, .huge = huge};
             free(sv);
             free(sf);
         } else {
@@ -5080,6 +5125,8 @@ static bool precompile_collect(const char *out, int nt) {
     }
     LOG("[precompile] %d graphics and %d compute programs from %d BNSH and %d BAHS archives in %.1f s\n",
         pc_n - pc_compute, pc_compute, pc_bnsh, pc_bahs, (plat_now_ns() - t0) / 1e9);
+    LOG("[precompile] %d of them compiled for the GPU (drawn before, compute, effects)%s\n", pc_known_n,
+        pc_all > 0 ? " - ODYSSEY_PRECOMPILE_ALL: all" : "");
     if (!ok || !pc_n) {
         LOG("[precompile] %s\n", ok ? "no programs found" : "could not finish scanning game files");
         goto done;

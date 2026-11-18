@@ -16,7 +16,7 @@ $pkgs = 'make', 'mingw-w64-ucrt-x86_64-clang', 'mingw-w64-ucrt-x86_64-lld', 'min
         'mingw-w64-ucrt-x86_64-ffmpeg', 'mingw-w64-ucrt-x86_64-vulkan-devel', 'mingw-w64-ucrt-x86_64-shaderc',
         'mingw-w64-ucrt-x86_64-spirv-tools', 'mingw-w64-ucrt-x86_64-pkgconf', 'mingw-w64-ucrt-x86_64-gdb',
         'mingw-w64-ucrt-x86_64-vulkan-memory-allocator', 'mingw-w64-ucrt-x86_64-vulkan-validation-layers',
-        'mingw-w64-ucrt-x86_64-nasm'
+        'mingw-w64-ucrt-x86_64-nasm', 'mingw-w64-ucrt-x86_64-zstd'
 & $bash -lc "pacman -S --needed --noconfirm $($pkgs -join ' ')"
 
 # Python for the tools: the python.org build (prebuilt unicorn / capstone wheels; MSYS2's Python can't build them)

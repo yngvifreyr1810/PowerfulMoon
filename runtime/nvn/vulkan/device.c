@@ -228,6 +228,26 @@ static void pick_device(void) {
     LOG("[vk] using %s\n", g_vk.props.deviceName);
 }
 
+// Pipeline binaries by default everywhere but NVIDIA. NVIDIA's driver holds far more memory for a library made from a
+// binary than for the same library from the pipeline cache (2026-11-17, RTX 4090, driver 610.x, Cap -> Sand -> Metro ->
+// Wooded): a new player 6.0 -> 9.1 GB in RAM with binaries, 4.6 -> 6.1 GB without; returning 9.3 -> 11.9 vs 5.1 ->
+// 5.7 GB; the preparation as fast (51 s) and the stutter no worse (frames over 50 ms 9 vs 8, worst 408 vs 252 ms).
+// Without binaries the preparation fills the pipeline cache (cache/vk_pipelines.bin), as on GPUs that have none.
+// ODYSSEY_PBIN=1: on, ODYSSEY_NO_PBIN=1: off, on any GPU. (In prep_identity: a change prepares the shaders again.)
+static bool pbin_wanted(uint32_t vendor) {
+    if (getenv("ODYSSEY_NO_PBIN")) return false;
+    const char *e = getenv("ODYSSEY_PBIN");
+    if (e && *e) return atoi(e) != 0;
+    return vendor != 0x10de;
+}
+
+static void *remove_old_pbin(void *a) {
+    (void)a;
+    extern bool plat_remove_tree(const char *dir);
+    plat_remove_tree("cache/old-pbin");
+    return NULL;
+}
+
 static bool g_fault_ext;
 // After VK_ERROR_DEVICE_LOST: what the driver says faulted (VK_EXT_device_fault), into the log.
 void vk_device_fault_report(void) {
@@ -330,14 +350,21 @@ static void create_device(void) {
     // Pipeline binaries: a compiled shader library saved as data of our own, and created from that data in a later run
     // or in another process - no compile (exec.c lib_binary_*). ODYSSEY_NO_PBIN=1: off.
     VkPhysicalDevicePipelineBinaryFeaturesKHR pbf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_BINARY_FEATURES_KHR};
-    if (g_vk.gpl && m5.maintenance5 && has_ext(ep, ne, VK_KHR_PIPELINE_BINARY_EXTENSION_NAME) && !getenv("ODYSSEY_NO_PBIN")) {
+    if (g_vk.gpl && m5.maintenance5 && has_ext(ep, ne, VK_KHR_PIPELINE_BINARY_EXTENSION_NAME) && pbin_wanted(g_vk.props.vendorID)) {
         VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &pbf};
         vkGetPhysicalDeviceFeatures2(g_vk.phys, &f2);
         pbf.pNext = NULL;
         if (pbf.pipelineBinaries) ext[n_ext++] = VK_KHR_PIPELINE_BINARY_EXTENSION_NAME;
     }
     g_vk.pbin = pbf.pipelineBinaries;
-    LOG("[vk] pipeline binaries: %s\n", g_vk.pbin ? "on" : "off");
+    LOG("[vk] pipeline binaries: %s\n", g_vk.pbin ? "on" : pbin_wanted(g_vk.props.vendorID) ? "off (not supported)" : "off (pipeline cache instead)");
+    {   // (the game, binaries off: a folder of them from before is of no use any more - removed in the background)
+        struct stat pst;
+        if (!g_vk.pbin && !g_vk.headless && stat("cache/pbin", &pst) == 0 && rename("cache/pbin", "cache/old-pbin") == 0) {
+            pthread_t t;
+            if (pthread_create(&t, NULL, remove_old_pbin, NULL) == 0) pthread_detach(t);
+        }
+    }
 #ifdef _WIN32
     vk_dlss_probe_device(ep, ne, ext, &n_ext, SDL_arraysize(ext));
     vk_xess_device_extensions(ep, ne, ext, &n_ext, SDL_arraysize(ext));
@@ -498,7 +525,7 @@ static void create_device(void) {
     // empty one: it saves pipeline binaries only)
     size_t sz = 0;
     void *data = NULL;
-    FILE *fp = g_vk.headless ? NULL : fopen("cache/vk_pipelines.bin", "rb");
+    FILE *fp = g_vk.headless || getenv("ODYSSEY_NO_PCACHE_LOAD") ? NULL : fopen("cache/vk_pipelines.bin", "rb");  // (the switch: tests)
     if (fp) {
         fseek(fp, 0, SEEK_END);
         sz = (size_t)ftell(fp);
@@ -541,6 +568,7 @@ void vk_pcache_load_headless(void) {
 
 static pthread_mutex_t pcache_save_lock = PTHREAD_MUTEX_INITIALIZER;  // (the exit and an autosave at once)
 void vk_pipeline_cache_save(void) {
+    if (getenv("ODYSSEY_NO_PCACHE_LOAD")) return;  // (a test without it loaded: its file isn't replaced by this run's part)
     pthread_mutex_lock(&pcache_save_lock);
     size_t sz = 0;
     void *data = NULL;
@@ -2065,6 +2093,7 @@ void ui_window_init(void) {
     create_swapchain();
     vk_exec_init();
     vk_shaders_init();
+    vk_shader_cache_migrate();  // (cache/spirv into cache/shaders.pack, in the background)
     vk_pipeline_prewarm(!recovering_pipeline_cache);
     vk_start_ok();
 }
@@ -2162,7 +2191,8 @@ static void prep_identity(char out[128]) {
             }
         }
         if (best.vendorID)
-            snprintf(id, sizeof id, "gpu %04x:%04x driver %u app %s", best.vendorID, best.deviceID, best.driverVersion, APP_VERSION);
+            snprintf(id, sizeof id, "gpu %04x:%04x driver %u app %s pbin %d", best.vendorID, best.deviceID, best.driverVersion,
+                     APP_VERSION, pbin_wanted(best.vendorID));
     }
     memcpy(out, id, 128);
 }

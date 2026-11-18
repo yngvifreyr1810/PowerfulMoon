@@ -65,17 +65,19 @@ static void latch_presses(uint64_t buttons) {
 }
 
 static uint64_t menu_mouse_bits(void);  // (the mouse in the game's menus: below)
+static bool menu_mouse_owns(int sc);    // a mouse button held as a menu button (its own binding then sleeps)
+static int bound_key(int sc) { return held_key(sc) && !menu_mouse_owns(sc); }
 
 // Through the bindings (runtime/hle/bindings.c: g_bind_key), read on every key event, so a rebind applies at once.
 static void recompute_keyboard(void) {
     uint64_t b = menu_mouse_bits();
     for (int i = 0; i < BIND_PAD_COUNT; i++)
-        if (held_key(g_bind_key[i])) b |= 1ull << i;
+        if (bound_key(g_bind_key[i])) b |= 1ull << i;
     latch_presses(b & ~atomic_exchange(&key_buttons, b));
-    key_lx = (held_key(g_bind_key[BIND_LS_RIGHT]) - held_key(g_bind_key[BIND_LS_LEFT])) * 32767;
-    key_ly = (held_key(g_bind_key[BIND_LS_UP]) - held_key(g_bind_key[BIND_LS_DOWN])) * 32767;
-    key_rx = (held_key(g_bind_key[BIND_RS_RIGHT]) - held_key(g_bind_key[BIND_RS_LEFT])) * 32767;
-    key_ry = (held_key(g_bind_key[BIND_RS_UP]) - held_key(g_bind_key[BIND_RS_DOWN])) * 32767;
+    key_lx = (bound_key(g_bind_key[BIND_LS_RIGHT]) - bound_key(g_bind_key[BIND_LS_LEFT])) * 32767;
+    key_ly = (bound_key(g_bind_key[BIND_LS_UP]) - bound_key(g_bind_key[BIND_LS_DOWN])) * 32767;
+    key_rx = (bound_key(g_bind_key[BIND_RS_RIGHT]) - bound_key(g_bind_key[BIND_RS_LEFT])) * 32767;
+    key_ry = (bound_key(g_bind_key[BIND_RS_UP]) - bound_key(g_bind_key[BIND_RS_DOWN])) * 32767;
 }
 
 // The Controls tab's stick deadzone (g_settings.stick_deadzone, percent): inside that circle a stick is at rest, the
@@ -135,8 +137,12 @@ static void mouse_forget(void) { atomic_store(&mouse_acc_x, 0), atomic_store(&mo
 
 // The mouse in the game's own menus (#64; Controls > "Mouse in menus", `mouse_menus` in powermoon.ini): while the
 // game's camera isn't reading its stick - the title and file select, the pause menu, shops, dialogue, but not while
-// Mario is being played - the mouse buttons the player hasn't bound act as the menu's buttons: left click A (confirm),
-// right click and the Back button B (back), and each wheel notch one D-pad step up or down. Whether a press is a menu
+// Mario is being played - the mouse buttons act as the menu's buttons: left click A (confirm), right click and the Back
+// button B (back), and each wheel notch the wheel hasn't been bound to one D-pad step up or down. The buttons do so
+// even when they are bound for play (#90: Mouse Left bound to Y left the menus without a click); while one is held as
+// a menu button its binding gives nothing, so the menu doesn't also see Y. On the map (A does nothing there) a bound
+// left click keeps its binding: Y opens the map's lists; right click stays B there (it closes the lists and the map).
+// Whether a press is a menu
 // press is decided when it starts, so a click begun in a menu ends as it began; a click that focuses the window is
 // not a press. ODYSSEY_LOG_MOUSE=1 logs the switches between menu and play.
 #define MENU_MOUSE_CAMERA_NS 250000000ull  // the camera this long silent: not playing (it reads its stick every update)
@@ -199,7 +205,9 @@ static uint64_t menu_mouse_bits(void) {
         if (!held_key(k_menu_mouse[i].code)) *l = 0;
         else if (!*l) {
             bool focus_click = now - atomic_load(&window_focus_ns) < 300000000ull;
-            *l = !focus_click && !mouse_code_bound(k_menu_mouse[i].code) && in_game_menu() ? (uint8_t)(k_menu_mouse[i].bit + 1) : 0xff;
+            extern bool odyssey_map_open(void);  // (runtime/hle/odyssey_pointer.c: on the map a binding stays)
+            bool keep = k_menu_mouse[i].code == BIND_MOUSE_LEFT && mouse_code_bound(BIND_MOUSE_LEFT) && odyssey_map_open();
+            *l = !focus_click && !keep && in_game_menu() ? (uint8_t)(k_menu_mouse[i].bit + 1) : 0xff;
         }
         if (*l && *l != 0xff) b |= 1ull << (*l - 1);
     }
@@ -210,6 +218,11 @@ static uint64_t menu_mouse_bits(void) {
         test_wheel[d] = t;
     }
     return b | atomic_load(&menu_wheel_bit);
+}
+static bool menu_mouse_owns(int sc) {
+    for (int i = 0; i < 3; i++)
+        if (k_menu_mouse[i].code == sc) return menu_mouse_latch[i] && menu_mouse_latch[i] != 0xff;
+    return false;
 }
 static void recompute_keyboard(void);
 // Every frame: the wheel's queued steps, one at a time (each a press the game sees, however fast the wheel turned)
@@ -522,7 +535,7 @@ static void motion_push(uint64_t now) {
     // The shake button / key (Controls: Shake button, Shake key - #39, #27): while held, the controller is shaken hard
     // up and down (+-3.5 G, the direction flipping every 15 ms) - the game's motion cap throw, spin and shake moves -
     // with or without a gyro, and with Motion controls off.
-    bool held = atomic_load(&shake_pad_down) || held_key(g_settings.motion_shake_key);
+    bool held = atomic_load(&shake_pad_down) || bound_key(g_settings.motion_shake_key);
     if (held && !menu_input_captured()) {
         bool flip = (mot.shake_ticks++ / 3) & 1;
         f[0] = 0, f[1] = flip ? 3.5f : -3.5f, f[2] = -1;
@@ -588,8 +601,6 @@ static void motion_open(void) {
     pthread_mutex_unlock(&motion_lock);
     if (pad) LOG("[input] motion: %s%s%s\n", a ? "accelerometer" : "", a && g ? " and " : "", g ? "gyro" : a ? "" : "none on this controller");
 }
-
-// A rotation of the orientation by w (radians) about each axis: R' = R * exp([w]x) (Rodrigues), kept orthonormal
 
 static void motion_event(const SDL_GamepadSensorEvent *e) {
     if (!pad || SDL_GetGamepadID(pad) != e->which) return;
