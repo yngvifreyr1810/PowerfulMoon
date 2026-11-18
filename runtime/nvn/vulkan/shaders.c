@@ -178,6 +178,26 @@ bool vk_spirv_cache_available(void) {
 }
 
 _Atomic bool vk_spirv_cache_failed;  // a SPIR-V couldn't be written: what is stored can't be counted on (exec.c modules)
+
+// Called by the installer after it switches data folders, before the game starts.
+// The menu may already have opened and indexed a shader pack in the launcher's folder.
+void vk_shader_cache_reset(void) {
+    pthread_mutex_lock(&pk_lock);
+#ifdef _WIN32
+    if (pk_out != INVALID_HANDLE_VALUE) CloseHandle(pk_out);
+    pk_out = INVALID_HANDLE_VALUE;
+#else
+    if (pk_out >= 0) close(pk_out);
+    pk_out = -1;
+#endif
+    free(pk_tab);
+    pk_tab = NULL;
+    pk_cap = pk_n = 0;
+    pk_scanned = 0;
+    vk_spirv_cache_failed = false;
+    pthread_mutex_unlock(&pk_lock);
+}
+
 static void cache_store_at(uint64_t h, const uint32_t *spv, size_t nwords, int level) {
     size_t cap = ZSTD_compressBound(nwords * 4);
     uint8_t *buf = malloc(sizeof(PackRec) + cap);

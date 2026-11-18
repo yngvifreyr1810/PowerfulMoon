@@ -3316,6 +3316,8 @@ static void compile_program(void *arg) {
         free(p->vi->msl); p->vi->msl = NULL;
         free(p->fi->msl); p->fi->msl = NULL;
         if (!sv || !sf) { free(sv); free(sf); prog_failed(p); return; }
+        // If writing the pack failed during compilation, use the SPIR-V we still have.
+        lazy = lazy && lazy_modules();
         p->nbinds = vk_reflect(sv, nv, p->binds, MAX_BIND);
         p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
         tcache_save(p);
@@ -4091,7 +4093,10 @@ static VkPrimitiveTopology topo_class_base(uint8_t c) {
 static void build_pipeline(void *arg) {
     Pipe *pp = arg;
     PipeKey *k = &pp->k;
-    prog_modules(k->prog);  // (made here when its set-up didn't: a null module fails this pipeline as any error does)
+    if (!prog_modules(k->prog)) {
+        atomic_store(&pp->state, 2);
+        return;
+    }
     VkPipelineShaderStageCreateInfo stages[2] = {
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = k->prog->vs, .pName = "main"},
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = k->prog->fs, .pName = "main"}};

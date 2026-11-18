@@ -92,8 +92,10 @@ bool romfs_visit_files(const char *image, RomfsFileVisitor visit, void *arg) {
         if (next > table_size) goto done;
         i = next;
         uint64_t offset = le64(entry + 8), size = le64(entry + 0x10);
-        if (size < 4) continue;
-        if (size > (512u << 20) || offset > UINT64_MAX - data_off) goto done;
+        if (offset > UINT64_MAX - data_off) goto done;
+        // A directory import can contain unrelated files such as the original dump.
+        // Skip files that the shader visitor cannot load without aborting the scan.
+        if (size < 4 || size > (512u << 20)) continue;
         if ((size_t)size > capacity) {
             uint8_t *larger = realloc(data, (size_t)size);
             if (!larger) goto done;
