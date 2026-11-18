@@ -129,13 +129,14 @@ int kernel_data_regions(uint64_t *addr, uint64_t *size, int max) {
     return n;
 }
 
-static void region_add(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm) {
+static void region_insert(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm, bool commit) {
     if (nregions == 1024) FATAL("too many regions\n");
-    plat_commit(addr, size);  // back it before the OS writes there (Windows: file reads into the heap)
+    if (commit) plat_commit(addr, size);  // back it before the OS writes there (Windows: file reads into the heap)
     int i = nregions++;
     while (i > 0 && regions[i - 1].addr > addr) { regions[i] = regions[i - 1]; i--; }
     regions[i] = (Region){addr, size, type, perm};
 }
+static void region_add(uint64_t addr, uint64_t size, uint32_t type, uint32_t perm) { region_insert(addr, size, type, perm, true); }
 
 static void region_remove(uint64_t addr) {
     for (int i = 0; i < nregions; i++) {
@@ -147,9 +148,22 @@ static void region_remove(uint64_t addr) {
     }
 }
 
+// Only the reserved guest window [GUEST_LO, GUEST_HI) can hold guest memory: the address space around it is reported
+// inaccessible (type 0x10), not free. Reported free, the SDK's random pick for a mapping could land outside the window
+// (seen once: the hid shared memory at 0x7af5cdf400) - on host memory, or on nothing (a crash at start-up).
 static void query_memory(uint64_t addr, uint64_t out) {
-    uint64_t prev_end = 0;
+    uint64_t prev_end = GUEST_LO;
     uint64_t info[5] = {0};  // addr, size, type|attr<<32, perm|ipc<<32, device|pad<<32
+    static int old = -1;  // (ODYSSEY_QUERY_OLD=1: as before - everything outside the window free; for A/B tests)
+    if (old < 0) old = ENV("ODYSSEY_QUERY_OLD") != NULL;
+    if (old) prev_end = 0;
+    else if (addr < GUEST_LO || addr >= GUEST_HI) {
+        info[0] = addr < GUEST_LO ? 0 : GUEST_HI;
+        info[1] = addr < GUEST_LO ? GUEST_LO : (1ull << 39) - GUEST_HI;
+        info[2] = 0x10;
+        memcpy((void *)out, info, 0x28);
+        return;
+    }
     for (int i = 0; i < nregions; i++) {
         Region *r = &regions[i];
         if (addr >= r->addr && addr < r->addr + r->size) {
@@ -169,8 +183,19 @@ static void query_memory(uint64_t addr, uint64_t out) {
         prev_end = r->addr + r->size;
     }
     info[0] = prev_end;
-    info[1] = (1ull << 39) - prev_end;
+    info[1] = (old ? 1ull << 39 : GUEST_HI) - prev_end;
     memcpy((void *)out, info, 0x28);
+}
+
+// A mapping the guest asks for must be inside the window (see query_memory); logged, so a report shows it if not
+static void check_map(const char *what, uint64_t addr, uint64_t size) {
+    if ((addr < HLE_HEAP + HLE_HEAP_SIZE && addr + size > HLE_HEAP) || (addr < HLE_BASE + HLE_SIZE && addr + size > HLE_BASE))
+        LOG("[kernel] %s at %llx+%llx: on the runtime's own memory (HLE heap %llx-%llx or calls %llx-%llx)\n", what,
+            (unsigned long long)addr, (unsigned long long)size, (unsigned long long)HLE_HEAP,
+            (unsigned long long)(HLE_HEAP + HLE_HEAP_SIZE), (unsigned long long)HLE_BASE, (unsigned long long)(HLE_BASE + HLE_SIZE));
+    if (addr >= GUEST_LO && addr + size <= GUEST_HI) return;
+    LOG("[kernel] %s at %llx+%llx: outside the guest window %llx-%llx\n", what, (unsigned long long)addr,
+        (unsigned long long)size, (unsigned long long)GUEST_LO, (unsigned long long)GUEST_HI);
 }
 
 // ------------------------------------------------------------------ threads
@@ -770,6 +795,8 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     }
     case 0x02: case 0x03: x[0] = R_OK; break;  // SetMemoryPermission / SetMemoryAttribute
     case 0x04:  // MapMemory(dst, src, size): src is inaccessible while mapped, so copying is equivalent
+        check_map("MapMemory", x[0], x[2]);
+        if (ENV("ODYSSEY_LOG_MAPS")) LOG("[kernel] MapMemory %llx+%llx\n", (unsigned long long)x[0], (unsigned long long)x[2]);
         memcpy((void *)x[0], (void *)x[1], x[2]);
         region_add(x[0], x[2], 0xB, 3);
         x[0] = R_OK;
@@ -868,6 +895,8 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         KObject *o = handle_get((uint32_t)x[0]);
         if (!o || o->type != KOBJ_SHMEM) { x[0] = R_INVALID_HANDLE; break; }
         KSharedMem *s = (KSharedMem *)o;
+        check_map("MapSharedMemory", x[1], x[2]);
+        if (ENV("ODYSSEY_LOG_MAPS")) LOG("[kernel] MapSharedMemory %llx+%llx\n", (unsigned long long)x[1], (unsigned long long)x[2]);
         memset((void *)x[1], 0, x[2]);
         s->guest_addr = x[1];  // HLE services write straight into the guest's mapping
         region_add(x[1], x[2], 6, 3);
@@ -969,6 +998,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         break;
     }
     case 0x2C:  // MapPhysicalMemory(addr, size)
+        check_map("MapPhysicalMemory", x[0], x[1]);
         memset((void *)x[0], 0, x[1]);
         region_add(x[0], x[1], 0x7, 3);
         x[0] = R_OK;
@@ -1079,6 +1109,23 @@ static void *thread_dump_main(void *arg) {
 void kernel_init(void) {
     // Reserve the heap, alias, stack, and TLS regions.
     region_add(TLS_BASE, TLS_SIZE, 0xC, 3);
+    // The runtime's own ranges, listed so the game never maps there (not committed here: the HLE heap is committed as
+    // host code takes it). The HLE heap missing from this map let the SDK's random pick put the hid shared memory on
+    // it (0x7094004000, seen once): host data then overwrote the touch screen's state and the game crashed at start.
+    // (ODYSSEY_QUERY_OLD=1: not listed, as before - for A/B tests)
+    if (!ENV("ODYSSEY_QUERY_OLD")) {
+        region_insert(HLE_BASE, HLE_SIZE, 0x10, 0, false);
+        region_insert(HLE_HEAP, HLE_HEAP_SIZE, 0x10, 0, false);
+    }
+    if (ENV("ODYSSEY_LOG_MAPS")) {  // (what the game is told about the crash's address, the HLE heap, and past the window)
+        static const uint64_t probe[] = {0x7094004000ull, HLE_BASE, 0x7085000000ull, GUEST_HI + 0x1000};
+        for (int i = 0; i < 4; i++) {
+            uint64_t info[5];
+            query_memory(probe[i], (uint64_t)(uintptr_t)info);
+            LOG("[kernel] QueryMemory %llx: %llx+%llx type %llx\n", (unsigned long long)probe[i], (unsigned long long)info[0],
+                (unsigned long long)info[1], (unsigned long long)info[2]);
+        }
+    }
     for (int i = 0; i < g_nmodules; i++) {
         Module *m = &g_modules[i];
         region_add(m->base + m->text_off, m->ro_off - m->text_off, 3, 5);

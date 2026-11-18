@@ -100,6 +100,70 @@ volume at 0, both monitors kept dark while tests run, nothing pushed or posted w
   choice of mapping address landing somewhere not committed. **Next:** log the address and protection of every
   MapSharedMemory, and VirtualQuery the faulting page in the crash report; run 200 starts by script.
 
+## Results, 2026-11-17 evening (after 0.4.2, local commits only)
+
+- **Start-up crash in `nn::hid::GetTouchScreenState`: cause found and fixed (8bfb6bf).** The crash's registers put the
+  touch screen's state at `0x7094004400`: the hid shared memory was mapped at `0x7094004000`, inside the runtime's HLE
+  heap (`0x7092000000`, 224 MB of host-owned data the guest can see), which QueryMemory reported as **free**, along
+  with everything outside the guest window. The SDK maps shared memory at a random free address, so roughly one start
+  in 40-70 could land there; host data then overwrote the touch lifo's header and the game read past it. Now the HLE
+  heap and the HLE call range are listed as inaccessible (type 0x10, not committed up front) and addresses outside
+  the window are reported inaccessible. `ODYSSEY_LOG_MAPS=1` logs every mapping and what QueryMemory says about the
+  crash's address (old: `7090100000+f6ff00000 type 0`, free; new: `7092000000+e000000 type 10`). A mapping onto the
+  runtime's memory or outside the window is always logged. 80 scripted starts (40 old map, 40 new): 0 crashes; the 160
+  mappings all landed in `0x7000000000-0x7220000000`. `ODYSSEY_QUERY_OLD=1` restores the old map for A/B.
+- **B1 honest memory numbers: already there.** The `[status]` line, the crash report summary and the overlay's "game"
+  figure show memory in RAM (resident) apart from committed.
+- **B3 leak soak: passed.** 30 kingdom warps (Cascade, Sand, Lake, Wooded, Metro, Seaside x5) in one 23-minute
+  session, 60 FPS, this PC (95 GB RAM, warm-up Long): in RAM 16.8 GB at warp 5, 17.1 GB at warp 30 (+1.9%); committed
+  27.5 -> 27.9 GB (+1.7%). 0 crashes in 31 arrivals; lowest 2 s 51 FPS.
+- **C2 16 GB PCs: the level, not growth, is the problem.** Same soak with a 16 GB PC's settings (warm-up Normal, preload
+  budget 4 GB), 12 warps: 12.5 GB in RAM at the first arrival, 15.1 GB after six kingdoms, 25.6 GB committed - a
+  16 GB PC swaps (#75, #61). Breakdown at 10 s: guest memory 3.2 GB, heaps 0.5 GB, the rest (~8 GB) the driver's
+  objects for the ~14,300 shader programs set up before play. **Low memory** (Auto only below 12 GB today) on the
+  same route: 4.4 GB in RAM at start, 5.9 GB after the warp (programs set up 60 -> 420); cost: one 340 ms frame on
+  arriving in Sand Kingdom (Normal: worst 92 ms). **Open decision (owner):** Auto -> Low memory below 20 GB of RAM,
+  i.e. on 16 GB PCs.
+- **C1 routes at 120 FPS: clean.** Cascade, Sand, Lake, Wooded, Metro, Cap, walking and turning the camera
+  (NVIDIA, 1600x900 window): averages 113.9-117.0 FPS, 0 skipped draws, 4 frames over 20 ms in play (worst 42 ms,
+  Metro's crowd, 3 frames in a row), 0 crashes.
+
+- **RAM, first cut (owner: keep 16 GB PCs on Normal, make Normal leaner).** A half-second memory trace from launch
+  (`ODYSSEY_MEM_TRACE=1`) shows where 16 GB settings reach 12 GB: the pipeline warm-up +2.5 GB (2.5-5 s), then +7 GB in
+  2.5 s while the game sets up ~14,300 programs at boot - ~1,450 of them (drawn before, anywhere) built whole at once,
+  ~4 MB of NVIDIA driver memory each. Now only *warm* programs (drawn in a scene's first frames) are built whole; the
+  rest get their libraries at their first draw (`ODYSSEY_PREWARM_KNOWN` now off by default). 16 GB settings, Cap ->
+  Sand -> Metro -> Wooded, 2 runs each with an empty driver cache: 11.7 -> 10.3 GB at start, 13.6-14.2 -> 11.7-12.3 GB
+  after three kingdoms, worst frames and >50 ms frames unchanged. This PC's settings, the 120 FPS routes: 1.1-1.3 GB
+  less, 105.4 vs 105.5 FPS, 4 in-play hitches both, arrival hitches median 26 vs 25 ms, worst 91 vs 94 ms. Measured
+  and ruled out: only programs drawn before set up at all (`ODYSSEY_PREWARM=3`, -0.4 GB), no bulk set-ups
+  (`ODYSSEY_PREWARM_BULK=0`, nothing), warm-up off (-1.6 GB but 250-300 ms arrival freezes), Low memory (-7 GB at start
+  but 330 ms freezes, and 8 GB after three kingdoms anyway). Note: `ODYSSEY_LOG_MEM=1` costs ~65 ms a stats line
+  (heap walk) - no frame-time measurements with it.
+
+- **Shader preparation: only drawn shaders compiled for the GPU (#94, after Odyssey Recomp 0.2.6 / 0.2.7).** Every
+  program is still translated, but the driver compiles only those drawn before (the shipped list, now merged with
+  Odyssey Recomp's 197-stage list: 1,737 -> 3,470; and the player's own), the compute programs and the whole effects
+  archive. A new player's first start (empty game and driver caches, 16 GB settings, Cap -> Sand -> Metro -> Wooded),
+  all programs vs drawn only: 98.2 s -> 59.4 s before the start, 31,570 -> 6,833 programs compiled, cache 2.2 -> 1.7 GB,
+  RAM 8.4 -> 11.7 vs 8.2 -> 11.4 GB, worst frame 423 vs 460 ms, frames over 50 ms 9 vs 10, 60.2 vs 60.1 FPS.
+  `ODYSSEY_PRECOMPILE_ALL=1`: all, as before. Opt-in for tests: `ODYSSEY_PRECOMPILE_TRANSLATE=known` (translate only
+  those too: 44.0 s, cache 1.3 GB, the same stutter on this PC; it moves translations into kingdom loads, untested on
+  4 cores / the Deck). Next: the SPIR-V (919 MB in 17,065 files) into one compressed pack - zlib measured 3.4x.
+- **#94's RAM on 32 GB PCs:** their logs show warm-up Long (32 GB and up: a budget of half the RAM, up to 12 GB)
+  preparing 2,276-5,090 pipelines (30 s the first time) and area-shader preload running to its 8 GB budget: 8.6-10.2 GB
+  in RAM. With the other port's cache (nothing our warm-up could use): 6.3 GB, but a 1,634 ms frame. Not changed yet.
+
+- **RAM and cache, second round (all measured, local commits f95e78b, b94d9e3, 75153c7):** warm-up Auto 1 GB on every
+  PC; only our tours' warm flags; SPIR-V in one zstd pack (old caches move into it); no pipeline binaries on NVIDIA.
+  Totals, RTX 4090: a new player 98 s -> 51 s before the start, cache 2.2 GB -> 0.7 GB, RAM 8.4 -> 11.7 GB became
+  4.6 -> 6.1 GB; this PC's own settings at 120 FPS through six kingdoms 14.7 -> 15.6 GB became 5.8 -> 6.6 GB, FPS and
+  hitches the same. AMD iGPU: binaries make no RAM difference, kept. Not adopted: not loading our pipeline cache
+  (another ~1 GB less, but NVIDIA's own cache holds 1 GB by default - too little for a play-through). Blocked: SMOL-V
+  (a further ~2x on disk per its author) - downloading and building it was refused by the session's safety check.
+  Next for RAM: what is left is ~3.2 GB of game memory and ~2.5 GB of driver objects; the step beyond is
+  VK_EXT_shader_object (no pipeline objects at all), a renderer rewrite.
+
 ## Owner play card (after the automatic gates)
 At most 10 minutes: enter the Lake Kingdom pond painting at 165 FPS; listen to the title music for a minute; play a
 cutscene transition; turn FSR frame generation on and switch upscalers twice. The answer per item is fine / not fine.

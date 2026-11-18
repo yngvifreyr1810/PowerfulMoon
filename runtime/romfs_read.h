@@ -11,5 +11,6 @@ uint8_t *yaz0_decode(const uint8_t *in, size_t n, size_t *out_n);            // 
 const uint8_t *sarc_find(const uint8_t *d, size_t n, const char *name, size_t *size);  // inside d; NULL: not there
 typedef bool (*RomfsFileVisitor)(const uint8_t *data, size_t size, void *arg);
 bool romfs_visit_files(const char *image, RomfsFileVisitor visit, void *arg);
+extern const char *romfs_visit_name;  // (during romfs_visit_files) the file's name, without its folder: "EffectPtcl.szs"
 bool sarc_visit_files(const uint8_t *data, size_t size, RomfsFileVisitor visit, void *arg);
 bool nso_visit_segments(const char *path, RomfsFileVisitor visit, void *arg);

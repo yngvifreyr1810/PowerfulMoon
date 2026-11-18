@@ -274,6 +274,10 @@ Bug reports are read and worked on the same way: the maintainer tests, and Claud
   original repository is no longer online.
 - **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai and its contributors - the static recompiler,
   runtime and renderer Power Moon Recomp is built on, and the frame interpolation (MIT license).
+- **[Odyssey Recomp](https://github.com/rwwo8/OdysseyRecomp)** by its contributors - another Power Moon based port of the
+  game (MIT license): its list of the shaders drawn in a run through all 197 stages (`known_programs.txt`, merged with
+  ours) and its approach of compiling only those, plus the effects, before the first start. Thanks to Eggtooth for the
+  side-by-side measurements that pointed to it ([#94](https://github.com/Simon3Sarkis/super-odyssey-pc-recomp/issues/94)).
 - **[PrimeRecomp](https://github.com/gminustwo/primerecomp)** by its contributors - the GPU ASTC texture decoder
   (`runtime/nvn/vulkan/astc_gpu.c`) and its GPU scratch memory (MIT license).
 - **[MacNativeGames](https://github.com/ly05010419/MacNativeGames)** - the game package reading code `runtime/nxpkg.c`

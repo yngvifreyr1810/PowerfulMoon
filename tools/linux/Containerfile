@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxtst-dev \
         libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgl-dev libdrm-dev libgbm-dev \
         libpulse-dev libasound2-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev libibus-1.0-dev \
-        libvulkan-dev \
+        libvulkan-dev libzstd-dev \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     # clang 21 from apt.llvm.org: 22.04's clang 15 lacks the __builtin_elementwise_* the lifted FP code uses (simd_fp.h)
     && curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc \

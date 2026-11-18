@@ -24,6 +24,7 @@ lic() {  # out-name folder-pattern file-pattern
 }
 lic VulkanMemoryAllocator-MIT.txt '*vulkan*memory*allocator*' 'LICENSE*'
 lic SDL3-zlib.txt 'sdl3' 'LICENSE*'
+lic zstd-BSD.txt 'zstd' 'LICENSE*'
 lic Apache-2.0.txt 'shaderc' 'LICENSE*'
 lic LLVM-Apache-2.0-with-LLVM-exception.txt 'llvm-libs' 'LICENSE*'
 lic winpthreads.txt '*winpthread*' 'COPYING*'
@@ -49,6 +50,7 @@ assets or fonts; the game code is built on your PC from your own copy of the gam
 
 Program (SuperOdysseyRecomp.exe and the DLLs next to it)
 - SDL 3 (zlib licence) - SDL3-zlib.txt - https://libsdl.org
+- Zstandard (BSD licence, linked statically for shader cache compression) - zstd-BSD.txt - https://github.com/facebook/zstd
 - FFmpeg 9.0.2, an LGPL-only build (avcodec, avformat, avutil, swscale; linked dynamically) - FFmpeg-LGPL-2.1.txt.
   Source: https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz, built unmodified with the configuration in
   tools/build_deps_windows.sh of the Super Odyssey PC Recomp source repository. You may replace these DLLs with your own

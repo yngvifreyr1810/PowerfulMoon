@@ -72,6 +72,8 @@ done:
     return out;
 }
 
+const char *romfs_visit_name = "";
+
 bool romfs_visit_files(const char *image, RomfsFileVisitor visit, void *arg) {
     FILE *f = fopen(image, "rb");
     if (!f) return false;
@@ -98,7 +100,14 @@ bool romfs_visit_files(const char *image, RomfsFileVisitor visit, void *arg) {
             data = larger;
             capacity = (size_t)size;
         }
-        if (!read_at(f, data_off + offset, data, (size_t)size) || !visit(data, (size_t)size, arg)) goto done;
+        char name[256];
+        size_t nl = name_size < sizeof name - 1 ? (size_t)name_size : sizeof name - 1;
+        memcpy(name, entry + 0x20, nl);
+        name[nl] = 0;
+        romfs_visit_name = name;
+        bool visited = read_at(f, data_off + offset, data, (size_t)size) && visit(data, (size_t)size, arg);
+        romfs_visit_name = "";
+        if (!visited) goto done;
     }
     ok = true;
 done:

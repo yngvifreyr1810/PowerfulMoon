@@ -14,11 +14,13 @@
 // collection lists and the map (click and wheel only there).
 // ODYSSEY_POINTER_PROBE=1 logs the hooked menus and the pointer's choices.
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "../hle.h"
+#include "../platform.h"
 #include "../rt.h"
 
 bool input_pointer_layout(float *x, float *y);  // runtime/hle/input.c
@@ -249,6 +251,20 @@ static void confirm(Cpu *c) {
     g_confirm(c);
 }
 
+// ---- MapLayout (the map, Minus): its Wait nerve runs while the map is up (its lists too). A does nothing there, so a
+// bound left click keeps its binding on the map (#90: a left click bound to Y opens the map's lists, as before the
+// mouse in menus took bound buttons; hle/input.c). Nerve found through RTTI (MapLayoutNrvWait, 1.4.1).
+static GuestFn g_map_wait;
+static _Atomic uint64_t g_map_seen_ns;
+static void map_wait(Cpu *c) {
+    atomic_store(&g_map_seen_ns, plat_now_ns());
+    g_map_wait(c);
+}
+bool odyssey_map_open(void) {
+    uint64_t t = atomic_load(&g_map_seen_ns);
+    return t && plat_now_ns() - t < 200000000ull;
+}
+
 // ---- (development) ODYSSEY_POINTER_NERVES=<file>: lines "<execute address hex>:<name>" - every listed nerve hooked,
 // and each logged when it starts running (a state change) with its host: which object runs which screen.
 #define NPROBE 320
@@ -309,8 +325,10 @@ void odyssey_pointer_boot(void) {
     if ((g_confirm_data = dispatch_lookup(confirm_data_nerve))) hle_override(confirm_data_nerve, confirm_data, "menu pointer: data window");
     const uint64_t confirm_nerve = 0x700070ce20ull;  // WindowConfirm's Wait nerve: execute
     if ((g_confirm = dispatch_lookup(confirm_nerve))) hle_override(confirm_nerve, confirm, "menu pointer: confirm window");
-    if (g_log) LOG("[pointer] menus: select mode %s, pause menu %s, vertical list %s, data window %s, window %s\n",
+    const uint64_t map_wait_nerve = 0x70001d4910ull;  // MapLayout's Wait nerve: execute
+    if ((g_map_wait = dispatch_lookup(map_wait_nerve))) hle_override(map_wait_nerve, map_wait, "menu mouse: map");
+    if (g_log) LOG("[pointer] menus: select mode %s, pause menu %s, vertical list %s, data window %s, window %s, map %s\n",
                    g_select_mode ? "hooked" : "not found", g_menu_select ? "hooked" : "not found",
                    g_vertical_list ? "hooked" : "not found", g_confirm_data ? "hooked" : "not found",
-                   g_confirm ? "hooked" : "not found");
+                   g_confirm ? "hooked" : "not found", g_map_wait ? "hooked" : "not found");
 }

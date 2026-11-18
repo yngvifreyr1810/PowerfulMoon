@@ -123,9 +123,19 @@ static const char *const warmups[WARMUP_COUNT] = {"auto", "normal", "long"};
 
 void settings_warmup_budget(unsigned *ms, unsigned *mb) {
     int ram_mb = SDL_GetSystemRAM();
-    // (Auto: Long with 32 GB or more. Each pipeline prepared ahead keeps ~1 MB of NVIDIA driver memory: Long's 7,650 cost
+    // (Until 2026-11-17 Auto was Long with 32 GB or more. Each pipeline prepared ahead keeps ~1 MB of NVIDIA driver memory: Long's 7,650 cost
     // ~6 GB more in RAM than Normal's ~1,700 - on a 16 GB PC that meant swapping, #75 / #61; 2026-11-16)
-    int w = g_settings.warmup == WARMUP_AUTO ? (ram_mb >= 30000 ? WARMUP_LONG : WARMUP_NORMAL) : g_settings.warmup;
+    // (Auto since 2026-11-17: 1 GB on every PC - the first-scene pipelines and the most recent ones. 120 FPS routes through
+    // six kingdoms, this PC: Long 8,925 pipelines and 14.7 GB in RAM at the start, Normal 1,883 and 11.3 GB, 1 GB 304
+    // and 10.8 GB - FPS, hitches in play and at arrivals the same; none at all: more hitches. #94: Long took 32 GB PCs
+    // to 10 GB in RAM at the start.)
+    if (g_settings.warmup == WARMUP_AUTO) {
+        *ms = 15000;
+        *mb = 1024;
+        return;
+    }
+    int w = g_settings.warmup;
+    (void)ram_mb;
     if (w == WARMUP_LONG) {  // (what the 120 FPS launcher used: 30 s, up to 12 GB - at most half of this PC's memory)
         *ms = 30000;
         *mb = ram_mb > 0 && ram_mb / 2 < 12288 ? (unsigned)(ram_mb / 2) : 12288;

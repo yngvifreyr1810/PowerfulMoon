@@ -63,6 +63,7 @@ cp third_party/ryujinx/LICENSE.txt "$D/Ryujinx-MIT.txt"
 cp third_party/imgui/misc/fonts/Roboto-LICENSE.txt "$D/Roboto-Apache-2.0.txt"
 cp "$W/vma/LICENSE.txt" "$D/VulkanMemoryAllocator-MIT.txt"
 cp "$W/sdl/LICENSE.txt" "$D/SDL3-zlib.txt"
+cp /usr/share/doc/libzstd-dev/copyright "$D/zstd-BSD.txt"
 cp "$W/ffmpeg/COPYING.LGPLv2.1" "$D/FFmpeg-LGPL-2.1.txt"
 cp "$W/ffmpeg/COPYING.GPLv2" "$D/GPL-2.0.txt"
 cp "$W/shaderc/LICENSE" "$D/shaderc-Apache-2.0.txt"
@@ -76,6 +77,7 @@ cp /usr/share/doc/python3.12/copyright "$D/Python-PSF.txt" 2>/dev/null || true
 cat > "$D/README.txt" <<'EOF'
 Super Odyssey PC Recomp - third-party components in this AppImage and their licences
 - SDL 3.4.16 (zlib) - SDL3-zlib.txt
+- Zstandard (BSD, linked statically for shader cache compression) - zstd-BSD.txt - https://github.com/facebook/zstd
 - libarchive/bsdtar 3.8.11 (BSD; translation package extraction) - libarchive.txt
 - FFmpeg 9.0.2, an LGPL-only build, linked dynamically (usr/lib) - FFmpeg-LGPL-2.1.txt; source:
   https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz, configured as tools/linux/build_deps.sh in the source repository

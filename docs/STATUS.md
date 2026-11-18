@@ -43,7 +43,7 @@ weighted mean of its parts, and the overall value the weighted mean of the areas
 | 🔧 | **No shader stutter** | ![90%](media/progress/90.svg) | x3 | Every shader is prepared before play and again after a driver update. A rare effect nobody has recorded can still hitch once |
 | 🔧 | **Frame pacing** | ![90%](media/progress/90.svg) | x2 | The game's timer is locked to when the screen shows each frame |
 | 🔧 | **Frame rates above 60** | ![85%](media/progress/85.svg) | x2 | 72 to 240 FPS with every frame really drawn. Scenes not prepared for it (painting transitions) play at 60 |
-| 🔧 | **Memory** | ![80%](media/progress/80.svg) | x2 | Steady over long sessions since 0.4.0. Committed memory is still high on 16 GB PCs ([#75](https://github.com/Simon3Sarkis/super-odyssey-pc-recomp/issues/75), [#61](https://github.com/Simon3Sarkis/super-odyssey-pc-recomp/issues/61)) |
+| 🔧 | **Memory** | ![90%](media/progress/90.svg) | x2 | Steady over long sessions, and since 0.4.3 about 6 GB in RAM on NVIDIA (was 12-15 GB: [#94](https://github.com/Simon3Sarkis/super-odyssey-pc-recomp/issues/94), [#75](https://github.com/Simon3Sarkis/super-odyssey-pc-recomp/issues/75), [#61](https://github.com/Simon3Sarkis/super-odyssey-pc-recomp/issues/61)). Not yet measured on AMD and Intel |
 | 🔧 | **Low-end PCs and handhelds** | ![60%](media/progress/60.svg) | x2 | Handheld mode and lower resolutions help; a tested floor (4 cores, integrated graphics, 8 GB) is still to do |
 
 ### Graphics options (12%)

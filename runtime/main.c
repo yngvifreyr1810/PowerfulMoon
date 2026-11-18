@@ -10,6 +10,7 @@
 #include "settings.h"
 #include "hle.h"
 #include "kernel.h"
+#include "rt.h"
 #include "romfs_build.h"
 #include "ui/setup.h"
 #include "updater.h"
@@ -164,9 +165,23 @@ static void boot(const char *root) {
     kernel_run_main(t, t->handle, 0, init_fn, fini_fn);  // nn::init::Start(thread_handle, args_region, init, fini)
 }
 
+// (tests) ODYSSEY_MEM_TRACE=1: memory in RAM / committed every half second from the start, in the log - each jump next
+// to the log lines around it shows which step of the start-up it came from
+static int mem_trace(void *arg) {
+    (void)arg;
+    uint64_t t0 = plat_now_ns();
+    for (;;) {
+        LOG("[memtrace] %.1f s: %llu MB in RAM, %llu MB committed\n", (plat_now_ns() - t0) / 1e9,
+            (unsigned long long)(plat_resident_bytes() >> 20), (unsigned long long)(plat_private_bytes() >> 20));
+        SDL_Delay(500);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     plat_init();
     diagnostics_init();
+    if (getenv("ODYSSEY_MEM_TRACE")) SDL_DetachThread(SDL_CreateThread(mem_trace, "memtrace", NULL));
 #ifdef _WIN32
     setvbuf(stderr, NULL, _IONBF, 0);  // the Windows CRT treats _IOLBF as full buffering
 #else
