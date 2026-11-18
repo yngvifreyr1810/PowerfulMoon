@@ -39,7 +39,7 @@ U=$APPDIR/usr/bin
 cp "$B/SuperOdysseyRecomp" "$U/"
 llvm-strip --strip-debug "$U/SuperOdysseyRecomp"  # (symbols stay: crash backtraces name functions)
 cp docs/icon/icon_512.png "$U/icon.png"
-cp third_party/imgui/misc/fonts/Roboto-Medium.ttf runtime/nvn/vulkan/known_programs.txt data/pipeline-seed.bin README.md \
+cp third_party/imgui/misc/fonts/Roboto-Medium.ttf runtime/nvn/vulkan/known_programs.txt README.md \
    LICENSE "$U/"
 mkdir -p "$U/lang" && cp runtime/ui/lang/*.txt "$U/lang/"  # (the menu's translations: runtime/ui/i18n.mm)
 mkdir -p "$U/fsr2" && cp third_party/fsr2/shaders/* third_party/fsr2/LICENSE.txt "$U/fsr2/"  # (FSR 2: runtime/nvn/vulkan/fsr2.c)
@@ -113,6 +113,7 @@ fi
 echo "bundled: $(ls "$APPDIR/usr/lib" | tr '\n' ' ')"
 
 # ---- AppImage (appimagetool runs extracted: no FUSE in the container)
+bash tools/dist_check_content.sh "$APPDIR"
 fetch() {  # url sha256 file
     [ -f "build/linux/src/$3" ] || { curl -fsSL -o "build/linux/src/$3.part" "$1" && mv "build/linux/src/$3.part" "build/linux/src/$3"; }
     echo "$2  build/linux/src/$3" | sha256sum -c --quiet

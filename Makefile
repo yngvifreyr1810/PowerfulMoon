@@ -236,7 +236,7 @@ dlls: $(EXE)
 # gamelib-src/ and the exe's import library - the shader list, the menu font, README and LICENSE. No game code and no
 # game files: the setup page (runtime/ui/setup.mm) builds them from the player's own. The exe is built in $(WIN_B)
 # against the LGPL FFmpeg from `make deps-windows` (MSYS2's is a GPLv3 build); vulkan-1.dll is the system's.
-# Also the vendors' upscaler runtimes (tools/fetch_upscalers.sh: DLSS, FSR 3.1 / 4, XeSS) and the pipeline seed.
+# Also the vendors' upscaler runtimes (tools/fetch_upscalers.sh: DLSS, FSR 3.1 / 4, XeSS).
 # Order: make deps-windows; make gen-helper; tools/fetch_zig.sh; tools/fetch_upscalers.sh; make dist
 # (all from a clean checkout: .github/workflows/build.yml does exactly this).
 VERSION  := $(shell sed -n 's/^#define APP_VERSION "\(.*\)"/\1/p' runtime/version.h)
@@ -306,7 +306,7 @@ dist:
 	cp -R build/zig-slim "$(DIST)/zig"
 	cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
 	    "$(DIST)/gamelib-src/"
-	cp runtime/nvn/vulkan/known_programs.txt third_party/imgui/misc/fonts/Roboto-Medium.ttf data/pipeline-seed.bin 	    README.md LICENSE "$(DIST)/"
+	cp runtime/nvn/vulkan/known_programs.txt third_party/imgui/misc/fonts/Roboto-Medium.ttf README.md LICENSE "$(DIST)/"
 	mkdir -p "$(DIST)/lang" && cp runtime/ui/lang/*.txt "$(DIST)/lang/"  # (the menu's translations: runtime/ui/i18n.mm)
 	mkdir -p "$(DIST)/fsr2" && cp third_party/fsr2/shaders/* third_party/fsr2/LICENSE.txt "$(DIST)/fsr2/"  # (FSR 2: runtime/nvn/vulkan/fsr2.c)
 	cp build/upscalers/*.dll "$(DIST)/"  # (loaded only when chosen in the menu)
@@ -315,6 +315,7 @@ dist:
 	    sort -u | xargs -I{} cp -u {} "$(DIST)/"
 	! ls "$(DIST)" | grep -iE 'x264|x265|xvid|postproc'  # (no GPL codec libraries in the release)
 	tools/dist_check_paths.sh "$(DIST)"  # (no path of this machine inside: debug info, caches, logs)
+	bash tools/dist_check_content.sh "$(DIST)"
 	cd build/dist && /c/Windows/System32/tar.exe -a -cf "Super Odyssey PC Recomp-$(VERSION)-windows.zip" "Super Odyssey PC Recomp"
 	@echo "build/dist/Super Odyssey PC Recomp-$(VERSION)-windows.zip"
 
