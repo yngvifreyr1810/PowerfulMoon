@@ -22,7 +22,9 @@ Use GitHub's **Create a merge commit** for an approved PR. Never squash away the
 
 After the merge, record the build run whose `headSha` matches the final commit on `powerfulmoon`. Download its `windows-zip` and `linux-appimage` artifacts. Use copies of player data for testing. For Windows run clean setup, reach gameplay, load a copied save and restart. Exercise the features touched by the update. VRR should follow variable presentation, the tested DLSS configuration is 60 FPS with 2× FG on supported hardware, and Switch motion should distinguish preparation from the actual flick. Check the shake binding and 200% vibration setting with a controller. If upstream changes caches, test an empty cache and a separate copy of the previous cache. Confirm migration and a second launch.
 
-For v0.4.3, verify zstd shader pack creation or migration, the NVIDIA pipeline cache path and the mouse binding used for shake. Compare the upstream and fork runs on the same test data, with independent cache and save copies. Keep the optional community FG proxy outside the distributable files.
+Complete setup, migration, package audits and intermediate tests before handing the build to the owner. Prepare one local test copy with a copied save, the tested display settings and a launcher shortcut. If DLSS FG needs the community proxy on the owner's GPU, install it in that test copy so the owner can open the game directly. Keep the proxy outside the distributable files. The owner plays the prepared build and reports the visible result, including G-SYNC or monitor Hz and physical controller feedback when relevant.
+
+For v0.4.3, verify zstd shader pack creation or migration, the NVIDIA pipeline cache path and the mouse binding used for shake. Compare the upstream and fork runs on the same test data, with independent cache and save copies.
 
 ## Stage and publish
 
