@@ -1,13 +1,16 @@
 <p align="center"><img src="docs/banner.svg" alt="Super Odyssey PC Recomp" width="100%"></p>
 
 <p align="center">
-  <a href="https://github.com/Simon3Sarkis/super-odyssey-pc-recomp/releases/latest"><b>Download</b></a> ·
+  <a href="https://github.com/yngvifreyr1810/PowerfulMoon/releases/latest"><b>Download PowerfulMoon</b></a> ·
   <a href="#install">Get started</a> ·
   <a href="docs/STATUS.md">Status</a> ·
   <a href="#known-issues">Known issues</a> ·
   <a href="docs/ENGINEERING-NOTES.md">Engineering notes</a> ·
-  <a href="https://github.com/Simon3Sarkis/super-odyssey-pc-recomp/issues">Issues</a>
+  <a href="https://github.com/yngvifreyr1810/PowerfulMoon/issues">PowerfulMoon issues</a>
 </p>
+
+PowerfulMoon follows [Super Odyssey PC Recomp](https://github.com/Simon3Sarkis/super-odyssey-pc-recomp).
+See the [upstream review and release process](docs/powerfulmoon-releases.md) for how this fork takes updates.
 
 **Super Odyssey PC Recomp** is a native PC port of *Super Mario Odyssey* (Nintendo Switch, versions 1.0.0 and 1.4.1)
 for Windows, Linux and the Steam Deck, made by static recompilation and built on your PC from your own copy of the

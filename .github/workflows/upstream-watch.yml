@@ -1,0 +1,64 @@
+name: Upstream release watch
+
+on:
+  push:
+    branches: [powerfulmoon]
+    paths:
+      - '.github/workflows/upstream-watch.yml'
+      - 'tools/automation/upstream_watch.py'
+      - 'tools/automation/test_upstream_watch.py'
+      - 'release.json'
+  schedule:
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      notify:
+        description: 'Open an issue for each newly detected upstream release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: powerfulmoon-upstream-watch
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.repository == 'yngvifreyr1810/PowerfulMoon'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test and preview upstream release notices
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python -m unittest discover -s tools/automation -p 'test_upstream_watch.py'
+          python tools/automation/upstream_watch.py
+
+  notify:
+    needs: verify
+    if: github.ref == 'refs/heads/powerfulmoon' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.notify))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Open deduplicated review notices
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python tools/automation/upstream_watch.py --notify

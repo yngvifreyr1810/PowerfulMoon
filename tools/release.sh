@@ -23,6 +23,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# This upstream publisher uses the upstream repository and its private catalog.
+# PowerfulMoon validates and stages its own release artifacts instead.
+if grep -q '^#define APP_UPDATE_REPO "yngvifreyr1810/PowerfulMoon"$' runtime/version.h; then
+    echo 'PowerfulMoon releases follow docs/powerfulmoon-releases.md.' >&2
+    exit 2
+fi
+
 VERSION=${1:?usage: tools/release.sh <version> <release-notes.md>}
 NOTES=${2:?usage: tools/release.sh <version> <release-notes.md>}
 [ -f "$NOTES" ] || { echo "no such file: $NOTES"; exit 1; }

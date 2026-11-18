@@ -1,13 +1,14 @@
 # The Windows zip and the Linux AppImage, built from a clean checkout on GitHub's machines, kept as downloadable
 # artifacts of each run (Actions > the run > Artifacts). Nothing is published: releases stay a manual step
-# (tools/release.sh), which tests these packages first. No game files or game code are involved: the packages
+# (docs/powerfulmoon-releases.md), which tests these packages first. No game files or game code are involved: the packages
 # hold the app and the setup's tools only, and players build the game code from their own copy.
 name: build
 
 on:
   push:
-    branches: [main, 'ci/**']
+    branches: [powerfulmoon, 'ci/**']
   pull_request:
+    branches: [powerfulmoon]
   workflow_dispatch:
 
 permissions:
@@ -18,6 +19,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify release identity, seed, and source archive
+        run: |
+          python -m unittest discover -s tools/automation -p 'test_*.py'
+          python tools/automation/check_release_identity.py
+          git archive --format=zip --prefix=PowerfulMoon/ -o "$RUNNER_TEMP/powerfulmoon-source.zip" HEAD
+          python tools/automation/audit_packages.py --seed-reference data/pipeline-seed.bin --source-archive "$RUNNER_TEMP/powerfulmoon-source.zip"
+
   windows:
     runs-on: windows-2022
     timeout-minutes: 120
@@ -59,6 +77,12 @@ jobs:
         run: tools/fetch_upscalers.sh
       - name: Package (make dist)
         run: make -j4 dist
+      - name: Audit Windows ZIP
+        run: |
+          shopt -s nullglob
+          packages=(build/dist/*.zip)
+          test "${#packages[@]}" -eq 1
+          python tools/automation/audit_packages.py --seed-reference data/pipeline-seed.bin --windows-zip "${packages[0]}"
       - name: Contents
         run: |
           cd "build/dist/Super Odyssey PC Recomp"
@@ -80,6 +104,15 @@ jobs:
       # (Ubuntu 22.04 containers, podman: tools/linux/appimage.sh; the same steps as on the Steam Deck)
       - name: AppImage (tools/linux/appimage.sh)
         run: tools/linux/appimage.sh x86_64
+      - name: Audit final AppImage
+        run: |
+          shopt -s nullglob
+          packages=(build/dist/*.AppImage)
+          test "${#packages[@]}" -eq 1
+          image="$PWD/${packages[0]}"
+          chmod +x "$image"
+          (cd "$RUNNER_TEMP" && "$image" --appimage-extract >/dev/null)
+          python3 tools/automation/audit_packages.py --seed-reference data/pipeline-seed.bin --appimage-root "$RUNNER_TEMP/squashfs-root"
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
