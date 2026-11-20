@@ -501,6 +501,13 @@ static void create_device(void) {
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
                                  .vulkanApiVersion = VK_API_VERSION_1_3};
+    // Low memory: 64 MB blocks instead of VMA's 256 MB - less of them left empty (Wooded Kingdom, 1.4.1, an integrated
+    // GPU at 1280x720: 1760 MB of blocks for 1483 MB of images and buffers). ODYSSEY_VK_BLOCK_MB=<n> for tests.
+    {
+        const char *e = getenv("ODYSSEY_VK_BLOCK_MB");
+        uint64_t mb = e && *e ? (uint64_t)atoi(e) : settings_low_memory() ? 64 : 0;
+        if (mb) ai.preferredLargeHeapBlockSize = mb << 20;
+    }
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
 
     VkSemaphoreTypeCreateInfo st = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
@@ -567,8 +574,10 @@ void vk_pcache_load_headless(void) {
 }
 
 static pthread_mutex_t pcache_save_lock = PTHREAD_MUTEX_INITIALIZER;  // (the exit and an autosave at once)
+// (vk_prepare_install: the preparation's processes write the file meanwhile - this process's copy is merged in after)
+static _Atomic bool pcache_preparing;
 void vk_pipeline_cache_save(void) {
-    if (getenv("ODYSSEY_NO_PCACHE_LOAD")) return;  // (a test without it loaded: its file isn't replaced by this run's part)
+    if (getenv("ODYSSEY_NO_PCACHE_LOAD") || pcache_preparing) return;  // (a test without it loaded: its file isn't replaced by this run's part)
     pthread_mutex_lock(&pcache_save_lock);
     size_t sz = 0;
     void *data = NULL;
@@ -1606,6 +1615,9 @@ static bool frame_placement(float v[4], float pv[8]) {
     else {
         int a = g_settings.aspect >= 0 && g_settings.aspect < ASPECT_COUNT ? g_settings.aspect : ASPECT_16_9;
         double k = a == ASPECT_FILL ? (fabs(win - 1.0) > 0.005 ? win : 1.0) : ASPECT_K[a];
+        // (a fixed shape within 3% of the window's is the window's: 21:9 is 64:27 = 2.37, a 3840x1600 screen 2.40 - the
+        // picture was 3793 wide with bars at the sides, #93)
+        if (a != ASPECT_FILL && fabs(k / win - 1.0) < 0.03) k = fabs(win - 1.0) > 0.005 ? win : 1.0;
         odyssey_wide_want((float)k);
     }
     OutScale os;
@@ -1745,6 +1757,45 @@ static void present_brake(uint64_t now, bool interp) {
     if (backoff > 120 && total_frames > last_brake + 1800) backoff = 120;
 }
 
+// The native frame rate's brake (frame rates above 60: odyssey_120.c's extra draws). Where the game's code and the
+// translation of its lists together take longer than a frame - the New Donk City power lines at 120 FPS: ~2,400 draws,
+// ~14 ms of the game's code and ~9 ms of translation, back to back (the game waits for each frame's translation:
+// nvnSyncWait) - the extra frames missed their time in bursts: 20-28 ms frames, 80-110 FPS, a stutter. When 12 of the
+// last 120 frames take over 1.5x their period, the game plays at 60 for 2 s - an even 60 instead of an uneven 80-110 -
+// longer each time in a row (up to 20 s), and 30 s without: short pauses again. Frames already at 60 (loads, scenes
+// without extra-draw preparation) aren't counted. ODYSSEY_FRAME_BRAKE=1: on (off by default: on the power line the
+// switches to 60 felt worse to the owner than the uneven frames).
+static _Atomic uint64_t native_brake_until_ns;
+bool vk_native_brake(void) { return plat_now_ns() < atomic_load(&native_brake_until_ns); }
+static void native_brake(uint64_t now) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("ODYSSEY_FRAME_BRAKE"); on = e && *e && atoi(e) != 0; }  // (off: owner, 2026-11-17 - dropping to 60 felt worse than the stutter)
+    static uint64_t last, last_brake_ns;
+    static uint8_t slow[120];
+    static int n, nslow;
+    static uint64_t backoff_ns = 2000000000ull;
+    extern int odyssey_native_hz(void);
+    int hz = odyssey_native_hz();
+    uint64_t prev = last;
+    last = now;
+    if (!on || !prev || now <= prev || hz <= 60 || vk_native_brake()) return;
+    double d = (double)(now - prev), period = 1e9 / hz;
+    int k = n++ % 120;
+    bool late = d > period * 1.5;
+    nslow += late - slow[k];
+    slow[k] = late;
+    if (backoff_ns > 2000000000ull && now > last_brake_ns + 30000000000ull) backoff_ns = 2000000000ull;
+    if (nslow >= 12) {
+        atomic_store(&native_brake_until_ns, now + backoff_ns);
+        LOG("[frame-rate] %d of the last %d frames took over %.1f ms: %d FPS for %.0f s\n", nslow, n < 120 ? n : 120,
+            period * 1.5 / 1e6, 60, backoff_ns / 1e9);
+        last_brake_ns = now;
+        backoff_ns = backoff_ns * 2 > 20000000000ull ? 20000000000ull : backoff_ns * 2;
+        memset(slow, 0, sizeof slow);
+        n = nslow = 0;
+    }
+}
+
 static void backend_present_locked(NvnTexture *t, bool handed);
 void backend_present(NvnTexture *t) {
     plat_heap_check("present");
@@ -1771,6 +1822,7 @@ static void backend_present_locked(NvnTexture *t, bool handed) {
     TexBackend *b = fd.b, *game_img = fd.game_img;
     b->presented = true;
     present_brake(present_ns, fd.game_w != NULL);
+    native_brake(present_ns);
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
     pcache_autosave();
@@ -2007,6 +2059,7 @@ static void quick_exit_handler(void) {
     static int trace = -1;
     if (trace < 0) trace = getenv("ODYSSEY_VK_TRACE") != NULL;
     { extern void sampler_flush(void); sampler_flush(); }  // (a sampling session still going: written out)
+    { extern void vk_census_report(void); if (!g_vk.headless) vk_census_report(); }
     if (trace) LOG("[vk] exit: waiting for the GPU\n");
     if (g_vk.dev) {
         vk_queue_lock();
@@ -2158,10 +2211,25 @@ void vk_prepare_request(bool on) {
 // Whether this start has a full preparation due (vk_prepare_before_start's checks, without doing it): the configuration
 // page (runtime/ui/setup.mm) asks the player then and runs it on its own page, with a progress bar.
 static bool g_prepare_skipped;  // (the player said Later: not this start)
-// What a prepared cache was made for: the GPU, its driver and this program's version (the PREPARED_MARK's second
-// line). A driver update makes the driver refuse the saved pipeline binaries, and a new version may translate shaders
-// differently: either way the cache no longer matches and every effect would build while playing - the stutters
-// players saw after updating. A different identity (or a mark from before it was kept) makes the preparation due again.
+// What a prepared cache was made for: the GPU, its driver and what makes the shaders (the PREPARED_MARK's second
+// line). A driver update makes the driver refuse the saved pipeline binaries, and a changed translator makes other
+// shaders: either way the cache no longer matches and every effect would build while playing - the stutters players
+// saw after updating. A different identity (or a mark from before it was kept) makes the preparation due again.
+// Until 0.4.7 the identity held the program's version, so every update prepared everything again - 65 s on an RTX
+// 4090 with every cache warm, ~8 minutes on a Steam Deck (the owner's, 0.4.2 -> 0.4.5) - although most updates
+// change nothing a shader is made from. Now: PREP_ID (the Makefile's hash of the translator, the SPIR-V compile and
+// pack, and the list of prepared shaders) and PREP_REV below.
+// PREP_REV: raise it with any change, outside PREP_ID's files, to what the preparation makes or to how the game then
+// looks it up - the pipeline libraries' creation (exec.c), the pipeline binaries / pipeline cache format, the
+// recorded pipeline states. Forgetting it costs first-use compiles while playing (draws wait a few frames), not a
+// wrong picture.
+#ifndef PREP_ID
+#define PREP_ID "dev"
+#endif
+#define PREP_REV 1
+// (a mark written the old way for the same shader sources: {PREP_ID "." PREP_REV, its "app <version>"} - 0.4.7 was
+// released from these sources, so its players are not prepared once more; void as soon as either changes)
+static const char *const prep_same_as[][2] = {{"50739c27e9a1.1", "0.4.7"}};
 static void prep_identity(char out[128]) {
     static char id[128];
     static bool done;
@@ -2191,8 +2259,8 @@ static void prep_identity(char out[128]) {
             }
         }
         if (best.vendorID)
-            snprintf(id, sizeof id, "gpu %04x:%04x driver %u app %s pbin %d", best.vendorID, best.deviceID, best.driverVersion,
-                     APP_VERSION, pbin_wanted(best.vendorID));
+            snprintf(id, sizeof id, "gpu %04x:%04x driver %u shaders %s.%d pbin %d", best.vendorID, best.deviceID, best.driverVersion,
+                     PREP_ID, PREP_REV, pbin_wanted(best.vendorID));
     }
     memcpy(out, id, 128);
 }
@@ -2227,7 +2295,16 @@ static bool prepare_due(bool log, char key[64]) {
             if (fgets(line, sizeof line, f) && fgets(have_id, sizeof have_id, f)) have_id[strcspn(have_id, "\r\n")] = 0;
             fclose(f);
         }
-        if (!want[0] || !strcmp(have_id, want)) {
+        bool same = !want[0] || !strcmp(have_id, want);
+        for (size_t i = 0; !same && i < sizeof prep_same_as / sizeof prep_same_as[0]; i++) {
+            char now[40], old[160], *sh = strstr(want, " shaders ");
+            snprintf(now, sizeof now, "%s.%d", PREP_ID, PREP_REV);
+            if (!sh || strcmp(now, prep_same_as[i][0])) continue;
+            const char *pb = strstr(sh, " pbin ");
+            snprintf(old, sizeof old, "%.*s app %s%s", (int)(sh - want), want, prep_same_as[i][1], pb ? pb : "");
+            same = !strcmp(have_id, old);
+        }
+        if (same) {
             if (log) LOG("[prep] shader cache found; using quick startup\n");
             return false;
         }
@@ -2250,10 +2327,25 @@ bool vk_gpu_is_nvidia(void) { return g_vk.props.vendorID == 0x10de; }  // (the m
 bool vk_prepare_due(void) { char key[64]; return prepare_due(false, key); }
 void vk_prepare_skip_this_start(void) { g_prepare_skipped = true; LOG("[prep] shader preparation put off (Later)\n"); }
 
+// The release's pipeline seed (data/pipeline-seed.bin.zst, ~8,300 pipeline states recorded while playing) as the
+// "recorded" pass's list, unless this PC has recorded its own already - before every full preparation, not only the
+// setup's first install: a game folder whose files were already set up was prepared without it (the owner's new-user
+// test, 2026-11-19: "no compatible recorded pipeline states", ~1,900 libraries built while playing, some ~120 ms).
+static void prep_seed(void) {
+    char seed[1100];
+    struct stat st;
+    mkdir("cache", 0755);
+    if (stat("cache/graphics-pipelines.bin", &st) == 0) return;
+    if (rt_resource("pipeline-seed.bin.zst", "data/pipeline-seed.bin.zst", seed, sizeof seed))
+        LOG("[prep] pipeline seed: %s\n", vk_seed_unpack(seed, "cache/graphics-pipelines.bin") ? "unpacked" : "unpacking failed");
+    else
+        LOG("[prep] no pipeline seed in this build\n");
+}
+
 void vk_prepare_before_start(void) {
     char key[64];
     if (!prepare_due(true, key)) return;
-    mkdir("cache", 0755);
+    prep_seed();
     remove("cache/prepare.progress");
     uint64_t t0 = plat_now_ns();
     LOG("[prep] precompiling the game's shaders\n");
@@ -2284,12 +2376,34 @@ void vk_prepare_before_start(void) {
 // the game's archives, then every recorded (or seeded) pipeline - from the setup's worker thread, its progress to the
 // setup page instead of a window of its own. Marks the cache done, so later starts go straight to the game. cancel
 // (may be NULL): stops it (the entries done so far stay). 0 = done.
+static int vk_prepare_install_passes(const char *exe, void (*progress)(int phase, int done, int total), volatile int *cancel);
+void vk_prepare_take_cache(void) {  // (the game going on in the process that prepared: see vk_prepare_install)
+    if (!g_vk.dev || !g_vk.pcache || g_vk.headless) return;
+    uint64_t t0 = plat_now_ns();
+    vk_pcache_load_headless();
+    LOG("[prep] the prepared pipeline cache taken into this process: %.0f ms\n", (plat_now_ns() - t0) / 1e6);
+}
 int vk_prepare_install(void (*progress)(int phase, int done, int total), volatile int *cancel) {
     char exe[1024], key[64] = "";
     struct stat st;
     if (!plat_exe_path(exe, sizeof exe)) return -2;
     if (stat(exe, &st) == 0) snprintf(key, sizeof key, "%lld %lld", (long long)st.st_size, (long long)st.st_mtime);
-    mkdir("cache", 0755);
+    prep_seed();
+    // The game's own process (the setup's or the start page's preparation): its pipeline cache was made before the
+    // preparation wrote cache/vk_pipelines.bin, so it isn't saved meanwhile - the owner's new-user test (2026-11-19)
+    // played with the empty one and saved it over the 313 MB file. Nor does the driver see what the preparation put in
+    // its own disk cache (read when the device is made): the game starts again in a new process after it
+    // (runtime/ui/setup.mm restart_after_prep), or takes the file in (vk_prepare_take_cache) when it can't.
+    pcache_preparing = true;
+    int code = vk_prepare_install_passes(exe, progress, cancel);
+    pcache_preparing = false;
+    if (code == 0 && key[0]) {
+        prep_mark_write(key);
+        remove(PREPARE_REQUEST);
+    }
+    return code;
+}
+static int vk_prepare_install_passes(const char *exe, void (*progress)(int phase, int done, int total), volatile int *cancel) {
     static const char *const passes[] = {"all", "recorded"};
     static const char *const logs[] = {"cache/prepare.log", "cache/prepare-pipelines.log"};
     int code = 0;
@@ -2313,10 +2427,6 @@ int vk_prepare_install(void (*progress)(int phase, int done, int total), volatil
             if (code != 2) break;  // 2: a memory budget was reached, the next round goes on where it stopped
         }
         if (pass == 0 && code == 3) code = 0;  // (3: done, some programs unavailable on this GPU)
-    }
-    if (code == 0 && key[0]) {
-        prep_mark_write(key);
-        remove(PREPARE_REQUEST);
     }
     return code;
 }
@@ -2394,6 +2504,8 @@ int ui_run(void) {
             }
             extern bool input_user_blocked(const SDL_Event *e);
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing (as metal.m)
+            extern bool input_motion_only_event(const SDL_Event *e);
+            if (input_motion_only_event(&e)) continue;  // (the Steam Deck's own controller under Steam Input: its gyro only)
             if (menu_handle_event(&e)) continue;
             input_handle_event(&e);
         }

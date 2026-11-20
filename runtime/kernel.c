@@ -266,10 +266,19 @@ static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int
 }
 
 static void thread_start(KThread *t) {
+    const uint64_t stack = 256ull << 20;  // guest recursion runs on the host stack
+    t->started = true;
+#ifdef _WIN32
+    // Windows: the stack reserved, committed as it is used (platform/windows.c plat_thread_start_reserved); pthreads
+    // committed all 256 MB of each. ODYSSEY_THREAD_STACK_COMMIT=1: as before.
+    static int commit = -1;
+    if (commit < 0) commit = ENV("ODYSSEY_THREAD_STACK_COMMIT") && atoi(ENV("ODYSSEY_THREAD_STACK_COMMIT"));
+    extern void *plat_thread_start_reserved(void *(*fn)(void *), void *arg, uint64_t stack);
+    if (!commit && (t->win_handle = plat_thread_start_reserved(thread_main, t, stack))) return;
+#endif
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 256ull << 20);  // guest recursion runs on the host stack
-    t->started = true;
+    pthread_attr_setstacksize(&attr, stack);
     pthread_create(&t->host, &attr, thread_main, t);
     pthread_attr_destroy(&attr);
 }
@@ -1050,7 +1059,15 @@ void kernel_stop_threads(void (*idle)(void)) {
     }
     int n = 0;
     for (KThread *t = g_threads; t; t = t->anext)
-        if (t->started && !t->joined) { pthread_join(t->host, NULL); t->joined = true; n++; }
+        if (t->started && !t->joined) {
+#ifdef _WIN32
+            extern void plat_thread_join(void *h);
+            if (t->win_handle) plat_thread_join(t->win_handle);
+            else
+#endif
+            pthread_join(t->host, NULL);
+            t->joined = true; n++;
+        }
     LOG("[reboot] %d guest threads stopped in %llums\n", n, (unsigned long long)((plat_now_ns() - t0) / 1000000));
 }
 

@@ -1,20 +1,71 @@
 # Diagnostic and crash reports
 
 F1 / Esc > Quit > **Copy crash report** creates one text file and copies its
-full path. Paste that path into the attachment file picker when reporting a
-problem. This action saves the current settings before collecting them.
-Nothing is uploaded automatically.
+**text** (not its path) to the clipboard: paste it straight into the issue.
+**Show report file** opens its folder (Explorer with the file selected; on
+Linux the folder) to attach the file instead. This action saves the current
+settings before collecting them. Nothing is uploaded automatically.
 
-The Windows/Linux error dialog also has **Copy crash report**. A report is
-saved before the dialog opens, even if the player chooses Close. After restarting
-the same installation, **Copy last crash report** appears in the Quit page when
-the saved report is available. The old fault details survive replacement of the
-normal log. The existing quit confirmation remains.
+## Reason first (format 3, 2026-11-19)
+
+Every report starts with three lines in plain words:
+
+```text
+Crash reason: Out of graphics memory (VRAM)
+What to try: Lower the internal resolution (Graphics), set Performance > Memory use to Low ...
+Error: FATAL: vmaCreateImage(...) failed: -2 (...)
+```
+
+The reason comes from the first processor exception, the log's last `FATAL:` or
+`*** ` line, and the PC's free memory at the crash (runtime/diagnostics.c
+`classify`). Kinds: out of graphics memory (VRAM: Vulkan -2, the texture
+message), out of memory (RAM: Vulkan -1, "out of host memory", or a crash while
+free memory was nearly gone), Vulkan device lost (-4), a missing game file
+(`cannot open` / `cannot load` / `romfs:` / exefs messages), another Vulkan
+error, an illegal instruction (CPU features, with the processor's AVX2 / FMA /
+BMI2 / AVX / SSE4.2 listed), any other FATAL message (`Error: <message>`), a
+crash in the graphics driver, stack overflow, heap corruption, abort, or a
+crash with no error line.
+
+## Crash dialog and the next start
+
+Windows: the error dialog leads with the reason and has **Copy report text**
+and **Show report file** (the dialog comes back after each, until Close). A
+report is saved before the dialog opens, even if the player chooses Close.
+
+Linux / Steam Deck: the error box (no buttons: zenity can hang) shows the
+reason and the report's path.
+
+Both: at the next start the start page shows once, even when "Show this screen
+at every start" is off, with a **THE GAME CRASHED LAST TIME** card: the reason,
+**Copy report text**, **Show report file**, Dismiss. Scripted runs
+(`ODYSSEY_NO_CONFIG=1`, `--play`) skip it. Later, **Copy last crash report** and
+**Show last crash report file** stay in the Quit page.
 
 Files are `report-<UTC>-<process>-<sequence>.txt` under `reports/` beside the
 current file log. Without a file log, the game-data folder is used, or the
-executable's folder before data initialization. `last-crash.txt` is an internal
-filename pointer; attach the `report-...txt` file whose path the button copies.
+executable's folder before data initialization. `reports/.last-crash` (hidden)
+remembers the last crash: the report's name, its reason, and `seen` once the
+next start's card was shown. It used to be `last-crash.txt`, holding only the
+report's name, and a player attached that instead of the report (#75); an
+older `last-crash.txt` is still read, and removed at the next crash.
+
+The copied text is markdown for an issue comment: the reason in bold, the report
+folded in a `<details>` block. GitHub takes 65,536 characters in a comment, so a
+longer report keeps its first part (reason, summary, PC, settings) and the log's
+last ~40 KB, and says that the file has all of it.
+
+## Forced crashes (tests)
+
+`ODYSSEY_TEST_CRASH=<kind>` stops the game `ODYSSEY_TEST_CRASH_AFTER` seconds
+(default 20) after start with the same error lines as the real crash: `vram`,
+`ram`, `devlost`, `illegal` (a real illegal instruction), `fatal`, `segv`,
+`ram-segv` (a real access violation with memory reported low,
+`ODYSSEY_TEST_MEMORY_LOW`), `missing-file` (the RomFS image opened under a name
+that isn't there, services/fs.c). `ODYSSEY_TEST_CRASH_DIALOG=copy|show|close`
+presses that dialog button without showing it (the dialog's text goes to the
+log). The game only writes a report when it logs to a file, i.e. started without
+a console (e.g. PowerShell `Start-Process`).
 
 The report contains:
 

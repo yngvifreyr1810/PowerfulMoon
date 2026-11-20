@@ -64,6 +64,34 @@ for _a in WIDE_SITES:
     PATCHES[_a] = _wide
 
 
+# Draw distance (runtime/hle/odyssey_draw.c): a distance the game culls or picks detail by, times (or, for the LOD's
+# camera distance, divided by) odyssey_draw_distance() right after the instruction that produces it.
+DRAW_SITES = {  # address: (instruction word, s register, '*' or '/')
+    # al::ClippingJudge::update: ldr s1, [x8, #0x20] - ClippingFarAreaObserver's far clipping distance, handed to
+    # FrustumRadar::calcFrustumArea (its far: every actor's far clipping)
+    0x7000842c24: (0xbd402101, 1, '*'),
+    # al::FarDistanceDitherAnimator::update: ldr s3, [x19, #0x1c] - the distance the object fades out at
+    0x7000969760: (0xbd401e63, 3, '*'),
+    # al::ModelLodCtrl::update: fmul s8, s8, s0 - the camera distance (fovy-scaled) the LOD levels are picked by
+    0x700094ca48: (0x1e200908, 8, '/'),
+}
+
+
+def _draw_distance(sites):
+    def patch(gen, a):
+        word, reg, op = sites[a]
+        w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+        assert w == word, f'{a:#x}: {w:#x}'
+        code = ' '.join(gen.render_single(gen.lift(a), a, None, set()))
+        return (f'{code} {{ extern float odyssey_draw_distance(void); '
+                f'FP_SETS({reg}, VSF32({reg}) {op} odyssey_draw_distance()); }}  /* {a:#x}: draw distance */')
+    return patch
+
+
+for _a in DRAW_SITES:
+    PATCHES[_a] = _draw_distance(DRAW_SITES)
+
+
 # Debug hooks (make gen with ODYSSEY_HOOKS=<addr>[,<addr>...], hex): each listed instruction first calls the runtime's
 # odyssey_debug_hook(c, addr) (runtime/hle/odyssey_debug.c, ODYSSEY_HOOK_LOG says what it logs), then runs as usual.
 # Only instructions that fall through or return (no branches).
@@ -119,6 +147,9 @@ SITES_141 = {
     0x70004ccbc8: 0x7000473354,     # StageScene::drawMain, after the camera copy (debug hook)
     0x7000b398d0: 0x700091e0ac,     # nn::vfx::System::DrawEmitter: bl CalculateComputeShader
     0x7000b39d2c: 0x700091e2a4,     # nn::vfx::System::BatchCalculationComputeShaderEmitter: bl CalculateComputeShader
+    0x7000842c24: 0x70005ba67c,     # al::ClippingJudge::update: ldr s1, [x8, #0x20] (same word)
+    0x7000969760: 0x70006d8f88,     # al::FarDistanceDitherAnimator::update: ldr s3, [x19, #0x1c] (same word)
+    0x700094ca48: 0x70006bad48,     # al::ModelLodCtrl::update: fmul s8, s8, s0 (same word; 1.4.1's fovy part differs)
 }
 CALC_COMPUTE_SHADER_141 = 0x700092c020  # nn::vfx::detail::EmitterCalculator::CalculateComputeShader (1.0.0: 0x7000b45ae8)
 
@@ -140,6 +171,9 @@ def _wide_141(gen, a):
 PATCHES_141 = {SITES_141[HEAP_LOCK_SITE]: _heap_lock}
 for _a in WIDE_SITES_141:
     PATCHES_141[_a] = _wide_141
+DRAW_SITES_141 = {SITES_141[a]: v for a, v in DRAW_SITES.items()}
+for _a in DRAW_SITES_141:
+    PATCHES_141[_a] = _draw_distance(DRAW_SITES_141)
 PATCHES_141[SITES_141[0x700094c428]] = _debug_hook
 PATCHES_141[SITES_141[0x70004ccbc8]] = _debug_hook
 PATCHES_141[SITES_141[0x7000b398d0]] = _particle_tick(CALC_COMPUTE_SHADER_141)

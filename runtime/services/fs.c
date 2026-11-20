@@ -374,7 +374,9 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
 static Service *open_romfs_storage(void) {
     if (romfs_fd < 0) {
         char path[1024];
-        snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // extracted/romfs.bin
+        // extracted/romfs.bin (ODYSSEY_TEST_CRASH=missing-file, tests of the crash report: a name that isn't there)
+        const char *test = getenv("ODYSSEY_TEST_CRASH");
+        snprintf(path, sizeof path, "%s%s.bin", g_romfs_dir, test && !strcmp(test, "missing-file") ? "-missing" : "");
         romfs_fd = open(path, O_RDONLY);
         if (romfs_fd < 0) FATAL("cannot open %s (the game files: README.md)\n", path);
         rom_index(romfs_fd);

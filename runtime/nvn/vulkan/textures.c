@@ -181,7 +181,9 @@ static bool tex_scalable(const NvnTexture *t) {
     if (t->flags & 0x4) return false;  // NVN_TEXTURE_FLAGS_IMAGE: compute uses the guest's integer texel coordinates.
     // Odyssey's quarter-resolution R11G11B10F bloom chain uses taps spaced for the guest texel grid.
     // Enlarging these targets separates the taps around small highlights and produces visible grids.
-    if (t->format == 0x3f && t->width <= 400 && t->height <= 228) return false;
+    static int bloom_full = -1;  // (experiment) ODYSSEY_BLOOM_SCALE=1: the bloom chain at the internal resolution too
+    if (bloom_full < 0) bloom_full = getenv("ODYSSEY_BLOOM_SCALE") && atoi(getenv("ODYSSEY_BLOOM_SCALE"));
+    if (!bloom_full && t->format == 0x3f && t->width <= 400 && t->height <= 228) return false;
     return output_scale_texture(t);
 }
 
@@ -382,7 +384,13 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         ci.flags &= ~VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
-        VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
+        VkResult r2 = vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL);
+        // (#99, an 8 GB PC with integrated graphics, whose graphics memory is the PC's own: say what ran out)
+        if (r2 == VK_ERROR_OUT_OF_DEVICE_MEMORY || r2 == VK_ERROR_OUT_OF_HOST_MEMORY)
+            FATAL("out of memory for a texture (%ux%u): the PC's memory (with integrated graphics: RAM and page file) is "
+                  "full. Close other programs, set Performance > Memory use to Low, lower the internal resolution, or "
+                  "let the system manage a larger page file.\n", t->width, t->height);
+        VK_CHECK(r2);
         depthfmt = false;
     }
     b->storage = (ci.usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
@@ -546,11 +554,43 @@ static uint64_t hash_full(const uint8_t *p, uint64_t n) {
     return h ^ (h >> 31);
 }
 
+// A texture's bytes sampled: has it changed since the last look? (Without the OS's write tracking - Linux - every
+// texture in use is sampled like this every 8th frame; a change the samples miss is caught by the full hash, at the
+// latest 120 frames later.) 1024 words spread evenly, in two chains: it was 4096 single bytes in one FNV chain -
+// 4096 cache lines touched and 4096 multiplies in a row for every texture over 256 KB, 3.5% of all the CPU time a
+// Steam Deck spent on the game in Cap Kingdom (perf, 2026-11-18). ODYSSEY_TEX_SAMPLE_OLD=1: as before (tests).
 static uint64_t fnv_sample(const uint8_t *p, uint64_t n) {
-    uint64_t h = 1469598103934665603ull;
-    uint64_t step = n > 4096 ? n / 4096 : 1;
-    for (uint64_t i = 0; i < n; i += step) { h ^= p[i]; h *= 1099511628211ull; }
-    return h ^ n;
+    static int old = -1;
+    if (old < 0) old = getenv("ODYSSEY_TEX_SAMPLE_OLD") != NULL;
+    if (old) {
+        uint64_t h = 1469598103934665603ull;
+        uint64_t step = n > 4096 ? n / 4096 : 1;
+        for (uint64_t i = 0; i < n; i += step) { h ^= p[i]; h *= 1099511628211ull; }
+        return h ^ n;
+    }
+    uint64_t h0 = 0x9E3779B97F4A7C15ull ^ n, h1 = 0xC2B2AE3D27D4EB4Full, words = n / 8;
+    if (words <= 1024) {  // (small: every word)
+        uint64_t i = 0;
+        for (; i + 2 <= words; i += 2) {
+            uint64_t v[2];
+            memcpy(v, p + i * 8, 16);
+            h0 = (h0 ^ v[0]) * 0x100000001B3ull; h0 ^= h0 >> 29;
+            h1 = (h1 ^ v[1]) * 0x100000001B3ull; h1 ^= h1 >> 29;
+        }
+        for (uint64_t k = i * 8; k < n; k++) h0 = (h0 ^ p[k]) * 0x100000001B3ull;
+    } else {
+        // (the stride in 16.16 words, so the 1024 samples reach from the first word to the last)
+        uint64_t step = ((words - 1) << 16) / 1023;
+        for (uint64_t k = 0; k < 1024; k += 2) {
+            uint64_t v0, v1;
+            memcpy(&v0, p + ((k * step) >> 16) * 8, 8);
+            memcpy(&v1, p + (((k + 1) * step) >> 16) * 8, 8);
+            h0 = (h0 ^ v0) * 0x100000001B3ull; h0 ^= h0 >> 29;
+            h1 = (h1 ^ v1) * 0x100000001B3ull; h1 ^= h1 >> 29;
+        }
+    }
+    uint64_t h = h0 ^ (h1 * 0x9E3779B97F4A7C15ull);
+    return h ^ (h >> 31);
 }
 
 static pthread_mutex_t pending_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -983,7 +1023,15 @@ TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     extern uint64_t g_upload_n;
     uint64_t n0 = g_upload_n;
     TexBackend *b = vk_tex_(t, for_render);
-    if (b && g_upload_n != n0) b->gfx_wseq = renderer_fence_seq();
+    if (b && g_upload_n != n0) {
+        b->gfx_wseq = renderer_fence_seq(), b->gpu_wgen++;
+        extern bool rq_paint_window(void), renderer_paint_texture(const NvnTexture *t);
+        static int v = -1, n;
+        if (v < 0) v = getenv("ODYSSEY_PAINT_SYNC_VERIFY") != NULL;
+        if (v && rq_paint_window() && renderer_paint_texture(t) && n++ < 12)
+            LOG("[paint-verify] MISSED UPLOAD: texture %llx %ux%u obj %p gpu_owned %d paint_map %d pending %d for_render %d\n", (unsigned long long)t->addr, t->width, t->height,
+                (void *)t, b->gpu_owned, b->paint_map, b->paint_cpu_pending, for_render);
+    }
     return b;
 }
 static TexBackend *vk_tex_(NvnTexture *t, bool for_render) {
@@ -1018,14 +1066,23 @@ void vk_tex_prefetch(void) {
     static double budget = -1;
     if (budget < 0) { const char *e = getenv("ODYSSEY_TEX_PREFETCH"); budget = e ? atof(e) : 3.0; }
     if (budget <= 0) return;
-    extern int nvn_untouched_textures(NvnTexture **out, int max);
-    NvnTexture *c[64];
-    int n = nvn_untouched_textures(c, 64);
-    if (!n) return;
-    uint64_t t0 = SDL_GetTicksNS();
-    static uint64_t done, total_ns;
+    extern int nvn_untouched_textures(NvnTexture **out, int max, uint64_t max_bytes);
+    extern uint64_t nvn_texture_inits(void);
     extern bool odyssey_scene_warming(void);  // (title, loading between stages, a stage's first 120 frames)
     bool loading = odyssey_scene_warming();
+    // A whole scan that found nothing to upload is not repeated until a texture is initialized or a load starts: in play
+    // it walked the whole texture table at every present for nothing - 3.7% of the render thread in Metro at 120 FPS
+    // (the large textures it leaves for loads came back every time)
+    static uint64_t idle_inits = ~0ull;
+    static bool idle_loading;
+    uint64_t inits = nvn_texture_inits();
+    if (inits == idle_inits && loading == idle_loading) return;
+    NvnTexture *c[64];
+    int n = nvn_untouched_textures(c, 64, loading ? 0 : 256u << 10);  // (in play, small ones only: see below)
+    if (!n) { idle_inits = inits, idle_loading = loading; return; }
+    uint64_t t0 = SDL_GetTicksNS();
+    static uint64_t done, total_ns;
+    uint64_t done_before = done;
     for (int i = 0; i < n; i++) {
         NvnTexture *t = c[i];
         if (tex_scalable(t) || renderer_format_is_depth(t->format) || !t->layout.fmt || !t->layout.fmt->bpb) {
@@ -1044,6 +1101,8 @@ void vk_tex_prefetch(void) {
         if ((SDL_GetTicksNS() - t0) / 1e6 >= budget) break;
     }
     total_ns += SDL_GetTicksNS() - t0;
+    if (n < 64 && done == done_before) idle_inits = inits, idle_loading = loading;  // (the whole table seen: nothing to do)
+    else idle_inits = ~0ull;
     static uint64_t logged;
     if (done >= logged + 500) {
         logged = done;
@@ -1054,7 +1113,19 @@ void vk_tex_prefetch(void) {
 void renderer_mark_gpu_owned(NvnTexture *t) {  // (the GPU writes it: in the graphics submission being recorded, or the compute queue's)
     TexBackend *b = tex_backend(t);
     b->gpu_owned = true;
+    b->gpu_wgen++;
     if (!vk_recording_cq()) b->gfx_wseq = renderer_fence_seq();
+    else b->cq_wgen = b->gpu_wgen;
+    if (b->paint_map && !vk_recording_cq()) { extern void vk_paint_map_written(void); vk_paint_map_written(); }
+    {   // ODYSSEY_PAINT_SYNC_VERIFY=1: a paint map written by an item the ask ahead of the queue went in front of
+        extern bool rq_paint_window(void);
+        static int v = -1, n;
+        if (v < 0) v = getenv("ODYSSEY_PAINT_SYNC_VERIFY") != NULL;
+        extern bool renderer_paint_texture(const NvnTexture *t);
+        if (v && renderer_paint_texture(t) && rq_paint_window() && n++ < 12)
+            LOG("[paint-verify] MISSED WRITER: texture %llx %ux%u obj %p from renderer_mark_gpu_owned%+lld (cq %d)\n", (unsigned long long)t->addr, t->width, t->height, (void *)t,
+                (long long)((intptr_t)__builtin_return_address(0) - (intptr_t)&renderer_mark_gpu_owned), vk_recording_cq());
+    }
 }
 bool renderer_is_gpu_owned(NvnTexture *t) { return tex_backend(t)->gpu_owned; }
 void backend_pool_written(uint64_t addr, uint64_t size) { (void)addr; (void)size; }

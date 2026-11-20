@@ -52,19 +52,21 @@ game.
   Fill, with the HUD at the edges on ultrawide
 - **Upscaling** with NVIDIA DLSS / DLAA, AMD FSR 1 / 2 / 3.1 / 4 and Intel XeSS, the HUD drawn at full resolution over
   the upscaled picture, plus **frame generation** (AMD FSR, NVIDIA DLSS beta) and NVIDIA Reflex
-- **No shader stutter**: every shader is prepared before you play, and again by itself after a driver update
+- **Shaders prepared before you play**, and again by themselves after a driver update, so they are not compiled
+  while you play (a rare effect nobody has recorded yet can still hitch once)
 - **Sharper than the Switch when you want it**: FXAA or SMAA, 2x / 4x shadow maps, texture detail, 16x anisotropic
-  filtering, smooth colour gradients - and **the Switch's own look by default**
+  filtering, smooth colour gradients, a sharper HUD on large screens - and **the Switch's own look by default**
 - **Any controller**, with button icons that match it (Xbox, PlayStation, Switch), a Joy-Con pair, motion controls
   and vibration; **keyboard and mouse** with a real mouse camera, and the mouse in the game's own menus
 - **A start screen and settings menu made for controller, mouse and keyboard**, where every option says what it does
-  and what is recommended - in English, Korean and Brazilian Portuguese
+  and what is recommended, with button hints drawn for the device you are using - in English, Korean and Brazilian
+  Portuguese
 - **Steam Deck and PC handhelds**: 1280 x 800 at 60 FPS in Gaming Mode
 - **Built-in updates**, RomFS mods, 5.1 surround, a performance overlay, Discord activity (off by default)
 - **Crash reports you can read**: what happened, where, and a signature to match the same crash between players
 
-<p align="center"><a href="docs/media/metro-120fps-4k.jpg"><img src="docs/media/metro-120fps-4k.jpg" alt="New Donk City at 4K and 120 FPS" width="80%"></a></p>
-<p align="center"><sub>New Donk City at 3840 x 2160 and 120 FPS with the graphics card at 38% (RTX 4090; the overlay in the corner is MSI Afterburner's).</sub></p>
+<p align="center"><a href="docs/media/cap-120fps-4k-overlay.jpg"><img src="docs/media/cap-120fps-4k-overlay.jpg" alt="Cap Kingdom at 4K and 120 FPS with the performance overlay" width="80%"></a></p>
+<p align="center"><sub>Cap Kingdom at 3840 x 2160 and 120 FPS with the port's own performance overlay (0.4.4, upscaling and anti-aliasing off): the graphics card at 63%, the game using 3% of the CPU and 6.5 GB of RAM. One PC, an RTX 4090 with a Ryzen 9 9950X3D; other PCs and busier places will show other numbers.</sub></p>
 
 <p align="center">
   <a href="docs/media/start-screen.jpg"><img src="docs/media/start-screen.jpg" alt="The start screen" width="49%"></a>
@@ -131,8 +133,13 @@ This is a preview. Known problems and things not done yet:
 - **Being worked on** (from the [issues](../../issues)):
   - The game freezes on Radeon RX 7800 XT under Linux (#21).
   - The Steam Deck's own gyro isn't read yet (#68); a no-sound report on the Deck (#43).
-  - High committed memory on PCs with 16 GB of RAM (#75, #61).
-- **Frame rates above 60** are less tested than 60, on both game versions: some objects or effects can move unevenly.
+  - Sounds that click or crackle (#97): one cause was found and fixed in 0.4.5 (see
+    [What we measured and fixed](#what-we-measured-and-fixed)); reports from other PCs are still open.
+  - A tutorial video that stays black with FSR 3.1 on (#66): turn FSR 3.1 off, or use FSR 1, to see the videos.
+  - Memory on PCs with 16 GB of RAM (#75, #61): 0.4.3 uses much less on our test PC; we are waiting to hear how it
+    is on those PCs.
+- **Frame rates above 60** are less tested than 60, on both game versions: some objects or effects can move unevenly,
+  and the busiest places (New Donk City seen from high up, riding its power lines) can drop frames on any PC.
   Painting transitions play at 60 FPS on purpose.
 - **Version 1.4.1** is newer in this port than 1.0.0 and less tested.
 - **A short stutter can still happen** the first time a rare effect is drawn whose pipeline state nobody has recorded
@@ -175,9 +182,10 @@ explains the selected option and says what is recommended.
 
 - **Display**: windowed, borderless or exclusive fullscreen, display resolution, VSync, aspect ratio, console mode
 - **Graphics**: internal resolution, anti-aliasing, upscaling and frame generation, texture filtering and detail,
-  shadow quality, smooth gradients
-- **Performance**: early frame hand-off, multithreaded rendering, frame rate (60 to 240 FPS or Match display), the FPS
-  counter and performance overlay, Discord activity, shader preparation
+  shadow quality, smooth gradients, sharper HUD and menus
+- **Performance**: early frame hand-off, multithreaded rendering, frame rate (60 to 240 FPS or Match display),
+  Discord activity, shader preparation, memory use
+- **Overlay**: the FPS counter, and the performance overlay with what it shows, where and how large
 - **Audio**: volume, stereo or 5.1, reverb, movie audio, mute in background
 - **Controls**: motion controls, vibration, stick deadzone and speed, mouse camera, mouse in menus, button prompts,
   key and button rebinding
@@ -317,6 +325,84 @@ Steam Deck** before it is merged; nothing from a contributor ships untested. Nev
 - **Codex** (OpenAI) - fixes and features across the runtime (see [Who made this](#who-made-this)).
 - Everyone who reported a bug with logs, crash reports, screenshots and saves: most fixes started there - the
   painting crash was found from two players' reports (#72, #85), the frame generation crash from one log (#77).
+
+## What we measured and fixed
+
+Versions 0.4.3 to 0.4.5 came out of measuring the port on the maintainer's PC and a Steam Deck, and from players'
+logs. This is what was found, what was changed and how it was checked. **The numbers are from one PC** (Windows 11,
+RTX 4090, Ryzen 9 9950X3D, 96 GB of RAM) unless a line says Steam Deck; other PCs will show other numbers, and AMD
+and Intel graphics cards were not measured.
+
+### How it was measured
+
+Nothing here was judged by feel alone. The tools are in the source, as `ODYSSEY_*` environment variables:
+
+- **A ride recorded once, replayed exactly.** The maintainer played the part that went wrong (the power lines in New
+  Donk City; a walk past characters where the sound crackled) once with `ODYSSEY_INPUT_RECORD`. It stores what the
+  controller, keyboard and mouse give the game, keyed to the stage's gameplay ticks, so `ODYSSEY_INPUT_REPLAY` plays
+  the same route again at any frame rate, before and after a change (`runtime/hle/input.c`).
+- **A fixed route through six kingdoms** at 120 FPS, scripted, for memory and hitches.
+- **The slow-frame log and a sampling profiler** (`ODYSSEY_LOG_SLOW_FRAMES`, `ODYSSEY_VK_PROF`): every frame over a
+  limit with where its time went, and which functions the busy threads were in.
+- **The mixer's sound written to a file** (`ODYSSEY_AUDIO_WAV`), the sound before it reaches the sound device, and a
+  log of where each voice's signal jumps (`ODYSSEY_AUDIO_CLICKS`).
+- **Screenshots of the window** at a set frame, for anything that is about the picture.
+- Every release is built by GitHub, and that build itself is played on Windows and started on a Steam Deck before it
+  is published (`tools/release.sh`).
+
+### Memory and shaders (0.4.3)
+
+- **RAM:** on the six-kingdom route the game went from 14.7 GB at the start and 15.6 GB at the end to 5.8 GB and
+  6.6 GB, at the same frame rate. The largest part was on NVIDIA: its driver held far more memory for shader
+  libraries created from saved pipeline binaries than for the same libraries from a normal pipeline cache.
+- **First start:** only the shaders the game draws, the effects and the compute shaders are prepared up front (98 s
+  before, 44 s after; on a Steam Deck about 6 minutes before, a little over 3 after).
+- **Shader cache on disk:** one compressed file instead of tens of thousands (2.2 GB before, under 0.7 GB after).
+- The shader list and the idea of compiling only what is drawn come from
+  [Odyssey Recomp](https://github.com/rwwo8/OdysseyRecomp); Eggtooth's side-by-side measurements in #94 pointed to it.
+
+### Stutter in heavy views (0.4.4)
+
+- **New Donk City's power lines:** two costs in the port's own code grew with every command list the game records,
+  and this view records many. On the recorded ride at 60 FPS, frames longer than 17 ms went from 73 to between 7
+  and 18 per ride. At 120 FPS that ride still drops frames, and one long frame in 2 of 7 replays is unexplained.
+- **Tried and not kept:** dropping to 60 FPS in such views (it felt worse than the stutter), and reusing shadow maps
+  between the frames of one game tick (see Shadows).
+
+### Shadows
+
+- **Stair-stepped shadow edges (#66):** compared on NVIDIA and AMD graphics, these are the game's own shadow map,
+  which is low resolution on the Switch too; sharpening (FSR sharpness, CAS) makes the steps stand out.
+  **Graphics > Shadow quality** at 2x or 4x softens them. Nothing in the port's drawing of shadows was changed.
+- **Shadow maps reused above 60 FPS:** above 60 the game draws its shadow maps again for every extra frame. Keeping
+  them from the tick's first frame saves that work, but a shadow could lag a moving object by a frame. It is in the
+  source, off (`ODYSSEY_SHADOW_REUSE=1`), because the maintainer did not want any risk to the picture.
+
+### Picture (0.4.4)
+
+- **Ultrawide (#93):** "21:9" is 2.37:1 in the port and a 3840x1600 screen is 2.40:1, which left thin bars and a
+  lower resolution. A chosen shape within 3% of the window's now fills the window.
+- **16:10 (Steam Deck):** the dark bands behind button hints and tutorial text stopped short of the screen's edge;
+  they now reach it. Checked at 1280x800 on the PC.
+- **Sharper HUD and menus:** the game's HUD artwork is made for 720 lines and looked soft enlarged. On screens of 900
+  lines and more it is sharpened, more on bigger screens, without adding outlines. It makes edges crisper, not more
+  detailed, and can be turned off in **Graphics**.
+
+### Sound (0.4.5)
+
+- **Crackling near characters (#97):** the maintainer recorded a walk through New Donk City, the Odyssey and the Cap
+  Kingdom with the sound written to a file. The clicks were in the mixed sound itself, not gaps at the sound device.
+  Every new sound played its first 5 ms at the volume left behind by the last sound in the same slot, so a quiet,
+  distant footstep could start at a loud nearby sound's volume. In about 100 seconds of the replayed walk that
+  happened 425 times, with 138 isolated ticks in the output; with a new sound starting at its own volume, as on the
+  console, there were none, and the maintainer confirmed it by ear in stereo and 5.1.
+- Not listened to on a Steam Deck. Crackling from a busy PC (the sound device running dry) is a different cause.
+
+### Still open
+
+- Frame drops above 60 FPS in the busiest views, and how much CPU the port uses on a Steam Deck.
+- The time from starting the program to the game's first frame (about 7 seconds on the test PC, not broken down yet).
+- Everything in [Known issues](#known-issues).
 
 ## For other recomp projects
 

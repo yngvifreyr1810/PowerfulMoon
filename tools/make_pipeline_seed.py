@@ -4,7 +4,22 @@ cache/graphics-pipelines.bin holds the pipeline states a PC's runs recorded (run
 vk_pipeline_recipes_save): a header (version, recipe size, count, reserved, the GPU's pipeline cache UUID, a checksum
 of the recipes) and the recipes - hashes of translated shaders and fixed-function state, nothing of the game itself.
 The seed is their union (in the order first seen) with an all-zero UUID: exec.c load_pipeline_recipes keeps the
-recipes another GPU supports, and the setup's shader step compiles them ahead (data/pipeline-seed.bin).
+recipes another GPU supports, and the setup's shader step compiles them ahead (data/pipeline-seed.bin.zst, packed).
+
+The recipes name translated shaders by key, so a change to the shader translator (runtime/nvn/maxwell/translate.c and
+friends) leaves old recipes pointing at nothing - 0.5.0 shipped a seed recorded with 0.1.0's translator, 63% of it
+unusable, and a new player's opening built ~700 pipelines while playing. tools/release.sh step 3b stops a release when
+more than 5% are left out. To regenerate (2026-11-19, 8,315 recipes: 1 pipeline built in the opening instead of 828):
+  1. Empty data roots linking the test copies' game files (mklink /J <root>\extracted <test copy>\extracted), one per
+     game version, a build of the release's code.
+  2. In each, record: a new game's opening into Cap Kingdom (A every 150 frames), then every kingdom by warp with
+     walking, the camera, the pause menu and the map (ODYSSEY_PREPARE=0; the scripts were seedrun.sh in that session).
+     Each root's cache/graphics-pipelines.bin then holds what was used.
+  3. The old seed's recipes that still build: in one root, the old seed as cache/graphics-pipelines.bin and
+     `SuperOdysseyRecomp --prepare-shaders all`, then `... recorded` with ODYSSEY_PREP_KEPT_OUT=<file>.
+  4. make_pipeline_seed.py <root1 recipes> <root2 recipes> <kept file> <seed.bin>, then
+     zstd -19 <seed.bin> -o data/pipeline-seed.bin.zst (the repository takes no file over 5 MB; the setup unpacks it).
+  Remove the links with rmdir (never delete through them: that deletes the test copy's game files).
 """
 import struct
 import sys

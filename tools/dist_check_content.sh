@@ -2,7 +2,7 @@
 # The launcher may ship the upstream pipeline seed. Reject player data and generated game caches.
 set -euo pipefail
 root=${1:?usage: dist_check_content.sh <package-directory>}
-source_seed="$(cd -- "$(dirname -- "$0")/.." && pwd)/data/pipeline-seed.bin"
+source_seed="$(cd -- "$(dirname -- "$0")/.." && pwd)/data/pipeline-seed.bin.zst"
 cd "$root"
 manifest=$(find . -mindepth 1 -print)
 if grep -Ei \
@@ -13,8 +13,8 @@ if grep -Ei \
     echo 'dist: package contains local game data or cache files' >&2
     exit 1
 fi
-seed=./pipeline-seed.bin
-if [[ -d ./usr/bin ]]; then seed=./usr/bin/pipeline-seed.bin; fi
+seed=./pipeline-seed.bin.zst
+if [[ -d ./usr/bin ]]; then seed=./usr/bin/pipeline-seed.bin.zst; fi
 if [[ ! -f "$seed" ]] || [[ "$(sha256sum < "$source_seed")" != "$(sha256sum < "$seed")" ]]; then
     echo 'dist: pipeline seed is missing or differs from the build source' >&2
     exit 1

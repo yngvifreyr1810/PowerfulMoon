@@ -162,7 +162,9 @@ def login_accounts(text):
 
 
 def account(root, selected=None):
-    users = sorted(p.name for p in (root / 'userdata').iterdir() if p.is_dir() and p.name.isdecimal())
+    # ("0": a folder Steam makes for no account at all, next to the real one - on a Steam Deck with one account that
+    # made two "accounts", and the helper refused: #81)
+    users = sorted(p.name for p in (root / 'userdata').iterdir() if p.is_dir() and p.name.isdecimal() and int(p.name))
     if selected:
         if selected not in users:
             raise ValueError('That Steam account was not found')
@@ -177,13 +179,16 @@ def account(root, selected=None):
         except ValueError:
             metadata = {}
         for identifier, body in metadata.items():
-            if identifier.isdecimal() and len(identifier) == 17 and isinstance(body, dict) and body.get('MostRecent') == '1':
+            # (the key's case differs between Steam versions: "MostRecent", "mostrecent")
+            if identifier.isdecimal() and len(identifier) == 17 and isinstance(body, dict) and \
+                    any(k.lower() == 'mostrecent' and v == '1' for k, v in body.items()):
                 user = str(int(identifier) - 76561197960265728)
                 if user in users:
                     recent.append(user)
         if len(recent) == 1:
             return recent[0]
-    raise ValueError('No unambiguous Steam account. Sign in to the desired account, quit Steam and retry.')
+    raise ValueError('No unambiguous Steam account (%d account folders in %s). Sign in to the desired account, '
+                     'quit Steam and retry.' % (len(users), root / 'userdata'))
 
 
 def digest(data):

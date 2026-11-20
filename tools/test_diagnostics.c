@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include "rt.h"
 #include "diagnostics.h"
+#include "settings.h"
 
 static char root[1024], log_file[1200], settings[1200];
 static bool loaded;
@@ -16,6 +17,15 @@ const char *settings_current_file(void) { return settings; }
 uint64_t plat_total_ram(void) { return 8ull << 30; }
 bool plat_exe_path(char *buf, size_t n) { return snprintf(buf, n, "%s/fixture.exe", root) < (int)n; }
 Module *loader_module(const char *name) { (void)name; return loaded ? &module : NULL; }
+// (the report's summary, format 2+: fixed values)
+Settings g_settings;
+uint64_t plat_now_ns(void) { return 0; }
+uint64_t plat_resident_bytes(void) { return 0; }
+uint64_t plat_private_bytes(void) { return 0; }
+const char *odyssey_stage_name(void) { return "FixtureStage"; }
+uint64_t renderer_present_count(void) { return 0; }
+int settings_game_hz(void) { return 60; }
+int odyssey_native_hz(void) { return 60; }
 
 static char *read_report(const char *path) {
     FILE *f = fopen(path, "rb"); assert(f);
@@ -65,6 +75,17 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[2], "capture")) return 0;
     assert(diagnostics_last_crash(last, sizeof last) && !strcmp(first, last));
     char *text = read_report(first);
+    // (format 3: the reason first, from the exception / the log's last "*** " line)
+    assert(!strncmp(text, "Crash reason: ", 14) && strstr(text, "\nWhat to try: ") && strstr(text, "\nError: "));
+    assert(!strncmp(text, "Crash reason: A crash\nWhat to try:", 33));
+    assert(strstr(text, early ? "\nError: *** exception fixture" : "\nError: *** exception fixture accessing 0x20"));
+    {
+        char reason[256]; bool seen = true;
+        assert(diagnostics_last_crash_info(last, sizeof last, reason, sizeof reason, &seen) && !seen);
+        assert(!strncmp(reason, "A crash", 7));
+        diagnostics_last_crash_seen();
+        assert(diagnostics_last_crash_info(last, sizeof last, reason, sizeof reason, &seen) && seen && !strncmp(reason, "A crash", 7));
+    }
     assert(strstr(text, "STARTUP_HARDWARE_MARKER") && strstr(text, "TAIL_CRASH_CHAIN_MARKER"));
     assert(strstr(text, "fnv1a64:e71fa2190541574b (3 bytes)"));
     assert(!strstr(text, "UNRELATED_FILE_MUST_NOT_BE_INCLUDED"));
@@ -82,8 +103,9 @@ int main(int argc, char **argv) {
     assert(diagnostics_last_crash(last, sizeof last) && !strcmp(last, first));
     text = read_report(last); assert(strstr(text, "TAIL_CRASH_CHAIN_MARKER")); free(text);
     assert(!diagnostics_write_report(tiny, sizeof tiny) && !tiny[0]);
-    char marker[1200]; snprintf(marker, sizeof marker, "%s/reports/last-crash.txt", root);
-    f = fopen(marker, "wb"); assert(f); fprintf(f, "../do-not-attach.bin\n"); fclose(f);
+    char marker[1200]; snprintf(marker, sizeof marker, "%s/reports/.last-crash", root);
+    remove(marker);  // (hidden on Windows: fopen "wb" can't replace it)
+    f = fopen(marker, "wb"); assert(f); fprintf(f, "../do-not-attach.bin\nfixture\n"); fclose(f);
     assert(!diagnostics_last_crash(last, sizeof last) && !last[0]);
     log_file[0] = 0;
     snprintf(root, sizeof root, "%s", other); // file, not a directory

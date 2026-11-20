@@ -206,6 +206,18 @@ static int cmp_host(const void *a, const void *b) {
     uint64_t x = ((const uint64_t *)a)[0], y = ((const uint64_t *)b)[0];
     return x < y ? -1 : x > y;
 }
+// (profiling, ODYSSEY_SAMPLE) every game function's host and guest address, as binary pairs of u64: samples inside the
+// game code library are named with it
+void rt_dump_host_fns(const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    for (int t = 0; t < ntables; t++)
+        for (uint64_t i = 0; i < tables[t].count; i++) {
+            uint64_t v[2] = {(uint64_t)(uintptr_t)tables[t].fns[i], tables[t].addrs[i]};
+            fwrite(v, sizeof v, 1, f);
+        }
+    fclose(f);
+}
 const char *rt_host_fn_name(uint64_t pc, uint64_t *offset) {
     static uint64_t (*byhost)[2];  // {host address, guest address}, sorted by host address
     static uint64_t n;

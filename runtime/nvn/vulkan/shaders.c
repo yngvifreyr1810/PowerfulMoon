@@ -803,9 +803,20 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(location=0) out vec4 o;\n"
                "vec3 dec(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c)); }\n"
                "vec3 enc(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c)); }\n"
+               // (pc.a.z > 0: the layer sharpened. The game's HUD textures are made for 720 lines and enlarged with bilinear
+               // filtering: on a larger picture their edges are pc.a.w pixels wide. An unsharp mask at that radius - 8 taps
+               // around the pixel - steepens them; the result is kept between the lowest and highest of the taps, so
+               // nothing overshoots: no halos, flat areas unchanged. Colour and alpha (what shows through) alike.)
+               "vec4 sharp(vec2 uv) {\n"
+               "  vec2 d = pc.a.xy * pc.a.w;\n"
+               "  vec4 e = texture(hud, uv), sum = vec4(0.0), mn = e, mx = e;\n"
+               "  const vec2 o[8] = vec2[8](vec2(1, 0), vec2(-1, 0), vec2(0, 1), vec2(0, -1), vec2(0.7071, 0.7071), vec2(-0.7071, 0.7071), vec2(0.7071, -0.7071), vec2(-0.7071, -0.7071));\n"
+               "  for (int i = 0; i < 8; i++) { vec4 t = texture(hud, uv + o[i] * d); sum += t; mn = min(mn, t); mx = max(mx, t); }\n"
+               "  return clamp(e + (e - sum / 8.0) * (pc.a.z * 3.0), mn, mx);\n"
+               "}\n"
                "void main() {\n"
                "  vec2 uv = gl_FragCoord.xy * pc.a.xy;\n"
-               "  vec4 h = texture(hud, uv);\n"
+               "  vec4 h = pc.a.z > 0.0 ? sharp(uv) : texture(hud, uv);\n"
                "  vec3 s = dec(clamp(texture(src, uv).rgb, 0.0, 1.0));\n"
                "  o = vec4(enc(clamp(s * clamp(h.a, 0.0, 1.0) + h.rgb, 0.0, 1.0)), 1.0);\n"
                "}\n";
@@ -961,4 +972,38 @@ VkShaderModule vk_builtin_shader(const char *name) {
     if (!m) FATAL("built-in shader %s failed to compile\n", name);
     if (n < 64) { snprintf(cache[n].name, sizeof cache[n].name, "%s", name); cache[n++].m = m; }
     return m;
+}
+
+// The release's pipeline seed ships zstd-compressed (pipeline-seed.bin.zst: 5.9 MB of recipes, 70 KB packed - the
+// repository refuses files over 5 MB). Unpacked into cache/graphics-pipelines.bin before a full preparation (device.c prep_seed),
+// and by `SuperOdysseyRecomp --unpack-seed <out>` for tools/release.sh's seed check.
+bool vk_seed_unpack(const char *src, const char *dst) {
+    FILE *f = fopen(src, "rb");
+    if (!f) return false;
+    fseeko(f, 0, SEEK_END);
+    long long n = ftello(f);
+    fseeko(f, 0, SEEK_SET);
+    void *z = n > 0 && n < (64ll << 20) ? malloc((size_t)n) : NULL;
+    bool ok = z && fread(z, 1, (size_t)n, f) == (size_t)n;
+    fclose(f);
+    unsigned long long size = ok ? ZSTD_getFrameContentSize(z, (size_t)n) : 0;
+    ok = ok && size != ZSTD_CONTENTSIZE_UNKNOWN && size != ZSTD_CONTENTSIZE_ERROR && size < (256ull << 20);
+    void *d = ok ? malloc((size_t)size) : NULL;
+    if (d) {
+        size_t got = ZSTD_decompress(d, (size_t)size, z, (size_t)n);
+        ok = !ZSTD_isError(got) && got == size;
+    } else ok = false;
+    free(z);
+    if (ok) {
+        char tmp[1100];
+        snprintf(tmp, sizeof tmp, "%s.tmp", dst);
+        FILE *o = fopen(tmp, "wb");
+        ok = o && fwrite(d, 1, (size_t)size, o) == (size_t)size;
+        if (o) ok = fclose(o) == 0 && ok;
+        if (ok) remove(dst);  // (Windows: rename doesn't replace)
+        ok = ok && rename(tmp, dst) == 0;
+        if (!ok) remove(tmp);
+    }
+    free(d);
+    return ok;
 }

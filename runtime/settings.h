@@ -95,6 +95,8 @@ typedef struct {
     int console_mode;    // CONSOLE_*: docked or handheld (the game's own rendering for each; next start)
     bool game_dynres;    // the game's own dynamic resolution (on: as on the Switch; off: always its full resolution)
     bool frame_interp;   // always false: 120 FPS interpolation was removed (2026-11-16); ODYSSEY_INTERP for tests (nvn/interp.c)
+    bool hud_sharpen;    // the HUD and the game's menus sharpened on pictures of 900 lines and more (nvn/vulkan/exec.c
+                         // hud_sharpness)
     bool deband;         // smooth gradients: the game's final picture in half floats, dithered into the window (Vulkan:
                          // nvn/vulkan/textures.c vk_deband)
     float volume;        // master volume, 1 = 100%
@@ -116,7 +118,13 @@ typedef struct {
     int motion_shake_key;  // a key (SDL scancode) or mouse button (BIND_MOUSE_*) doing the same (0: none)
     bool rumble;         // the controller's vibration (the game's HD rumble: runtime/hle/input.c input_vibration)
     int rumble_strength;  // 25..200 (%): gain before clamping to the controller's output range
-    int stick_deadzone;  // percent of a controller stick's travel that counts as rest (runtime/hle/input.c), 0: none
+    // Each controller stick (runtime/hle/input.c stick_shape): the inner deadzone (percent of its travel that counts as
+    // rest, 0..50) and its range (percent, 50..150: at 100 the stick's end is a full tilt; above, a full tilt comes
+    // before the end; below, the end gives less). settings.ini's old stick_deadzone sets both deadzones.
+    int stick_deadzone_l, stick_deadzone_r;
+    int stick_range_l, stick_range_r;
+    int motion_gyro_sens;      // percent, 25..400: the gyro's turn rates as the game gets them (aiming with motion)
+    int motion_shake_threshold;  // tenths of a G, 0..20: smaller jolts than this are not passed on (rumble, #107)
     bool mouse_camera;   // the mouse turns the camera (the right stick; the pointer is held in the window while playing)
     bool mouse_menus;    // in the game's menus, the mouse buttons are A / B (bound or not) and an unbound wheel the D-pad (hle/input.c, #64)
     int mouse_sensitivity;  // percent, 25..400 (runtime/hle/input.c mouse_stick)
@@ -142,6 +150,10 @@ typedef struct {
     int early_fences;    // 1 on (the default), 0 off: the game goes on once its frame is translated, not
                          // when the GPU has run it (nvn/objects.c nvnSyncWait; ODYSSEY_SYNC_EARLY overrides)
     int shadow_quality;  // 0 as the Switch, 1 high (2x), 2 ultra (4x): shadow map size (nvn/vulkan/textures.c shadow_factor)
+    int bloom_quality;   // 0 as the Switch, 1 high: the glow images enlarged with a smooth (B-spline) filter instead of
+                         // bilinear (maxwell/translate.c bloomUp, set per draw in exec.c stage_set; ODYSSEY_BLOOM_QUALITY)
+    int draw_distance;   // 0 as the Switch, 1 high (2x), 2 very high (4x): actors, their detail models and fades
+                         // reach farther (runtime/hle/odyssey_draw.c; ODYSSEY_DRAW_DISTANCE=<factor> for tests)
     bool shader_known_only; // shaders set up ahead only when drawn before (any run): less CPU after a stage loads,
                          // more first-draw builds (exec.c renderer_program_hint; ODYSSEY_PREWARM=3). Off by default.
     bool skip_intro;     // no Joy-Con tips screen timer before the title (runtime/hle/odyssey_120.c; read at start)

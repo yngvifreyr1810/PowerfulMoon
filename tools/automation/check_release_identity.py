@@ -47,10 +47,10 @@ def main():
     refs = {full_ref: sha for sha, full_ref in map(str.split, listing.splitlines())}
     require(refs.get(ref + "^{}", refs.get(ref)) == commit, f"{tag} does not point to {commit}")
 
-    seed_url = f"https://raw.githubusercontent.com/{UPSTREAM}/{commit}/data/pipeline-seed.bin"
+    seed_url = f"https://raw.githubusercontent.com/{UPSTREAM}/{commit}/data/pipeline-seed.bin.zst"
     with urlopen(seed_url, timeout=30) as response:
         expected = hashlib.sha256(response.read()).hexdigest()
-    actual = hashlib.sha256((ROOT / "data/pipeline-seed.bin").read_bytes()).hexdigest()
+    actual = hashlib.sha256((ROOT / "data/pipeline-seed.bin.zst").read_bytes()).hexdigest()
     require(actual == expected, "The shader seed differs from the pinned upstream revision")
     print(f"PowerfulMoon {version} · upstream {tag} {commit} · seed SHA-256 {actual}")
 

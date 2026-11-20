@@ -169,12 +169,42 @@ static void boot(const char *root) {
 // to the log lines around it shows which step of the start-up it came from
 static int mem_trace(void *arg) {
     (void)arg;
-    uint64_t t0 = plat_now_ns();
+    uint64_t t0 = plat_now_ns(), last = 0;
     for (;;) {
+        uint64_t c = plat_private_bytes();
         LOG("[memtrace] %.1f s: %llu MB in RAM, %llu MB committed\n", (plat_now_ns() - t0) / 1e9,
-            (unsigned long long)(plat_resident_bytes() >> 20), (unsigned long long)(plat_private_bytes() >> 20));
+            (unsigned long long)(plat_resident_bytes() >> 20), (unsigned long long)(c >> 20));
+#ifdef _WIN32
+        extern void plat_mem_map_log(void);  // (what it is made of, each time it moved by 150 MB)
+        if (c > last + (150ull << 20) || c + (150ull << 20) < last) { plat_mem_map_log(); last = c; }
+#endif
         SDL_Delay(500);
     }
+    return 0;
+}
+
+// ODYSSEY_TEST_CRASH=<kind> (tests of the crash report and its notices, 2026-11-19): ODYSSEY_TEST_CRASH_AFTER seconds
+// (default 20) into the game, stop as that kind of crash does - the same error lines as the real ones. vram: a Vulkan
+// call out of device memory; ram: out of host memory; devlost: Vulkan device lost; illegal: an illegal instruction;
+// fatal: another FATAL error; segv: an access violation; ram-segv: an access violation with memory reported low
+// (ODYSSEY_TEST_MEMORY_LOW). missing-file is in services/fs.c: the RomFS image opened under a name that isn't there.
+static int test_crash(void *arg) {
+    const char *kind = arg, *after = getenv("ODYSSEY_TEST_CRASH_AFTER");
+    SDL_Delay((Uint32)((after ? atof(after) : 20) * 1000));
+    LOG("[test] crash: %s\n", kind);
+    if (!strcmp(kind, "vram")) FATAL("vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL) failed: %d (%s:%d)\n", -2, __FILE__, __LINE__);
+    if (!strcmp(kind, "ram")) FATAL("nvn: out of host memory for commands\n");
+    if (!strcmp(kind, "devlost")) FATAL("vkQueueSubmit(g_vk.queue, 1, &si, fence) failed: %d (%s:%d)\n", -4, __FILE__, __LINE__);
+    if (!strcmp(kind, "illegal")) __builtin_trap();
+    if (!strcmp(kind, "fatal")) FATAL("test: the game asked for something the PC port does not have yet\n");
+    if (!strcmp(kind, "ram-segv")) {
+#ifdef _WIN32
+        _putenv_s("ODYSSEY_TEST_MEMORY_LOW", "1");
+#else
+        setenv("ODYSSEY_TEST_MEMORY_LOW", "1", 1);
+#endif
+    }
+    *(volatile int *)(uintptr_t)8 = 1;
     return 0;
 }
 
@@ -187,9 +217,17 @@ int main(int argc, char **argv) {
 #else
     setvbuf(stderr, NULL, _IOLBF, 0);
 #endif
+    { extern void input_steam_motion_prepare(void); input_steam_motion_prepare(); }  // (before SDL sees controllers)
+#ifdef __linux__
+    // Setup's shader pass compiles every program in the game files once into the driver's own disk cache (~650 MB on
+    // NVIDIA, 2026-11-19), from which the game's first draws take them in ~0.1 ms; Mesa's default limit is 1 GB, shared
+    // with other programs. (Under Steam, Steam's own setting is kept.)
+    setenv("MESA_SHADER_CACHE_MAX_SIZE", "4G", 0);
+#endif
     const char *root = "extracted";  // (in the data root)
     bool build_romfs = false;
     const char *prepare = NULL;
+    const char *unpack_seed = NULL;  // --unpack-seed <out>: the shipped pipeline seed, unpacked there
     static char arg_root[1024];
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) {  // straight into the game, without the configuration page
@@ -201,6 +239,7 @@ int main(int argc, char **argv) {
             continue;
         }
         else if (!strcmp(argv[i], "--build-romfs")) build_romfs = true;
+        else if (!strcmp(argv[i], "--unpack-seed") && i + 1 < argc) unpack_seed = argv[++i];  // (tools/release.sh)
         else if (!strcmp(argv[i], "--prepare-shaders") && i + 1 < argc) prepare = argv[++i];
         else if (!strcmp(argv[i], "--data-root") && i + 1 < argc) {  // (the game's own, for its shader preparation)
 #ifdef _WIN32
@@ -215,6 +254,18 @@ int main(int argc, char **argv) {
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
 #ifndef __APPLE__
     // --prepare-shaders <list>: the shader preparation's own process, started by the game (runtime/nvn/vulkan/exec.c)
+#ifndef __APPLE__
+    if (unpack_seed) {  // (after rt_paths_init: the seed is found next to the executable)
+        extern bool vk_seed_unpack(const char *src, const char *dst);
+        char seed[1100];
+        bool ok = rt_resource("pipeline-seed.bin.zst", "data/pipeline-seed.bin.zst", seed, sizeof seed) &&
+                  vk_seed_unpack(seed, unpack_seed);
+        LOG("pipeline seed %s\n", ok ? "unpacked" : "not unpacked");
+        return ok ? 0 : 1;
+    }
+#else
+    (void)unpack_seed;
+#endif
     if (prepare) {
         extern int vk_prepare_main(const char *list);
         return vk_prepare_main(prepare);
@@ -266,6 +317,8 @@ int main(int argc, char **argv) {
 #endif
     if ((!no_audio || !strcmp(no_audio, "0")) && !SDL_InitSubSystem(SDL_INIT_AUDIO))
         LOG("[audio] SDL audio init failed: %s\n", SDL_GetError());
+    if (getenv("ODYSSEY_TEST_CRASH") && strcmp(getenv("ODYSSEY_TEST_CRASH"), "missing-file"))
+        SDL_DetachThread(SDL_CreateThread(test_crash, "testcrash", (void *)getenv("ODYSSEY_TEST_CRASH")));
     for (;;) {
         boot(root);
         ui_run();  // window and input on the main thread; returns when a reboot is requested

@@ -34,7 +34,7 @@ jobs:
           python -m unittest discover -s tools/automation -p 'test_*.py'
           python tools/automation/check_release_identity.py
           git archive --format=zip --prefix=PowerfulMoon/ -o "$RUNNER_TEMP/powerfulmoon-source.zip" HEAD
-          python tools/automation/audit_packages.py --seed-reference data/pipeline-seed.bin --source-archive "$RUNNER_TEMP/powerfulmoon-source.zip"
+          python tools/automation/audit_packages.py --seed-reference data/pipeline-seed.bin.zst --source-archive "$RUNNER_TEMP/powerfulmoon-source.zip"
 
   windows:
     runs-on: windows-2022
@@ -82,7 +82,7 @@ jobs:
           shopt -s nullglob
           packages=(build/dist/*.zip)
           test "${#packages[@]}" -eq 1
-          python tools/automation/audit_packages.py --seed-reference data/pipeline-seed.bin --windows-zip "${packages[0]}"
+          python tools/automation/audit_packages.py --seed-reference data/pipeline-seed.bin.zst --windows-zip "${packages[0]}"
       - name: Contents
         run: |
           cd "build/dist/Super Odyssey PC Recomp"
@@ -112,7 +112,7 @@ jobs:
           image="$PWD/${packages[0]}"
           chmod +x "$image"
           (cd "$RUNNER_TEMP" && "$image" --appimage-extract >/dev/null)
-          python3 tools/automation/audit_packages.py --seed-reference data/pipeline-seed.bin --appimage-root "$RUNNER_TEMP/squashfs-root"
+          python3 tools/automation/audit_packages.py --seed-reference data/pipeline-seed.bin.zst --appimage-root "$RUNNER_TEMP/squashfs-root"
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage

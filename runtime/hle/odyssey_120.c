@@ -17,6 +17,7 @@
 #include "../gameplay_clock.h"
 #include "../ui/menu.h"
 #include "../nvn/nvn.h"
+#include "../nvn/rqueue.h"
 
 static bool hooks_ok, trace, extra_draw;
 uint64_t renderer_present_count(void);
@@ -64,6 +65,10 @@ static bool unprepared_scene(void) {
 int odyssey_native_hz(void) {
     if (!odyssey_native_120_enabled()) return 60;
     if (unprepared_scene()) return 60;
+#ifndef __APPLE__
+    extern bool vk_native_brake(void);  // (vulkan/device.c: frames missing their time above 60 - a few seconds at 60)
+    if (vk_native_brake()) return 60;
+#endif
     return settings_fps_hz(g_settings.frame_rate);
 }
 
@@ -439,6 +444,8 @@ static void stage_draw(Cpu *c) {
         // (90: the gameplay frames are between ticks too)
         if (last_stage && odyssey_native_hz() != 120 && draw_lead != 0.0f && odyssey_pose_enabled()) odyssey_pose_draw(c, draw_lead);
     }
+    // (the renderer is told which of the tick's draws this is: vulkan/exec.c renderer_extra_frame)
+    if (rq_enabled()) rq_push(RQ_EXTRA_FRAME, NULL, enabled && extra_draw);
     original_stage_draw(c);
 }
 

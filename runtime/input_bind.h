@@ -13,6 +13,11 @@ extern "C" {
 
 typedef union SDL_Event SDL_Event;
 
+// A stick's position (-1..1 each axis, y up) through the Controls tab's deadzone and range for that stick (right: the
+// right one; runtime/hle/input.c): inside the deadzone circle it is at rest; outside, the travel is stretched from
+// there (round: a diagonal keeps its direction), then scaled by the range and kept within full tilt.
+void stick_shape(float *x, float *y, bool right);
+
 // Switch inputs, in nn::hid button-bit order (runtime/hle/input.c BTN_*), then the keyboard's stick directions.
 enum {
     BIND_A, BIND_B, BIND_X, BIND_Y, BIND_LSTICK, BIND_RSTICK, BIND_L, BIND_R, BIND_ZL, BIND_ZR, BIND_PLUS, BIND_MINUS,

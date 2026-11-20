@@ -26,6 +26,9 @@ FUNCS = {
     0x94c428: 0x6b9ec0,   # al::ModelKeeper::calc (fuzzy 0.45)
     0x4ccaf8: 0x473270,   # StageScene::drawMain (vtable)
     0x879c98: 0x5e77f0,   # al::GraphicsSystemInfo::updateViewGpu (fuzzy 0.33)
+    0x842bc8: 0x5ba620,   # al::ClippingJudge::update (call graph)
+    0x969708: 0x6d8f30,   # al::FarDistanceDitherAnimator::update (vtable)
+    0x94c914: 0x6babb0,   # al::ModelLodCtrl::update (fuzzy 0.27, read by eye: same fields and calls)
 }
 
 # the sites: address -> what it is (tools/odyssey_patches.py, runtime/hle/odyssey_debug.c)
@@ -42,6 +45,9 @@ SITES = {
     0x700094c428: 'debug hook: ModelKeeper::calc entry',
     0x70004ccbc8: 'debug hook: StageScene::drawMain camera copy',
     0x7000879c98: 'debug hook: updateViewGpu entry (DLSS)',
+    0x7000842c24: 'draw distance: ClippingJudge::update ldr s1 (far clip)',
+    0x7000969760: 'draw distance: FarDistanceDitherAnimator::update ldr s3',
+    0x700094ca48: 'draw distance: ModelLodCtrl::update fmul s8',
 }
 
 

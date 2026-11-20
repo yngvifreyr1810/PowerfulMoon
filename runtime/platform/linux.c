@@ -375,45 +375,20 @@ void plat_error_box(const char *text) {
 void plat_fatal_notice(void) {
     if (!g_log_path[0]) return;
     fflush(stderr);
-    char text[2900] = "Super Odyssey PC Recomp stopped because of an error.";
-    FILE *f = fopen(g_log_path, "rb");
-    if (f) {
-        static char tail[16384];
-        fseek(f, 0, SEEK_END);
-        long sz = ftell(f), from = sz > (long)sizeof tail - 1 ? sz - (long)sizeof tail + 1 : 0;
-        fseek(f, from, SEEK_SET);
-        size_t got = fread(tail, 1, sizeof tail - 1, f);
-        tail[got] = 0;
-        fclose(f);
-        char *line = NULL;
-        for (char *p = tail; (p = strstr(p, "FATAL: ")) != NULL; p++) line = p;
-        if (!line) for (char *p = tail; (p = strstr(p, "*** ")) != NULL; p++) line = p;
-        if (line) {
-            char *end = strchr(line, '\n');
-            if (end) *end = 0;
-            snprintf(text, sizeof text, "Super Odyssey PC Recomp stopped because of an error:\n\n%.600s", line);
-            // (VK_ERROR_OUT_OF_HOST_MEMORY -1 / VK_ERROR_OUT_OF_DEVICE_MEMORY -2: not a driver that is too old)
-            if (strstr(line, "failed: -2 (") || strstr(line, "failed: -1 (")) {
-                size_t l = strlen(text);
-                snprintf(text + l, sizeof text - l, "\n\nThe graphics card ran out of memory. Lower the internal resolution "
-                         "(menu > Graphics), or delete settings.ini in the game's folder to go back to the default settings.");
-            } else if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {
-                size_t l = strlen(text);
-                snprintf(text + l, sizeof text - l, "\n\nSuper Odyssey PC Recomp needs a graphics driver with Vulkan 1.3: "
-                         "install your distribution's Mesa or NVIDIA driver (on a Steam Deck it is already there).");
-            }
-        }
-    }
+    static char text[2900];  // (the reason, what to try and the error line: runtime/diagnostics.c)
+    diagnostics_fatal_text(text, sizeof text);
     size_t l = strlen(text);
     if (mods_applied())
         l += (size_t)snprintf(text + l, sizeof text - l, "\n\nMods are on. If this started with a new mod, move it out of "
                               "the mods folder: mods made for a later version of the game (1.3.0) can crash 1.0.0.");
     // The crash report (runtime/diagnostics.c) is saved before the box shows. Not diagnostics_fatal_dialog here: its
-    // SDL message box with buttons goes through zenity, which can hang without a window (plat_error_box).
+    // SDL message box with buttons goes through zenity, which can hang without a window (plat_error_box). The next
+    // start's page offers to copy the report's text or show the file instead.
     char report[1200];
     if (diagnostics_capture_crash(report, sizeof report))
-        snprintf(text + l, sizeof text - l, "\n\nCrash report (attach it to a bug report): %s", report);
-    else snprintf(text + l, sizeof text - l, "\n\nDetails: %s", g_log_path);
+        snprintf(text + l, sizeof text - l, "\n\nA crash report was saved: %s\nThe next start offers to copy its text for a "
+                 "bug report.", report);
+    else snprintf(text + l, sizeof text - l, "\n\nLog: %s", g_log_path);
     plat_error_box(text);
 }
 
