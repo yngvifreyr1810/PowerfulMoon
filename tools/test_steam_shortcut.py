@@ -109,6 +109,14 @@ class ShortcutTests(unittest.TestCase):
         self.assertEqual(steam.account(self.root), '456')
         self.assertEqual(steam.account(self.root, '123'), '123')
 
+    def test_no_account_folder_and_key_case_do_not_make_it_ambiguous(self):
+        (self.root / 'userdata/0/config').mkdir(parents=True)  # (#81: Steam's folder for no account)
+        self.assertEqual(steam.account(self.root), '123')
+        (self.root / 'userdata/456/config').mkdir(parents=True)
+        (self.root / 'config').mkdir()
+        (self.root / 'config/loginusers.vdf').write_text('"users" { "76561197960266184" { "mostrecent" "1" } }')
+        self.assertEqual(steam.account(self.root), '456')
+
     def test_login_persona_braces_and_quotes_do_not_confuse_account_selection(self):
         (self.root / 'userdata/456/config').mkdir(parents=True)
         (self.root / 'config').mkdir()

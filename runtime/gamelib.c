@@ -74,6 +74,22 @@ const char *gamelib_id(void) {
     return id;
 }
 
+// Is `id` this build's id? Also a library built from the same sources under an id made another way: {this build's
+// id, the other}. Linux x86-64, 0.4.4 - 0.4.6: the id counted tools/zig_slim.sh, a script only Windows releases use
+// (its change for #87 made every Steam Deck rebuild the game code, ~25 minutes, for the same library). Only while
+// GAMELIB_ID is the first of a pair: any real change of the sources makes a new id and the pair no longer applies.
+static bool id_same(const char *id) {
+    if (!strcmp(id, gamelib_id())) return true;
+    static const char *const same_as[][2] = {{"a1d43d90ca7ce979", "038563a1c29f433d"}};
+    size_t base = strlen(GAMELIB_ID);
+    for (size_t i = 0; i < sizeof same_as / sizeof same_as[0]; i++) {
+        size_t n = strlen(same_as[i][1]);
+        if (!strcmp(GAMELIB_ID, same_as[i][0]) && !strncmp(id, same_as[i][1], n) && !strcmp(id + n, gamelib_id() + base))
+            return true;  // (the same CPU level's suffix)
+    }
+    return false;
+}
+
 // The library's id file (<library>.id, written next to it by the build): its gamelib_id, read without loading it.
 static bool id_matches(const char *lib) {
     char path[1100], id[128] = {0};
@@ -83,7 +99,7 @@ static bool id_matches(const char *lib) {
     size_t n = fread(id, 1, sizeof id - 1, f);
     fclose(f);
     while (n && (id[n - 1] == '\n' || id[n - 1] == '\r')) id[--n] = 0;
-    return !strcmp(id, gamelib_id());
+    return id_same(id);
 }
 
 static bool exists(const char *p) {
@@ -125,7 +141,7 @@ static const GameLibTables *open_lib(const char *path) {
 #endif
     if (!entry) { snprintf(g_error, sizeof g_error, "%s: not game code", path); return NULL; }
     const GameLibTables *t = entry();
-    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, gamelib_id())) {
+    if (!t || t->abi != GAMELIB_ABI || !t->id || !id_same(t->id)) {
         snprintf(g_error, sizeof g_error, "%s was built for another version", path);
         return NULL;  // (left loaded: nothing of it runs)
     }
@@ -153,7 +169,7 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
                 for (uint32_t k = 0; k < g_tables->nmodules; k++)
                     snprintf(mods + strlen(mods), sizeof mods - strlen(mods), "%s%s %llu", k ? ", " : "",
                              g_tables->modules[k].name, (unsigned long long)*g_tables->modules[k].count);
-                LOG("[gamelib] %s (functions: %s)\n", c[i], mods);
+                LOG("[gamelib] %s (id %s; functions: %s)\n", c[i], g_tables->id, mods);
             }
         }
     }

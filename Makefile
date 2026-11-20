@@ -112,7 +112,13 @@ endif
 # is never loaded (`make gen`, then `make` again; players' setup builds it again).
 GAMELIB_SRCS := tools/gen.py tools/lifter.py tools/analyze.py tools/nso.py tools/passes.py tools/odyssey_patches.py \
                 tools/simd_c.py tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
-                runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/zig_slim.sh
+                runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h
+# (the compiler runtime's script only where it is used: its change for #87 made every Linux / Steam Deck player's
+# game code rebuild too - about 25 minutes on a Deck - for a library that was the same. runtime/gamelib.c same_as
+# keeps the Linux libraries built before this.)
+ifeq ($(PLATFORM),windows)
+GAMELIB_SRCS += tools/zig_slim.sh
+endif
 # (line endings don't count: a Windows checkout with CRLF and GitHub's LF one make the same library)
 GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | tr -d '\015' | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-16)
 
@@ -133,6 +139,14 @@ $(B)/obj/tools/gamelib_entry.o: tools/gamelib_entry.c $(GAMELIB_SRCS) $(wildcard
 	@mkdir -p $(dir $@)
 	$(CC) $(GENFLAGS) -DGAMELIB_ID='"$(GAMELIB_ID)"' -DGAMELIB_MODULES='$(foreach m,$(GEN_MODS),X($(m)))' -c $< -o $@
 $(B)/rt/gamelib.o: $(GAMELIB_SRCS) Makefile  # (GAMELIB_ID is computed there)
+# PREP_ID: what a prepared shader cache is made by - the shader translator, the SPIR-V compile and its pack, and the
+# list of shaders prepared (runtime/nvn/vulkan/device.c prep_identity, with its own PREP_REV). The preparation was
+# due again after every update (the version number): ~1 minute on a fast PC, ~8 on a Steam Deck, mostly for nothing.
+PREP_SRCS := runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h runtime/nvn/vulkan/shaders.c \
+             runtime/nvn/vulkan/known_programs.txt
+PREP_ID := $(shell cat $(PREP_SRCS) | tr -d '\015' | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-12)
+$(B)/rt/nvn/vulkan/device.o: $(PREP_SRCS)
+$(B)/rt/nvn/vulkan/device.o: RTFLAGS += -DPREP_ID='"$(PREP_ID)"'
 $(B)/rt/gamelib.o: RTFLAGS += -DGAMELIB_ID='"$(GAMELIB_ID)"'
 # the setup page's build of it on the player's machine (runtime/gamebuild.c) uses the same flags
 $(B)/rt/gamebuild.o: $(GAMELIB_SRCS) Makefile
@@ -306,7 +320,7 @@ dist:
 	cp -R build/zig-slim "$(DIST)/zig"
 	cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
 	    "$(DIST)/gamelib-src/"
-	cp runtime/nvn/vulkan/known_programs.txt third_party/imgui/misc/fonts/Roboto-Medium.ttf data/pipeline-seed.bin README.md LICENSE "$(DIST)/"
+	cp runtime/nvn/vulkan/known_programs.txt third_party/imgui/misc/fonts/Roboto-Medium.ttf data/pipeline-seed.bin.zst README.md LICENSE "$(DIST)/"
 	mkdir -p "$(DIST)/lang" && cp runtime/ui/lang/*.txt "$(DIST)/lang/"  # (the menu's translations: runtime/ui/i18n.mm)
 	mkdir -p "$(DIST)/fsr2" && cp third_party/fsr2/shaders/* third_party/fsr2/LICENSE.txt "$(DIST)/fsr2/"  # (FSR 2: runtime/nvn/vulkan/fsr2.c)
 	cp build/upscalers/*.dll "$(DIST)/"  # (loaded only when chosen in the menu)

@@ -9,6 +9,8 @@
 #      clean machines. Download both.
 #   3. Windows: run the downloaded zip's exe on a copied save until it is playing in Cap Kingdom (a first run after a
 #      change to the game code's sources rebuilds that code first, as players' setups do) and take a screenshot.
+#      3b/3c. The zip's setup shader passes on a fresh cache: the pipeline seed must still build, and a new player's
+#      play from that cache must translate (almost) no shaders itself.
 #   4. Linux: if the Steam Deck (DECK) answers, start the AppImage there with no Vulkan driver and normally - each must
 #      show a window - and play it for 2 minutes from the installed save. Skipped with a warning when it doesn't.
 #   5. The AppImage catalog's own test (the private probe repository) on the downloaded AppImage, before publishing.
@@ -19,6 +21,8 @@
 #
 # This machine's own places: tools/release.local.sh (git-ignored) sets
 #   TESTDATA=X:/path    a game data root (ODYSSEY_DATA_ROOT) with extracted game files and a Cap Kingdom save in save-cap/
+#   SEEDDATA=X:/path    optional: the game files for steps 3b/3c (default TESTDATA), as setup makes them - with
+#                       extracted/romfs.bin, which setup's shader pass scans (an old manual extraction has only romfs/)
 #   DECK=user@host      optional: the Steam Deck over SSH (with ~/sopr/ai-case.sh and ~/sopr/deck-boot-ov.sh there)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -35,6 +39,8 @@ NOTES=${2:?usage: tools/release.sh <version> <release-notes.md>}
 [ -f "$NOTES" ] || { echo "no such file: $NOTES"; exit 1; }
 [ -f tools/release.local.sh ] && . tools/release.local.sh
 : "${TESTDATA:?set TESTDATA in tools/release.local.sh}"
+SEEDDATA=${SEEDDATA:-$TESTDATA}
+[ -f "$SEEDDATA/extracted/romfs.bin" ] || { echo "no $SEEDDATA/extracted/romfs.bin: set SEEDDATA (tools/release.local.sh) to game files set up by the setup"; exit 1; }
 DECK=${DECK:-}
 REPO=Simon3Sarkis/super-odyssey-pc-recomp
 PROBE=Simon3Sarkis/sopr-catalog-probe
@@ -44,7 +50,9 @@ SSH="/c/Windows/System32/OpenSSH/ssh.exe -o BatchMode=yes -o ConnectTimeout=10"
 SCP="/c/Windows/System32/OpenSSH/scp.exe -q -o BatchMode=yes"
 export MSYS_NO_PATHCONV=1  # (Git Bash would rewrite /tmp/... and /retest-style arguments)
 say() { echo; echo "== $*"; }
-trap 'echo "(work folder kept: $WORK)"' EXIT
+# (the seed check's link to TESTDATA's game files - step 3b - is removed whatever happens: deleting the work folder
+# through it would delete those files)
+trap '[ -e "$WORK/seedcheck/extracted" ] && cmd /c rmdir "$(cygpath -w "$WORK/seedcheck/extracted")" > /dev/null 2>&1; echo "(work folder kept: $WORK)"' EXIT
 
 probe() {  # url -> runs the catalog probe on it, fails unless both of its checks find the window
     gh workflow run probe.yml --repo "$PROBE" -f "url=$1" >/dev/null
@@ -86,6 +94,52 @@ grep -aE "FATAL|\*\*\* " "$WORK/windows.log" && { echo "the Windows run hit an e
 [ -f "$WORK/windows-play.png" ] || { echo "the Windows run never reached gameplay ($WORK/windows.log)"; exit 1; }
 echo "ok: $(grep -a fps "$WORK/windows.log" | tail -1 | cut -c1-50); look at $WORK/windows-play.png"
 
+say "3b/7  Windows: the shipped pipeline seed against this build's shaders"
+# The setup compiles the pipelines in pipeline-seed.bin ahead. Its recipes name translated shaders by key, so a change
+# to the shader translator can leave them pointing at nothing: 0.5.0 shipped a seed whose recipes were 63% unusable
+# (4,318 of 6,905), and a new player's opening stuttered on what should have been ready. The zip's own setup passes are
+# run here on a fresh cache (the game files linked from SEEDDATA) and the release stops if more than 5% are left out.
+# Regenerate the seed with tools/make_pipeline_seed.py (see its docstring).
+SEEDROOT="$WORK/seedcheck"
+mkdir -p "$SEEDROOT/cache"
+cmd /c mklink /J "$(cygpath -w "$SEEDROOT/extracted")" "$(cygpath -w "$SEEDDATA/extracted")" > /dev/null
+( cd "$WORK/win/Super Odyssey PC Recomp" &&
+  ./SuperOdysseyRecomp.exe --unpack-seed "$(cygpath -w "$SEEDROOT/cache/graphics-pipelines.bin")" > "$WORK/seed-unpack.log" 2>&1
+  for pass in all recorded; do
+      ODYSSEY_PRECOMPILE_MEM_MB=0 timeout 1800 ./SuperOdysseyRecomp.exe --prepare-shaders $pass --data-root "$(cygpath -w "$SEEDROOT")" \
+          > "$WORK/seed-$pass.log" 2>&1
+  done ) || true
+SEEDLINE=$(grep -a "\[prep\] recorded " "$WORK/seed-recorded.log" | tail -1)
+[ -n "$SEEDLINE" ] || { echo "the seed check's pipeline pass didn't run ($WORK/seed-recorded.log)"; exit 1; }
+read -r SG SC SU <<< "$(echo "$SEEDLINE" | sed -E 's/.*recorded ([0-9]+) graphics and ([0-9]+) compute pipelines, ([0-9]+) unavailable.*/\1 \2 \3/')"
+echo "$SEEDLINE"
+if [ $((SU * 100)) -gt $(((SG + SC + SU) * 5)) ]; then
+    echo "the pipeline seed is out of date: $SU of $((SG + SC + SU)) recipes can't be built by this build's setup."
+    echo "Regenerate data/pipeline-seed.bin.zst (tools/make_pipeline_seed.py) - not releasing."
+    exit 1
+fi
+echo "ok: $SU of $((SG + SC + SU)) left out"
+
+say "3c/7  Windows: a new player's play translates no shaders"
+# The setup above translates every program in the game files (~31,500) and saves them; the game must then take each
+# from there. Played here from that fresh setup's cache: TESTDATA's Cap Kingdom save, or RIDE (a recorded ride,
+# tools/release.local.sh: RIDE=file.bin RIDESAVE=its save-at-start folder) for a longer route. The game's census at the
+# quit counts the programs it had to translate itself; the release stops above 50 (2026-11-19: 10 on a 3-minute ride,
+# was 12,646 - each ~4.6 ms of a worker's time with its draws skipped meanwhile).
+cp -r "${RIDESAVE:-$TESTDATA/save-cap}" "$WORK/save-play"
+( cd "$WORK/win/Super Odyssey PC Recomp" &&
+  if [ -n "${RIDE:-}" ]; then export ODYSSEY_INPUT_REPLAY="$(cygpath -w "$RIDE")"; fi &&
+  ODYSSEY_DATA_ROOT="$(cygpath -w "$SEEDROOT")" ODYSSEY_SAVE_DIR="$(cygpath -w "$WORK/save-play")" ODYSSEY_PREPARE=0 \
+  ODYSSEY_NO_CONFIG=1 ODYSSEY_NO_UPDATE_CHECK=1 ODYSSEY_DISCORD=0 ODYSSEY_WINDOW=1280x720 \
+  ODYSSEY_INPUT='1500:A:8,1650:A:8,1800:A:8,1950:A:8,2100:A:8' ODYSSEY_HOST_INPUT="${PLAY_FRAMES:-9000}:quit:x" timeout 1800 ./SuperOdysseyRecomp.exe > "$WORK/play.log" 2>&1 ) || true
+cmd /c rmdir "$(cygpath -w "$SEEDROOT/extracted")" > /dev/null 2>&1 || true
+CENSUS=$(grep -a "\[census\] translated" "$WORK/play.log" | tail -1)
+[ -n "$CENSUS" ] || { echo "the play run gave no census ($WORK/play.log)"; exit 1; }
+echo "$CENSUS"; grep -a "\[census\] compiled" "$WORK/play.log" | tail -1
+TN=$(echo "$CENSUS" | sed -E 's/.*not prepared ([0-9]+).*/\1/')
+[ "$TN" -le 50 ] || { echo "the game translated $TN shaders a setup should have - not releasing ($WORK/play.log)"; exit 1; }
+echo ok
+
 say "4/7  Linux on the Steam Deck"
 if [ -n "$DECK" ] && timeout 15 $SSH "$DECK" true 2>/dev/null; then
     # (one fixed name the Deck's scripts use: ~/sopr/ai-case.sh, ~/sopr/deck-boot-ov.sh - its test data folder, never
@@ -102,7 +156,7 @@ if [ -n "$DECK" ] && timeout 15 $SSH "$DECK" true 2>/dev/null; then
     grep -q "normal: window: *0x" "$WORK/deck.log" || { echo "no window on the Deck at a first start"; exit 1; }
     grep -q "still running after 120" "$WORK/deck.log" || { echo "the Deck's 2-minute run ended early"; exit 1; }
     grep -q "errors in the log: 0" "$WORK/deck.log" || { echo "the Deck's run logged an error"; exit 1; }
-    timeout 60 $SCP "$DECK:/run/media/deck/SN01T/Super Odyssey/game/build/window.png" "$(cygpath -m "$WORK/deck.png")" || true
+    timeout 60 $SCP "$DECK:/run/media/deck/SN01T/sopr-fonttest/build/window.png" "$(cygpath -m "$WORK/deck.png")" || true
     echo "ok; look at $WORK/deck.png"
 else
     echo "WARNING: the Steam Deck isn't reachable - the Linux build is covered only by the catalog probe below"

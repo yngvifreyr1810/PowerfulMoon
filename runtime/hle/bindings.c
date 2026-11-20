@@ -178,11 +178,14 @@ bool bind_capture_event(const SDL_Event *e) {
     case SDL_EVENT_KEY_DOWN:
         if (e->key.repeat) return true;
         if (e->key.scancode == SDL_SCANCODE_ESCAPE) { bind_capture_cancel(); return true; }
-        // F1 (menu), F9 (frame dump), F11 (fullscreen) stay the overlay's; a controller capture ignores keys
-        if (dev != BIND_DEV_KEY || e->key.scancode == SDL_SCANCODE_F1 || e->key.scancode == SDL_SCANCODE_F9 ||
+        // F1 (menu), F9 (frame dump), F11 (fullscreen) stay the overlay's
+        if (e->key.scancode == SDL_SCANCODE_F1 || e->key.scancode == SDL_SCANCODE_F9 ||
             e->key.scancode == SDL_SCANCODE_F11 || e->key.scancode >= SDL_SCANCODE_COUNT) return true;
+        // A key while the controller's cell waits: the keyboard's binding of the same input instead. A keyboard player
+        // who picked the Controller column (the left one) saw nothing happen at any key (#108, keyboard + mouse).
+        if (dev != BIND_DEV_KEY) LOG("[input] a key during a controller capture: the keyboard's binding instead\n");
         cap_dev = -1;
-        assign(dev, cap_slot, e->key.scancode);
+        assign(BIND_DEV_KEY, cap_slot, e->key.scancode);
         return true;
     case SDL_EVENT_KEY_UP: case SDL_EVENT_TEXT_INPUT:
         return true;
@@ -199,10 +202,12 @@ bool bind_capture_event(const SDL_Event *e) {
         assign(dev, cap_slot, (e->wheel.y > 0) != (e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED) ? BIND_WHEEL_UP : BIND_WHEEL_DOWN);
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
-        // Home / Guide opens the menu; a keyboard capture ignores the controller (it times out, or Esc)
-        if (dev != BIND_DEV_PAD || e->gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE || e->gbutton.button >= SDL_GAMEPAD_BUTTON_COUNT) return true;
+        // Home / Guide opens the menu. A controller button while a keyboard cell waits: the controller's binding of the
+        // same input instead (as a key in a controller cell above), where the controller has that input
+        if (e->gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE || e->gbutton.button >= SDL_GAMEPAD_BUTTON_COUNT) return true;
+        if (dev != BIND_DEV_PAD && cap_slot >= BIND_PAD_COUNT) return true;
         cap_dev = -1;
-        assign(dev, cap_slot, e->gbutton.button);
+        assign(BIND_DEV_PAD, cap_slot, e->gbutton.button);
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_UP:
         return true;

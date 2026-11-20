@@ -8,6 +8,7 @@
 // and hands it to GameDataFunction::tryChangeNextStage; the scene then changes stage as after a door. Entrance "" =
 // the stage's default start, scenario -1 = the game picks it. ODYSSEY_LOG_STAGES=1 (or any warp): the frame each
 // stage scene starts running.
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -193,7 +194,12 @@ static void stage_scene_init(Cpu *c) {
     g_init(c);
 }
 
+// Gameplay ticks in stage scenes so far (StageScene::control calls): the clock input recordings are keyed to
+// (input.c ODYSSEY_INPUT_RECORD / _REPLAY) - the same at any frame rate and however long the loads took
+static _Atomic uint64_t g_stage_ticks;
+uint64_t odyssey_stage_ticks(void) { return atomic_load(&g_stage_ticks); }
 static void stage_scene_control(Cpu *c) {
+    atomic_fetch_add(&g_stage_ticks, 1);
     uint64_t now = renderer_present_count() + 1;
     if (g_scene_new) {
         if (!g_first_scene_start) g_first_scene_start = now;

@@ -153,9 +153,7 @@ static void read_pad(void) {
     for (int pair = 0; pair < 2; pair++) {
         float x = SDL_GetGamepadAxis(cappy, (SDL_GamepadAxis)(pair * 2)) / 32767.0f;
         float y = -SDL_GetGamepadAxis(cappy, (SDL_GamepadAxis)(pair * 2 + 1)) / 32767.0f;
-        float r = sqrtf(x * x + y * y), dz = g_settings.stick_deadzone / 100.0f;
-        if (r <= dz) x = y = 0;
-        else if (dz > 0) { float k = fminf((r - dz) / (1 - dz), 1) / r; x *= k; y *= k; }
+        stick_shape(&x, &y, pair == 1);
         atomic_store(&axes[pair * 2], (int)lroundf(fmaxf(-1, fminf(x, 1)) * 32767));
         atomic_store(&axes[pair * 2 + 1], (int)lroundf(fmaxf(-1, fminf(y, 1)) * 32767));
     }

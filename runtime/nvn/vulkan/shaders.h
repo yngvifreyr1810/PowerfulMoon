@@ -19,3 +19,4 @@ VkShaderModule vk_module(const uint32_t *spv, size_t nwords);
 // Descriptor bindings declared by a SPIR-V module.
 int vk_reflect(const uint32_t *spv, size_t nwords, VkBindingInfo *out, int max);
 VkDescriptorSetLayout vk_set_layout(const VkBindingInfo *b, int n, uint32_t set, VkShaderStageFlags stages);
+bool vk_seed_unpack(const char *src, const char *dst);  // the zstd-packed pipeline seed, unpacked to dst (shaders.c)

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <process.h>
 #include <psapi.h>
 #include <shellapi.h>
 #include <timeapi.h>
@@ -13,6 +14,7 @@
 #include "../mods.h"
 #include "../diagnostics.h"
 #include "../platform.h"
+#include "../rt.h"  // (GUEST / HEAP addresses: plat_mem_map_log)
 
 // ---- guest address space
 // The window is reserved up front and committed per region (plat_commit from the loader / kernel). Anything
@@ -224,6 +226,71 @@ uint64_t plat_guest_bytes(void) {  // (the committed regions of the window)
     return sum;
 }
 
+// A thread whose stack is only reserved: its pages are committed as it grows into them. (winpthreads' pthread_create
+// passes the stack size to _beginthreadex as the size to commit: each guest thread's 256 MB stack (kernel.c) was 256 MB
+// of committed memory up front - ~40 threads, ~10 GB, nearly all never touched; #99, an 8 GB PC.) Returns the thread's
+// handle (plat_thread_join), NULL if it could not start.
+typedef struct { void *(*fn)(void *); void *arg; } ThreadStart;
+static unsigned __stdcall reserved_thread_main(void *p) {
+    ThreadStart s = *(ThreadStart *)p;
+    free(p);
+    s.fn(s.arg);
+    return 0;
+}
+void *plat_thread_start_reserved(void *(*fn)(void *), void *arg, uint64_t stack) {
+    ThreadStart *s = malloc(sizeof *s);
+    s->fn = fn, s->arg = arg;
+    uintptr_t h = _beginthreadex(NULL, (unsigned)stack, reserved_thread_main, s, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+    if (!h) free(s);
+    return (void *)h;
+}
+void plat_thread_join(void *h) {
+    WaitForSingleObject((HANDLE)h, INFINITE);
+    CloseHandle((HANDLE)h);
+}
+
+// (tests, ODYSSEY_MEM_TRACE) What the committed memory is made of, into the log: the guest window (and its heap), the
+// process's heaps (malloc), other private allocations (the largest by allocation, e.g. a driver's), and mapped views.
+void plat_mem_map_log(void) {
+    enum { TOP = 10 };
+    struct { uint64_t base, bytes; } top[TOP] = {{0}};
+    uint64_t guest = 0, heap = 0, other = 0, mapped = 0, image = 0, cur_base = 0, cur = 0;
+    MEMORY_BASIC_INFORMATION mi;
+    for (uint64_t a = 0x10000; VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi); a = (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize) {
+        uint64_t b = (uint64_t)(uintptr_t)mi.BaseAddress, ab = (uint64_t)(uintptr_t)mi.AllocationBase;
+        if (ab != cur_base || mi.State == MEM_FREE) {  // (one allocation ends: into the top list)
+            for (int i = 0; cur && i < TOP; i++)
+                if (cur > top[i].bytes) {
+                    memmove(&top[i + 1], &top[i], (TOP - 1 - i) * sizeof top[0]);
+                    top[i].base = cur_base, top[i].bytes = cur;
+                    break;
+                }
+            cur_base = ab, cur = 0;
+        }
+        if (mi.State != MEM_COMMIT) continue;
+        if (mi.Type == MEM_MAPPED) { mapped += mi.RegionSize; continue; }
+        if (mi.Type == MEM_IMAGE) { image += mi.RegionSize; continue; }
+        if (b >= g_lo && b < g_hi) {
+            guest += mi.RegionSize;
+            uint64_t lo = b > HEAP_BASE ? b : HEAP_BASE, hi = b + mi.RegionSize < HEAP_BASE + HEAP_MAX ? b + mi.RegionSize : HEAP_BASE + HEAP_MAX;
+            if (hi > lo) heap += hi - lo;  // (a region can start below the heap: count the overlap)
+            continue;
+        }
+        other += mi.RegionSize;
+        cur += mi.RegionSize;
+    }
+    uint64_t heaps = plat_heap_bytes();
+    fprintf(stderr, "[memmap] private %llu MB: guest window %llu (heap %llu), other %llu (process heaps %llu); mapped %llu, images %llu\n",
+        (unsigned long long)(plat_private_bytes() >> 20), (unsigned long long)(guest >> 20), (unsigned long long)(heap >> 20),
+        (unsigned long long)(other >> 20), (unsigned long long)(heaps >> 20), (unsigned long long)(mapped >> 20),
+        (unsigned long long)(image >> 20));
+    char line[512];
+    int n = snprintf(line, sizeof line, "[memmap] largest other:");
+    for (int i = 0; i < TOP && top[i].bytes && n < (int)sizeof line - 40; i++)
+        n += snprintf(line + n, sizeof line - n, " %llx:%llu", (unsigned long long)top[i].base, (unsigned long long)(top[i].bytes >> 20));
+    LOG("%s MB\n", line);
+}
+
 void plat_heap_check(const char *where) {
     static int on = -1;
     if (on < 0) on = getenv("ODYSSEY_HEAPCHECK") != NULL;
@@ -237,40 +304,13 @@ void plat_heap_check(const char *where) {
 void plat_fatal_notice(void) {
     if (!g_log_path[0]) return;
     fflush(stderr);
-    char text[1600] = "Super Odyssey PC Recomp stopped because of an error.";
-    FILE *f = fopen(g_log_path, "rb");
-    if (f) {
-        static char tail[16384];
-        fseek(f, 0, SEEK_END);
-        long sz = ftell(f), from = sz > (long)sizeof tail - 1 ? sz - (long)sizeof tail + 1 : 0;
-        fseek(f, from, SEEK_SET);
-        size_t got = fread(tail, 1, sizeof tail - 1, f);
-        tail[got] = 0;
-        fclose(f);
-        char *line = NULL;
-        for (char *p = tail; (p = strstr(p, "FATAL: ")) != NULL; p++) line = p;
-        if (!line) for (char *p = tail; (p = strstr(p, "*** ")) != NULL; p++) line = p;
-        if (line) {
-            char *end = strchr(line, '\n');
-            if (end) *end = 0;
-            snprintf(text, sizeof text, "Super Odyssey PC Recomp stopped because of an error:\n\n%.600s", line);
-            // (VK_ERROR_OUT_OF_HOST_MEMORY -1 / VK_ERROR_OUT_OF_DEVICE_MEMORY -2: not a driver that is too old)
-            if (strstr(line, "failed: -2 (") || strstr(line, "failed: -1 (")) {
-                size_t l = strlen(text);
-                snprintf(text + l, sizeof text - l, "\n\nThe graphics card ran out of memory. Lower the internal resolution "
-                         "(menu > Graphics), or delete settings.ini in the game's folder to go back to the default settings.");
-            } else if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {
-                size_t l = strlen(text);
-                snprintf(text + l, sizeof text - l, "\n\nSuper Odyssey PC Recomp needs a graphics driver with Vulkan 1.3: install the "
-                         "latest driver for your GPU (NVIDIA, AMD or Intel).");
-            }
-        }
-    }
+    static char text[2600];  // (the reason, what to try and the error line: runtime/diagnostics.c)
+    diagnostics_fatal_text(text, sizeof text);
     size_t l = strlen(text);
     if (mods_applied())
         l += (size_t)snprintf(text + l, sizeof text - l, "\n\nMods are on. If this started with a new mod, move it out of "
                               "the mods folder: mods made for a later version of the game (1.3.0) can crash 1.0.0.");
-    snprintf(text + l, sizeof text - l, "\n\nDetails: %s", g_log_path);
+    snprintf(text + l, sizeof text - l, "\n\nLog: %s", g_log_path);
     diagnostics_fatal_dialog(text);
 }
 
@@ -633,6 +673,9 @@ static void sample_modules(void) {
                 fprintf(m, "%llx %lx %s\n", (unsigned long long)(uintptr_t)mi.lpBaseOfDll, (unsigned long)mi.SizeOfImage, name);
         }
     if (m) fclose(m);
+    snprintf(path, sizeof path, "%s.funcs", getenv("ODYSSEY_SAMPLE"));
+    extern void rt_dump_host_fns(const char *path);
+    rt_dump_host_fns(path);
 }
 static DWORD WINAPI sample_main(LPVOID arg) {
     (void)arg;
@@ -668,8 +711,24 @@ static DWORD WINAPI sample_main(LPVOID arg) {
             memset(rec, 0, sizeof recs[0]);
             rec[0] = now;
             rec[1] = tid[t] | (tid[t] == sample_tid ? 1ull << 32 : 0);
-            for (int i = 0; ok && i < 8; i++) {
-                rec[2 + i] = ctx.Rip;
+            // (the leaf, then the callers outside the OS's and the thread library's wait functions: a waiting thread's 7
+            // callers were all inside them, and what it waited in couldn't be told)
+            static struct { uint64_t lo, hi; } skip[4];
+            static int nskip = -1;
+            if (nskip < 0) {
+                static const char *const names[] = {"ntdll.dll", "KERNELBASE.dll", "libwinpthread-1.dll", "KERNEL32.DLL"};
+                nskip = 0;
+                for (int k = 0; k < 4; k++) {
+                    MODULEINFO mi;
+                    HMODULE hm = GetModuleHandleA(names[k]);
+                    if (hm && GetModuleInformation(GetCurrentProcess(), hm, &mi, sizeof mi))
+                        skip[nskip].lo = (uint64_t)(uintptr_t)mi.lpBaseOfDll, skip[nskip++].hi = (uint64_t)(uintptr_t)mi.lpBaseOfDll + mi.SizeOfImage;
+                }
+            }
+            for (int i = 0, steps = 0; ok && i < 8 && steps < 48; steps++) {
+                bool skipped = false;
+                for (int k = 0; i > 0 && k < nskip; k++) skipped |= ctx.Rip >= skip[k].lo && ctx.Rip < skip[k].hi;
+                if (!skipped) rec[2 + i++] = ctx.Rip;
                 DWORD64 base;
                 PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(ctx.Rip, &base, NULL);
                 if (!fn) {  // a leaf without unwind data: its return address is at the stack pointer

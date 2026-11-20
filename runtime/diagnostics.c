@@ -134,6 +134,179 @@ static void cpu_description(char text[128]) {
     }
 #endif
     text[strcspn(text, "\r\n")] = 0;
+    for (size_t n = strlen(text); n && text[n - 1] == ' '; n--) text[n - 1] = 0;  // (the CPU's own name is space-padded)
+}
+
+// Where the fault was: the recompiled game's code (f_<guest address>), a driver or other library (name.dll / .so), ours
+static bool is_driver(const char *s) {
+    return strstr(s, "nvoglv") || strstr(s, "nvidia") || strstr(s, "amdvlk") || strstr(s, "amdxx") || strstr(s, "radv") ||
+           strstr(s, "igvk") || strstr(s, "vulkan") || strstr(s, "libvk");
+}
+static const char *place_of(bool located) {
+    if (!located) return "unknown (no exception: see the log's last lines)";
+    if (!strncmp(where_sym, "f_7", 3)) return "the game's own code (recompiled)";
+    if (is_driver(where_sym)) return "the graphics driver";
+    if (strstr(where_sym, ".dll") || strstr(where_sym, ".so")) return "a library (see Where)";
+    return "the PC port's own code";
+}
+
+// ---- Why the game stopped, in plain words (2026-11-19: reports said only "No host exception recorded", and players
+// could not tell running out of memory from a driver problem or a missing file)
+
+// The log's last "FATAL: " line, or its last "*** " line (an exception, abort()) when that came later
+static bool last_error_line(char *out, size_t n) {
+    out[0] = 0;
+    const char *log = plat_log_path();
+    if (!log || !*log) return false;
+    fflush(stderr);
+    FILE *f = fopen(log, "rb");
+    if (!f) return false;
+    static char tail[16384];  // (static: a crash handler's stack may be small)
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f), from = sz > (long)sizeof tail - 1 ? sz - (long)sizeof tail + 1 : 0;
+    fseek(f, from, SEEK_SET);
+    size_t got = fread(tail, 1, sizeof tail - 1, f);
+    tail[got] = 0;
+    fclose(f);
+    char *line = NULL, *star = NULL;
+    for (char *p = tail; (p = strstr(p, "FATAL: ")) != NULL; p++) line = p;
+    for (char *p = tail; (p = strstr(p, "*** ")) != NULL; p++) star = p;
+    if (star && (!line || star > line)) line = star;
+    if (!line) return false;
+    size_t len = strcspn(line, "\r\n");
+    snprintf(out, n, "%.*s", (int)(len < 400 ? len : 400), line);
+    return true;
+}
+
+// The PC's free memory when it is nearly gone (a crash then is most likely an allocation that failed): MB left, or -1
+static long long memory_low_mb(void) {
+    if (getenv("ODYSSEY_TEST_MEMORY_LOW")) return 42;  // (tests: as if memory had run out)
+#ifdef _WIN32
+    MEMORYSTATUSEX m = {.dwLength = sizeof m};
+    if (!GlobalMemoryStatusEx(&m)) return -1;
+    // (the commit limit, RAM + page file: what an allocation needs on Windows)
+    if (m.ullAvailPageFile < (512ull << 20) || m.ullAvailPageFile < m.ullTotalPageFile / 50) return (long long)(m.ullAvailPageFile >> 20);
+#elif defined(__linux__)
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return -1;
+    char line[128];
+    unsigned long long avail = ~0ull, swap = 0, v;
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "MemAvailable: %llu kB", &v) == 1) avail = v;
+        else if (sscanf(line, "SwapFree: %llu kB", &v) == 1) swap = v;
+    }
+    fclose(f);
+    if (avail != ~0ull && avail + swap < (256ull << 10)) return (long long)((avail + swap) >> 10);
+#endif
+    return -1;
+}
+
+static void cpu_features(char *out, size_t n) {
+#if defined(__x86_64__)
+    __builtin_cpu_init();
+    snprintf(out, n, "AVX2 %s, FMA %s, BMI2 %s, AVX %s, SSE4.2 %s", __builtin_cpu_supports("avx2") ? "yes" : "no",
+             __builtin_cpu_supports("fma") ? "yes" : "no", __builtin_cpu_supports("bmi2") ? "yes" : "no",
+             __builtin_cpu_supports("avx") ? "yes" : "no", __builtin_cpu_supports("sse4.2") ? "yes" : "no");
+#else
+    snprintf(out, n, "(not x86-64)");
+#endif
+}
+
+static bool has(const char *s, const char *a) { return strstr(s, a) != NULL; }
+
+// crashed: false for a report made from the menu with nothing wrong
+static void classify(bool crashed, char *head, size_t hn, char *advice, size_t an, char *detail, size_t dn) {
+    char line[420];
+    bool error = last_error_line(line, sizeof line), faulted = atomic_load(&fault_ready);
+    if (!crashed && !faulted) error = false;  // (a menu report: an old FATAL line in the log isn't why)
+    bool fatal = error && !strncmp(line, "FATAL: ", 7);
+    const char *msg = fatal ? line + 7 : line;
+    unsigned long code = 0;
+    int sig = 0;
+    if (faulted) {
+        if (!strncmp(fault_short, "exception ", 10)) code = strtoul(fault_short + 10, NULL, 16);
+        else if (!strncmp(fault_short, "signal ", 7)) sig = atoi(fault_short + 7);
+    }
+    long long low = memory_low_mb();
+    snprintf(advice, an, "Attach this report to a bug report.");
+    snprintf(detail, dn, "%s", error ? line : faulted ? fault_short : "none recorded (see the log's last lines)");
+#ifdef _WIN32
+    const char *driver = "Install the latest graphics driver (NVIDIA, AMD or Intel).";
+#else
+    const char *driver = "Update the graphics driver (your distribution's Mesa or NVIDIA driver).";
+#endif
+    int vk = 0;  // (a Vulkan call's error: "<call> failed: -N (file:line)", runtime/nvn/vulkan/vk.h VK_CHECK)
+    const char *f = fatal ? strstr(msg, " failed: -") : NULL;
+    if (f) vk = atoi(f + 9);
+    const char *mem_advice = "Close other programs, set Performance > Memory use to Low, or let the system manage a larger "
+                             "page file / swap.";
+    if (fatal && (has(msg, "out of memory for a texture") || vk == -2 || has(msg, "OUT_OF_DEVICE_MEMORY"))) {
+        snprintf(head, hn, "Out of graphics memory (VRAM)");
+        snprintf(advice, an, "Lower the internal resolution (Graphics), set Performance > Memory use to Low and close other "
+                 "programs. With integrated graphics, graphics memory is the PC's RAM and page file.");
+    } else if (fatal && (vk == -1 || has(msg, "out of host memory") || has(msg, "out of memory") || has(msg, "cannot allocate"))) {
+        snprintf(head, hn, "Out of memory (RAM)");
+        snprintf(advice, an, "%s", mem_advice);
+    } else if (fatal && (vk == -4 || has(msg, "device lost") || has(msg, "DEVICE_LOST"))) {
+        snprintf(head, hn, "Vulkan device lost: the graphics card stopped responding");
+        snprintf(advice, an, "%s Turn off GPU overclocks, lower the internal resolution, and try without the upscaler and "
+                 "frame generation. If it happens in the same place every time, attach this report.", driver);
+    } else if (fatal && (has(msg, "cannot open ") || has(msg, "cannot load ") || !strncmp(msg, "romfs: ", 7) ||
+                         has(msg, "isn't in exefs") || has(msg, "no game code for") || has(msg, " is missing"))) {
+        snprintf(head, hn, "A game file is missing or cannot be read");
+        snprintf(advice, an, "The file named below could not be read. Check that the game's folder (extracted/: exefs and "
+                 "romfs) is complete and its drive is connected, or run the setup again with your game files.");
+    } else if (fatal && (vk || has(msg, "Vulkan") || has(msg, "VK_"))) {
+        if (vk) snprintf(head, hn, "Graphics driver error (Vulkan error %d)", vk);
+        else snprintf(head, hn, "Graphics driver error (Vulkan)");
+        snprintf(advice, an, "%s The game needs Vulkan 1.3.", driver);
+    } else if (code == 0xc000001d || code == 0xc0000096 || sig == 4) {
+        char cpu[128], feats[128];
+        cpu_description(cpu);
+        cpu_features(feats, sizeof feats);
+        snprintf(head, hn, "Illegal instruction: the processor lacks an instruction the game uses (CPU features)");
+        snprintf(advice, an, "This build may need a newer processor than this one (%s). Attach this report: it names the "
+                 "processor and its features.", cpu);
+        snprintf(detail, dn, "%s; CPU features: %s", faulted ? fault_short : line, feats);
+    } else if (fatal) {
+        size_t len = strcspn(msg, "\r\n");
+        while (len && (msg[len - 1] == ' ' || msg[len - 1] == '.')) len--;
+        snprintf(head, hn, "Error: %.*s", (int)(len < 140 ? len : 140), msg);
+    } else if (code == 0xc0000017 || ((faulted || error) && low >= 0)) {
+        snprintf(head, hn, "Out of memory (RAM): the game crashed with %lld MB of memory left", low < 0 ? 0 : low);
+        snprintf(advice, an, "%s", mem_advice);
+    } else if (code == 0xc00000fd) {
+        snprintf(head, hn, "Stack overflow");
+    } else if (code == 0xc0000374) {
+        snprintf(head, hn, "Memory corruption (heap)");
+    } else if (code == 0xc0000409 || sig == 6 || (error && has(line, "abort()"))) {
+        snprintf(head, hn, "The program aborted");
+    } else if (faulted || error) {
+        bool located = atomic_load(&where_ready);
+        const char *kind = code == 0xc0000005 || sig == 11 ? " (access violation)" : sig == 7 ? " (bus error)" :
+                           sig == 8 || code == 0xc0000094 ? " (arithmetic error)" : "";
+        if (located && is_driver(where_sym)) {
+            snprintf(head, hn, "A crash in the graphics driver%s", kind);
+            snprintf(advice, an, "%s Attach this report if it keeps happening.", driver);
+        } else if (located) snprintf(head, hn, "A crash%s in %s", kind, place_of(true));
+        else snprintf(head, hn, "A crash%s", kind);
+    } else if (crashed) {
+        snprintf(head, hn, "The game stopped without an error message");
+        snprintf(advice, an, "Attach this report: the log's last lines show what the game was doing.");
+    } else {
+        snprintf(head, hn, "No crash: a report made from the menu");
+        snprintf(advice, an, "Attach it to the bug report it belongs to.");
+    }
+}
+
+void diagnostics_reason(char *head, size_t hn, char *advice, size_t an, char *detail, size_t dn) {
+    classify(true, head, hn, advice, an, detail, dn);
+}
+
+void diagnostics_fatal_text(char *text, size_t capacity) {
+    char head[256], advice[512], detail[480];
+    classify(true, head, sizeof head, advice, sizeof advice, detail, sizeof detail);
+    snprintf(text, capacity, "Super Odyssey PC Recomp stopped.\n\nReason: %s\n\n%s\n\nError: %s", head, advice, detail);
 }
 
 // Preserve startup hardware information and the most recent fault/call chain,
@@ -182,7 +355,7 @@ static bool report_directory(char directory[1024]) {
     return snprintf(directory, 1024, "%s/reports", root) < 1024;
 }
 
-bool diagnostics_write_report(char *path, size_t capacity) {
+static bool write_report(char *path, size_t capacity, bool crash) {
     if (!capacity) return false;
     path[0] = 0;
     char directory[1024];
@@ -218,7 +391,7 @@ bool diagnostics_write_report(char *path, size_t capacity) {
     OSVERSIONINFOW v = {.dwOSVersionInfoSize = sizeof v};
     if (version && !version(&v)) snprintf(os, sizeof os, "Windows %lu.%lu build %lu", v.dwMajorVersion, v.dwMinorVersion, v.dwBuildNumber);
 #endif
-    // ---- Summary: what a player or a developer reads first (format 2, 2026-11-17)
+    // ---- Summary: what a player or a developer reads first (format 2, 2026-11-17; 3: the reason first, 2026-11-19)
     extern const char *odyssey_stage_name(void);
     extern uint64_t renderer_present_count(void);
     Module *main = loader_module("main");
@@ -229,15 +402,12 @@ bool diagnostics_write_report(char *path, size_t capacity) {
                  !strcmp(build_id, "b424be150a8e7d78") ? "1.4.1" : "another version");
     }
     bool faulted = atomic_load(&fault_ready), located = atomic_load(&where_ready);
-    // where: the recompiled game's code (f_<guest address>), a driver or other library (name.dll / .so), or ours
-    const char *place = "the PC port's own code";
-    if (located && !strncmp(where_sym, "f_7", 3)) place = "the game's own code (recompiled)";
-    else if (located && (strstr(where_sym, "nvoglv") || strstr(where_sym, "nvidia") || strstr(where_sym, "amdvlk") ||
-                         strstr(where_sym, "amdxx") || strstr(where_sym, "radv") || strstr(where_sym, "igvk") ||
-                         strstr(where_sym, "vulkan") || strstr(where_sym, "libvk")))
-        place = "the graphics driver";
-    else if (located && (strstr(where_sym, ".dll") || strstr(where_sym, ".so"))) place = "a library (see Where)";
-    else if (!located) place = "unknown (no exception: see the log's last lines)";
+    const char *place = place_of(located);
+    // The first lines: why, in plain words (a player sees these in the issue before anything else)
+    char head[256], advice[512], detail[480], feats[128];
+    classify(crash, head, sizeof head, advice, sizeof advice, detail, sizeof detail);
+    cpu_features(feats, sizeof feats);
+    fprintf(out, "Crash reason: %s\nWhat to try: %s\nError: %s\n\n", head, advice, detail);
     static const char *const tech[TEMPORAL_BACKEND_COUNT] = {"NVIDIA DLSS", "AMD FSR 3.1", "AMD FSR 4", "Intel XeSS", "AMD FSR 2"};
     static const char *const modes[DLSS_MODE_COUNT] = {"off", "native AA", "quality", "balanced", "performance"};
     int tb = g_settings.temporal_backend, tm = *settings_temporal_mode();
@@ -246,9 +416,9 @@ bool diagnostics_write_report(char *path, size_t capacity) {
     else snprintf(upscaler, sizeof upscaler, "%s %s", tech[tb], tm >= 0 && tm < DLSS_MODE_COUNT ? modes[tm] : "?");
     uint64_t secs = start_ns ? (plat_now_ns() - start_ns) / 1000000000ull : 0;
     char signature[256];  // (the same crash from two players gives the same line: what, where, stage)
-    snprintf(signature, sizeof signature, "%s | %s+%llx | %s | game %s", faulted ? fault_short : "no exception",
+    snprintf(signature, sizeof signature, "%s | %s+%llx | %s | game %s", faulted ? fault_short : head,
              located ? where_sym : "?", (unsigned long long)(located ? where_off : 0), odyssey_stage_name(), game);
-    fprintf(out, "Super Odyssey PC Recomp crash report (format 2)\n\n"
+    fprintf(out, "Super Odyssey PC Recomp %s %s (format 3)\n\n"
                  "=== Summary ===\n"
                  "What happened: %s\n"
                  "Where: %s (%s+%#llx)\n"
@@ -257,7 +427,8 @@ bool diagnostics_write_report(char *path, size_t capacity) {
                  "Memory: %llu MB in RAM, %llu MB committed, of %llu MB RAM\n"
                  "Game: Super Mario Odyssey %s (build %s); started by %s\n"
                  "Signature: %s\n\n",
-            faulted ? fault_short : "the game stopped without a processor exception (see the log's last lines)", place,
+            APP_VERSION, crash ? "crash report" : "report", faulted ? fault_short : crash ? "no processor exception (the reason "
+            "above is the log's last error line)" : "nothing (a report made from the menu)", place,
             located ? where_sym : "?", (unsigned long long)(located ? where_off : 0), odyssey_stage_name(),
             (unsigned long long)renderer_present_count(), (unsigned long long)(secs / 60), (unsigned long long)(secs % 60),
             settings_game_hz(), odyssey_native_hz(), upscaler,
@@ -265,10 +436,10 @@ bool diagnostics_write_report(char *path, size_t capacity) {
             (unsigned long long)(plat_resident_bytes() >> 20), (unsigned long long)(plat_private_bytes() >> 20),
             (unsigned long long)(plat_total_ram() >> 20), game, build_id, parent, signature);
     fprintf(out, "=== This PC ===\nApp: %s\nExecutable fingerprint: %s\nUTC: %s\nOS: %s\n"
-                 "CPU: %s\nLogical processors: %d\nRAM: %llu MiB\nGPU / driver: %s\n"
-                 "Fault: %s\n", APP_VERSION, build, date, os, cpu, SDL_GetNumLogicalCPUCores(),
+                 "CPU: %s (%s)\nLogical processors: %d\nRAM: %llu MiB\nGPU / driver: %s\n"
+                 "Fault: %s\n", APP_VERSION, build, date, os, cpu, feats, SDL_GetNumLogicalCPUCores(),
                  (unsigned long long)(plat_total_ram() >> 20), atomic_load(&gpu_ready) ? gpu : "unavailable (see log)",
-                 faulted ? fault : "No host exception recorded; see log for fatal errors and guest call chain.");
+                 faulted ? fault : "no processor exception (see Crash reason at the top, and the log's last lines)");
     if (main) {
         fprintf(out, "Game main build ID: ");
         for (unsigned i = 0; i < sizeof main->build_id; i++) fprintf(out, "%02x", main->build_id[i]);
@@ -284,63 +455,158 @@ bool diagnostics_write_report(char *path, size_t capacity) {
     return ok;
 }
 
+bool diagnostics_write_report(char *path, size_t capacity) { return write_report(path, capacity, false); }
+
+// The last crash, remembered for the next start: reports/.last-crash holds the report's name, its reason, and "seen"
+// once the next start's notice has shown it. Hidden, and not a .txt (issue #75: a player attached the old
+// last-crash.txt - only the report's name - instead of the report). Older builds wrote last-crash.txt: still read.
+static bool marker_path(char *marker, size_t n, bool legacy) {
+    char directory[1024];
+    if (!report_directory(directory)) return false;
+    return snprintf(marker, n, "%s/%s", directory, legacy ? "last-crash.txt" : ".last-crash") < (int)n;
+}
+
+static void marker_write(const char *name, const char *reason, bool seen) {
+    char marker[1100], legacy[1100];
+    if (!marker_path(marker, sizeof marker, false)) return;
+#ifdef _WIN32
+    SetFileAttributesA(marker, FILE_ATTRIBUTE_NORMAL);  // (a hidden file can't be replaced by fopen "wb")
+#endif
+    FILE *out = fopen(marker, "wb");
+    if (!out) return;
+    fprintf(out, "%s\n%s\n%s", name, reason, seen ? "seen\n" : "");
+    fclose(out);
+#ifdef _WIN32
+    SetFileAttributesA(marker, FILE_ATTRIBUTE_HIDDEN);
+#endif
+    if (marker_path(legacy, sizeof legacy, true)) remove(legacy);
+}
+
 bool diagnostics_capture_crash(char *path, size_t capacity) {
-    if (!diagnostics_write_report(path, capacity)) return false;
-    char directory[1024], marker[1100];
-    if (report_directory(directory)) {
-        snprintf(marker, sizeof marker, "%s/last-crash.txt", directory);
-        FILE *out = fopen(marker, "wb");
-        if (out) { fprintf(out, "%s\n", strrchr(path, '/') + 1); fclose(out); }
-    }
+    if (!write_report(path, capacity, true)) return false;
+    char head[256], advice[8], detail[8];
+    classify(true, head, sizeof head, advice, sizeof advice, detail, sizeof detail);
+    const char *a = strrchr(path, '/'), *b = strrchr(path, '\\');
+    marker_write((a > b ? a : b) + 1, head, false);
     return true;
 }
 
-bool diagnostics_last_crash(char *path, size_t capacity) {
+bool diagnostics_last_crash_info(char *path, size_t capacity, char *reason, size_t rn, bool *seen) {
+    if (reason && rn) reason[0] = 0;
+    if (seen) *seen = true;
     if (!capacity) return false;
     path[0] = 0;
-    char directory[1024], marker[1100], name[160];
+    char directory[1024], marker[1100], name[160], why[256] = "", flag[16] = "";
     if (!report_directory(directory)) return false;
-    snprintf(marker, sizeof marker, "%s/last-crash.txt", directory);
-    FILE *in = fopen(marker, "rb");
+    bool legacy = false;
+    FILE *in = marker_path(marker, sizeof marker, false) ? fopen(marker, "rb") : NULL;
+    if (!in && marker_path(marker, sizeof marker, true)) in = fopen(marker, "rb"), legacy = true;
     if (!in) return false;
     bool read = fgets(name, sizeof name, in) != NULL;
+    if (read && !legacy && fgets(why, sizeof why, in)) { if (!fgets(flag, sizeof flag, in)) flag[0] = 0; }
     fclose(in);
     if (!read) return false;
     name[strcspn(name, "\r\n")] = 0;
+    why[strcspn(why, "\r\n")] = 0;
     size_t n = strlen(name);
     if (n < 11 || strncmp(name, "report-", 7) || strcmp(name + n - 4, ".txt") || strpbrk(name, "/\\:")) return false;
     int len = snprintf(path, capacity, "%s/%s", directory, name);
     struct stat st;
     if (len < 0 || (size_t)len >= capacity || stat(path, &st) || !S_ISREG(st.st_mode)) { path[0] = 0; return false; }
+    if (reason && rn) snprintf(reason, rn, "%s", why[0] ? why : "unknown (a report from an older version)");
+    if (seen) *seen = legacy || !strncmp(flag, "seen", 4);  // (an older version's crash: no notice for it)
     return true;
 }
 
+bool diagnostics_last_crash(char *path, size_t capacity) {
+    return diagnostics_last_crash_info(path, capacity, NULL, 0, NULL);
+}
+
+void diagnostics_last_crash_seen(void) {
+    char path[1200], reason[256];
+    bool seen;
+    if (!diagnostics_last_crash_info(path, sizeof path, reason, sizeof reason, &seen) || seen) return;
+    const char *a = strrchr(path, '/'), *b = strrchr(path, '\\');
+    marker_write((a > b ? a : b) + 1, reason, true);
+}
+
+// ---- Attaching a report
+
+// The report's text for pasting into an issue: GitHub takes 65,536 characters in a comment, so a long report keeps its
+// first part (reason, summary, PC, settings) and the log's last lines. Markdown: the reason visible, the rest folded.
+static char *clip_text(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    if (size < 0 || size > (64l << 20)) { fclose(f); return NULL; }
+    fseek(f, 0, SEEK_SET);
+    char *text = malloc((size_t)size + 1);
+    if (!text) { fclose(f); return NULL; }
+    size_t got = fread(text, 1, (size_t)size, f);
+    fclose(f);
+    text[got] = 0;
+    for (size_t i = 0; i < got; i++) if (!text[i]) text[i] = ' ';
+    const char *a = strrchr(path, '/'), *b = strrchr(path, '\\'), *name = (a > b ? a : b) ? (a > b ? a : b) + 1 : path;
+    char reason[300] = "";
+    if (!strncmp(text, "Crash reason: ", 14)) snprintf(reason, sizeof reason, "%.*s", (int)strcspn(text + 14, "\r\n"), text + 14);
+    enum { BUDGET = 60000, HEAD = 20000 };
+    size_t head = got, tail_from = got;
+    const char *log = strstr(text, "\n--- Log");
+    if (got > BUDGET) {
+        head = log ? (size_t)(log - text) + 1 : HEAD;
+        if (head > HEAD) head = HEAD;
+        while (head && text[head - 1] != '\n') head--;
+        tail_from = got - (BUDGET - head);
+        while (tail_from < got && text[tail_from - 1] != '\n') tail_from++;
+    }
+    size_t cap = head + (got - tail_from) + 1024;
+    char *out = malloc(cap);
+    if (!out) { free(text); return NULL; }
+    int n = snprintf(out, cap, "**Crash report:** %s\n\n<details><summary>%s</summary>\n\n````text\n",
+                     reason[0] ? reason : "(see below)", name);
+    memcpy(out + n, text, head);
+    n += (int)head;
+    if (tail_from < got) {
+        n += snprintf(out + n, cap - n, "\n[... trimmed to fit a comment: the file %s has all of it ...]\n\n", name);
+        memcpy(out + n, text + tail_from, got - tail_from);
+        n += (int)(got - tail_from);
+    }
+    snprintf(out + n, cap - n, "\n````\n\n</details>\n");
+    free(text);
+    return out;
+}
+
 #ifndef _WIN32
-typedef struct { char *path; unsigned id; } ClipboardRequest;
+typedef struct { char *text; unsigned id; } ClipboardRequest;
 static atomic_uint copy_sequence;
 static void SDLCALL copy_on_event_thread(void *data) {
     ClipboardRequest *request = data;
     if (atomic_load(&copy_sequence) == request->id) {
-        bool copied = SDL_SetClipboardText(request->path);
+        bool copied = SDL_SetClipboardText(request->text);
         if (atomic_load(&copy_sequence) == request->id) atomic_store(&copy_status, copied ? 1 : -1);
     }
-    SDL_free(request->path);
+    free(request->text);
     SDL_free(request);
 }
 #endif
 
-bool diagnostics_copy_path(const char *path) {
+// text: malloc'd UTF-8, taken over
+static bool copy_text(char *text) {
     atomic_store(&copy_status, -1);
 #ifdef _WIN32
-    // Match the native filename encoding used by this runtime's fopen/open.
-    int count = MultiByteToWideChar(CP_ACP, 0, path, -1, NULL, 0);
-    if (!count) return false;
+    // (the log is UTF-8; a path in it may be in the ANSI code page: then the whole text as ANSI)
+    UINT cp = CP_UTF8;
+    int count = MultiByteToWideChar(cp, MB_ERR_INVALID_CHARS, text, -1, NULL, 0);
+    if (!count) cp = CP_ACP, count = MultiByteToWideChar(cp, 0, text, -1, NULL, 0);
+    if (!count) { free(text); return false; }
     HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE, (size_t)count * sizeof(wchar_t));
-    if (!data) return false;
-    wchar_t *text = GlobalLock(data);
-    if (!text) { GlobalFree(data); return false; }
-    MultiByteToWideChar(CP_ACP, 0, path, -1, text, count);
+    if (!data) { free(text); return false; }
+    wchar_t *wide = GlobalLock(data);
+    if (!wide) { GlobalFree(data); free(text); return false; }
+    MultiByteToWideChar(cp, 0, text, -1, wide, count);
     GlobalUnlock(data);
+    free(text);
     bool ok = false;
     // EmptyClipboard needs a real owner for SetClipboardData. A message-only
     // window also works before SDL creates its game window after an early fault.
@@ -354,18 +620,52 @@ bool diagnostics_copy_path(const char *path) {
     atomic_store(&copy_status, ok ? 1 : -1);
     return ok;
 #else
-    // SDL clipboard APIs are main-thread-only. Do not wait while the renderer
-    // owns its lock: the event thread might itself be waiting for rendering.
+    // SDL clipboard APIs are main-thread-only (called from the main thread, SDL runs it at once). Do not wait while
+    // the renderer owns its lock: the event thread might itself be waiting for rendering.
     ClipboardRequest *request = SDL_malloc(sizeof *request);
-    if (!request) return false;
-    request->path = SDL_strdup(path);
-    if (!request->path) { SDL_free(request); return false; }
+    if (!request) { free(text); return false; }
+    request->text = text;
     request->id = atomic_fetch_add(&copy_sequence, 1) + 1;
     atomic_store(&copy_status, 0);
     if (SDL_RunOnMainThread(copy_on_event_thread, request, false)) return true;
-    SDL_free(request->path); SDL_free(request);
+    free(request->text); SDL_free(request);
     atomic_store(&copy_status, -1);
     return false;
+#endif
+}
+
+bool diagnostics_copy_report(const char *path) {
+    char *text = clip_text(path);
+    if (!text) { atomic_store(&copy_status, -1); return false; }
+    return copy_text(text);
+}
+
+// The report in the file manager: Explorer with the file selected; elsewhere its folder (file managers differ in
+// how to select a file)
+bool diagnostics_show_report(const char *path) {
+#ifdef _WIN32
+    char native[1200], command[1300];
+    snprintf(native, sizeof native, "%s", path);
+    for (char *p = native; *p; p++) if (*p == '/') *p = '\\';
+    snprintf(command, sizeof command, "explorer.exe /select,\"%s\"", native);
+    STARTUPINFOA si = {.cb = sizeof si};
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessA(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) return false;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+#else
+    char url[3700] = "file://";
+    size_t n = strlen(url);
+    const char *a = strrchr(path, '/');
+    size_t len = a ? (size_t)(a - path) : strlen(path);
+    for (size_t i = 0; i < len && n + 4 < sizeof url; i++) {
+        unsigned char c = (unsigned char)path[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || strchr("/-_.~", c)) url[n++] = (char)c;
+        else n += (size_t)snprintf(url + n, sizeof url - n, "%%%02X", c);
+    }
+    url[n] = 0;
+    return SDL_OpenURL(url);
 #endif
 }
 
@@ -374,29 +674,41 @@ void diagnostics_fatal_dialog(const char *message) {
     // not erase the only fault log. Export remains best-effort after corruption.
     char path[1200];
     bool saved = diagnostics_capture_crash(path, sizeof path);
+    static char text[4096];
+    snprintf(text, sizeof text, "%s\n\n%s", message, saved ?
+             "A crash report was saved. To report this: Copy report text, then paste it into the issue - or Show report "
+             "file and attach that file." : "No crash report could be saved: attach the log named above.");
     const SDL_MessageBoxButtonData buttons[] = {
         {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Close"},
-        {0, 1, "Copy crash report"}};
+        {0, 1, "Copy report text"},
+        {0, 2, "Show report file"}};
     SDL_MessageBoxData box = {.flags = SDL_MESSAGEBOX_ERROR, .title = "Super Odyssey PC Recomp",
-        .message = message, .numbuttons = 2, .buttons = buttons};
-    int selected = 0;
-    if (!SDL_ShowMessageBox(&box, &selected)) {
-        fprintf(stderr, "[report] message box unavailable: %s\n", SDL_GetError());
+        .message = text, .numbuttons = saved ? 3 : 1, .buttons = buttons};
+    // (ODYSSEY_TEST_CRASH_DIALOG=copy / show / close: tests press that button without showing the box)
+    const char *test = getenv("ODYSSEY_TEST_CRASH_DIALOG");
+    for (int round = 0; round < 8; round++) {
+        int selected = 0;
+        if (test && *test) {
+            selected = !strcmp(test, "copy") ? 1 : !strcmp(test, "show") ? 2 : 0;
+            fprintf(stderr, "[report] dialog (test): %s\n", text);
+            if (round) selected = 0;
+        } else if (!SDL_ShowMessageBox(&box, &selected)) {
+            fprintf(stderr, "[report] message box unavailable: %s\n", SDL_GetError());
 #ifdef _WIN32
-        MessageBoxA(NULL, message, box.title, MB_ICONERROR | MB_OK);
+            MessageBoxA(NULL, text, box.title, MB_ICONERROR | MB_OK);
 #else
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, box.title, message, NULL);
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, box.title, text, NULL);
 #endif
-        return;
-    }
-    if (selected == 1) {
-        char text[1600];
-        if (saved || diagnostics_capture_crash(path, sizeof path)) {
-            bool copied = diagnostics_copy_path(path) && diagnostics_copy_status() == 1;
-            snprintf(text, sizeof text, "Report saved:\n%s\n\n%s", path,
-                     copied ? "Its path is copied. Paste it into the file picker to attach the report." :
-                              "Copy this path into the file picker to attach the report.");
-        } else snprintf(text, sizeof text, "Could not create a report. The original log remains at:\n%s", plat_log_path());
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, box.title, text, NULL);
+            return;
+        }
+        if (selected != 1 && selected != 2) return;
+        bool done = selected == 1 ? diagnostics_copy_report(path) && diagnostics_copy_status() == 1 : diagnostics_show_report(path);
+        fprintf(stderr, "[report] %s: %s\n", selected == 1 ? "copy report text" : "show report file", done ? "done" : "failed");
+        snprintf(text, sizeof text, "%s\n\n%s\n%s", message,
+                 selected == 1 ? (done ? "The report's text is copied. Paste it into the bug report (Ctrl+V)." :
+                                         "The text could not be copied. Use Show report file and attach the file:")
+                               : (done ? "The report file is selected in its folder: attach it to the bug report." :
+                                         "The folder could not be opened. The report file is:"),
+                 path);
     }
 }

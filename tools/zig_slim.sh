@@ -20,6 +20,14 @@ flags=()  # (the game code's flags as gamebuild.c add_cflags passes them to zig)
 for f in "$@"; do
     case $f in -march=*) c=${f#-march=}; flags+=("-mcpu=${c//-/_}") ;; *) flags+=("$f") ;; esac
 done
+# The runtime's flags: the game code's, but for the baseline x86-64 CPU. Every player's game code is linked with this
+# one runtime, also on CPUs older than the game code's x86-64-v3 (gamelib.c: those compile the game code for what
+# they have), so it must not use AVX, FMA or BMI: built for v3 it called the C library's fma, memcpy... with them, and
+# a CPU without AVX stopped at Play with an illegal instruction in odyssey_game.dll (#87, Pentium Gold 4415U).
+rtflags=()
+for f in "${flags[@]}"; do
+    case $f in -mcpu=*) rtflags+=("-mcpu=x86_64") ;; *) rtflags+=("$f") ;; esac
+done
 
 # 1. the headers: what the generated C (cpu.h, simd.h) and tools/gamelib_entry.c include
 printf '#include "cpu.h"\n#include "simd.h"\n' > $W/probe.c
@@ -35,14 +43,15 @@ cp $Z/zig.exe $Z/LICENSE $O/
 cp $Z/lib/std/std.zig $O/lib/std/
 
 # 2. the runtime: a probe DLL importing from the exe, linked the way the full zig does it (-v: its lld-link line).
-# The link gets the game code's flags too: zig builds its runtime (compiler_rt: memcpy, ...) for the link's CPU, and
-# without -mcpu that is this machine's - 0.1.0 / 0.1.1 shipped one with AVX-512 (crash on most Intel CPUs and AMD before
-# Zen 4: illegal instruction in odyssey_game.dll).
+# The link gets an explicit CPU (rtflags: the baseline): zig builds its runtime (compiler_rt, the MinGW C library:
+# memcpy, fma, ...) for the link's CPU, and without -mcpu that is this machine's - 0.1.0 / 0.1.1 shipped one with
+# AVX-512 (crash on most Intel CPUs and AMD before Zen 4: illegal instruction in odyssey_game.dll); with the game
+# code's x86-64-v3 it crashed on CPUs without AVX2 / FMA (#87).
 printf 'LIBRARY SuperOdysseyRecomp.exe\nEXPORTS\nprobe_host\n' > $W/host.def
 printf 'void probe_host(void);\n__declspec(dllexport) void probe(void) { probe_host(); }\n' > $W/dll.c
 ZA=$PWD/$Z/zig.exe
-(cd $W && $ZA dlltool -d host.def -l host.a -m i386:x86-64 && $ZA cc "${flags[@]}" -c dll.c -o dll.o &&
-    $ZA cc "${flags[@]}" -shared -o probe.dll dll.o host.a -v 2> link.log) || { echo "tools/zig_slim.sh: probe link failed ($W/link.log)"; exit 1; }
+(cd $W && "$ZA" dlltool -d host.def -l host.a -m i386:x86-64 && "$ZA" cc "${rtflags[@]}" -c dll.c -o dll.o &&
+    "$ZA" cc "${rtflags[@]}" -shared -o probe.dll dll.o host.a -v 2> link.log) || { echo "tools/zig_slim.sh: probe link failed ($W/link.log)"; exit 1; }
 line=$(grep '^lld-link ' $W/link.log | tail -1 | tr -d '\r')
 [ -n "$line" ] || { echo "tools/zig_slim.sh: no lld-link line in $W/link.log"; exit 1; }
 : > $O/rt/link.rsp
@@ -71,7 +80,12 @@ $O/zig.exe cc "${flags[@]}" -Iruntime '-DGAMELIB_ID="0"' -c tools/gamelib_entry.
     -OUT:probe2.dll dll.o host.a) || { echo "tools/zig_slim.sh: the slim zig's link failed"; exit 1; }
 built=$(find $W/cache2 -name '*.lib' | wc -l)
 [ "$built" = 0 ] || { echo "tools/zig_slim.sh: the slim zig still built $built libraries"; exit 1; }
-# 4. check: no instruction beyond the game code's CPU (x86-64-v3: AVX2) in what every player's game code is linked with
-wide=$(objdump -d $O/rt/*.lib $O/rt/*.obj 2>/dev/null | grep -c '%zmm\|%k[0-7]\b' || true)
-[ "$wide" = 0 ] || { echo "tools/zig_slim.sh: the runtime has $wide AVX-512 instructions"; exit 1; }
+# 4. check: no instruction beyond the baseline x86-64 in what every player's game code is linked with, whatever CPU
+# it was compiled for (no AVX / AVX-512 / FMA: VEX and EVEX mnemonics start with v; no BMI, LZCNT, POPCNT). TZCNT
+# is allowed: it is REP BSF, which an older CPU runs as BSF, and the compiler emits it for the baseline only where the
+# input can't be zero (the two agree then).
+wide=$(objdump -d $O/rt/*.lib $O/rt/*.obj 2>/dev/null | awk -F'\t' 'NF >= 3 { split($3, w, " "); print w[1] }' |
+    grep -E '^(v[a-z0-9]+|andn|bextr|blsi|blsmsk|blsr|bzhi|mulx|pdep|pext|rorx|sarx|shlx|shrx|lzcnt|popcnt)$' |
+    grep -vE '^(verr|verw)$' | sort | uniq -c | sort -rn || true)
+[ -z "$wide" ] || { echo "tools/zig_slim.sh: the runtime has instructions beyond the baseline x86-64:"; echo "$wide" | head; exit 1; }
 echo "build/zig-slim: $n headers, $(ls $O/rt | wc -l) runtime files, $(find $O -type f | wc -l) files, $(du -sh $O | cut -f1)"

@@ -40,7 +40,10 @@
 #include "setup.h"
 #include "steam_shortcut.h"
 
+#ifndef __APPLE__
+#endif
 extern "C" {
+#include "../diagnostics.h"
 #include "../gamebuild.h"
 #include "../gamelib.h"
 #include "../nxpkg.h"
@@ -229,6 +232,7 @@ static std::string g_step, g_fail_head, g_fail_hint;
 static std::atomic<float> g_frac{0};
 static uint64_t g_t0;                       // when the work started (time left)
 static bool g_code_only;                    // the files are there: only the game code (a new version of the app)
+static bool g_prepared_here;                // a shader preparation finished in this process (restart_after_prep)
 static volatile int g_cancel;
 static std::string g_job_game, g_job_keys, g_job_update;  // the choices the work runs with
 
@@ -419,16 +423,12 @@ static void *work(void *) {
     if (!setup_ready(root.c_str())) { fail("Game files incomplete", "Choose your game again."); return NULL; }
 #ifndef __APPLE__
     if (!g_code_only) {
-        // the release's pipeline seed: the pipeline states recorded while playing (exec.c
-        // load_pipeline_recipes keeps the ones this GPU supports), unless this PC has recorded its own already
-        char seed[1100];
-        mkdir("cache", 0755);
-        if (!file_exists("cache/graphics-pipelines.bin") && rt_resource("pipeline-seed.bin", "data/pipeline-seed.bin", seed, sizeof seed))
-            LOG("[setup] pipeline seed: %s\n", copy_file_to(seed, "cache/graphics-pipelines.bin") ? "copied" : "copy failed");
+        // (the release's pipeline seed is unpacked by vk_prepare_install: nvn/vulkan/device.c prep_seed)
         set_step("Compiling shaders...");
         g_frac = 0.55f;
         int code = vk_prepare_install(shader_progress, &g_cancel);
         if (code == -1) return NULL;  // (the window was closed)
+        g_prepared_here = code == 0;
         // not fatal: the game prepares what's missing at its next start
         if (code != 0) LOG("[setup] shader preparation ended with %d; the game finishes it at its start\n", code);
     }
@@ -437,6 +437,37 @@ static void *work(void *) {
     g_frac = 1;
     g_state = ST_DONE;
     return NULL;
+}
+
+// A shader preparation finished in this process (the setup's last step or the start page's): the game starts in a new
+// one, without the start page. The driver reads its own shader cache when the GPU is opened - here before the
+// preparation filled it - so ~24,800 programs found only there (exec.c pc_worker) were compiled again while playing:
+// ~1,800-2,000 libraries in the owner's new-user tests (2026-11-19), against 5 over 3 ms from a new process.
+// Windows: the new process is waited for (plat_exec), so a launcher waiting on this one still works.
+// ODYSSEY_PREP_NO_RESTART=1: played on here, the prepared pipeline cache file taken in.
+#ifndef __APPLE__
+extern "C" void vk_prepare_take_cache(void);
+#endif
+static void restart_after_prep(void) {
+#ifndef __APPLE__
+    if (!g_prepared_here) return;
+    g_prepared_here = false;
+    if (!getenv("ODYSSEY_PREP_NO_RESTART")) {
+        LOG("[setup] shaders prepared: the game starts again in a new process, straight into the game\n");
+        if (SDL_Window *w = ui_window()) SDL_HideWindow(w);
+#ifdef _WIN32
+        _putenv_s("ODYSSEY_NO_CONFIG", "1");
+        _putenv_s("ODYSSEY_CONFIG", ""), _putenv_s("ODYSSEY_PREP_PAGE_TEST", "");  // (tests' switches: the page again)
+#else
+        setenv("ODYSSEY_NO_CONFIG", "1", 1);
+        unsetenv("ODYSSEY_CONFIG"), unsetenv("ODYSSEY_PREP_PAGE_TEST");
+#endif
+        plat_exec(NULL);
+        LOG("[setup] the new process didn't start: playing on in this one\n");
+        if (SDL_Window *w = ui_window()) SDL_ShowWindow(w);
+    }
+    vk_prepare_take_cache();
+#endif
 }
 
 static void start_work(void) {
@@ -570,6 +601,7 @@ static void row(const char *label, const std::string &value, const char *empty, 
 // Every start shows the settings first (the menu's tabs on the card), then Play or Exit - the settings that only take
 // effect at the next start (memory use, warm-up...) can be set before the game is there. "Show at start" turns it off;
 // the menu in play (F1, the controller's Select + Start) keeps every setting. Test runs and --play go straight in.
+extern "C" bool input_motion_only_event(const SDL_Event *e);  // runtime/hle/input.c
 static std::atomic<bool> g_config{false};
 static std::atomic<int> g_config_result{0};  // 1: Play, 2: Exit
 bool setup_config_shown(void) { return g_config.load(); }
@@ -584,6 +616,10 @@ extern "C" void vk_prepare_skip_this_start(void);
 enum { PREP_NONE, PREP_ASK, PREP_RUN, PREP_DONE };
 static std::atomic<int> g_prep{PREP_NONE}, g_prep_phase{0}, g_prep_done{0}, g_prep_total{0}, g_prep_code{0};
 static volatile int g_prep_cancel;
+static bool g_prep_stay;  // "Compile, play later" (#101): back to the start page when it is done, not into the game
+// (#101, second comment) the start page's own "Compile shaders" button: shown while a full preparation is due, so a
+// player sees it before pressing Play and can get the game ready without starting it
+static bool g_prep_due_home;
 static uint64_t g_prep_t0, g_prep_phase_t0;
 static int g_prep_last_phase = -1;
 static void prep_page_progress(int phase, int done, int total) {
@@ -592,6 +628,7 @@ static void prep_page_progress(int phase, int done, int total) {
 static void *prep_page_work(void *) {
     int code = vk_prepare_install(prep_page_progress, &g_prep_cancel);
     g_prep_code = code;
+    if (code == 0) g_prepared_here = true;
     if (code != 0) vk_prepare_skip_this_start();  // (cancelled or failed: what is done stays; the game starts)
     g_prep = PREP_DONE;
     return NULL;
@@ -624,10 +661,12 @@ static void prep_card(float scale, ImFont *big, ImVec2 c0, float cardw, float ca
                            "that changes them, or when you ask for it in the menu."));
         ImGui::PopStyleColor();
         ImGui::Dummy(ImVec2(0, 18 * scale));
-        if (accent_button("Compile now", scale)) prep_start();
+        if (accent_button("Compile now", scale)) { g_prep_stay = false; prep_start(); }
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);
         ImGui::SameLine(0, 16 * scale);
-        if (accent_button("Later", scale)) { vk_prepare_skip_this_start(); g_prep = PREP_DONE; }
+        if (accent_button("Compile, play later", scale)) { g_prep_stay = true; prep_start(); }
+        ImGui::SameLine(0, 16 * scale);
+        if (accent_button("Later", scale)) { g_prep_stay = false; vk_prepare_skip_this_start(); g_prep = PREP_DONE; }
     } else {
         int ph = g_prep_phase.load(), d = g_prep_done.load(), n = g_prep_total.load();
         uint64_t now = SDL_GetTicksNS();
@@ -654,10 +693,12 @@ static void prep_card(float scale, ImFont *big, ImVec2 c0, float cardw, float ca
         ImGui::TextUnformatted(t);
         ImGui::PopStyleColor();
         ImGui::Dummy(ImVec2(0, 18 * scale));
-        if (accent_button("Stop and play", scale)) g_prep_cancel = 1;
+        if (accent_button(g_prep_stay ? "Stop" : "Stop and play", scale)) g_prep_cancel = 1;
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere(-1);
         ImGui::PushStyleColor(ImGuiCol_Text, kTextDimV);
-        ImGui::TextWrapped("%s", tr("What is compiled so far is kept; the rest is made while you play."));
+        ImGui::TextWrapped("%s", tr(g_prep_stay ? "What is compiled so far is kept; the rest is made while you play. "
+                                                  "When it is done you are back on the start page."
+                                                : "What is compiled so far is kept; the rest is made while you play."));
         ImGui::PopStyleColor();
     }
     ImGui::PopTextWrapPos();
@@ -673,6 +714,56 @@ bool menu_sidebar_focused(void);
 void menu_focus_sidebar(void);
 void menu_hint_bar(float scale, int mode);
 float menu_hint_bar_height(float scale);
+// The last session's crash (2026-11-19), at the next start: its reason, and the report's text copied or its file shown
+// for a bug report (on Linux / the Steam Deck the crash's own box can't have buttons, so this is where they are)
+static char g_crash_path[1200], g_crash_reason[256];
+static bool g_crash_notice;
+static int g_crash_action;  // 1 copied (see diagnostics_copy_status), 2 shown, 3 not shown
+static void crash_notice(float scale, float w) {
+    if (!g_crash_notice) return;
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImVec2 p0 = ImGui::GetCursorScreenPos();
+    float in = 20 * scale;
+    dl->ChannelsSplit(2);
+    dl->ChannelsSetCurrent(1);
+    ImGui::SetCursorScreenPos(ImVec2(p0.x + in, p0.y + in * 0.8f));
+    ImGui::BeginGroup();
+    ImGui::PushTextWrapPos(p0.x + w - in);
+    ImGui::TextColored(kAccentV, "%s", tr("THE GAME CRASHED LAST TIME"));
+    ImGui::TextWrapped("%s", g_crash_reason);
+    ImGui::Dummy(ImVec2(0, 4 * scale));
+    if (small_button("Copy report text", scale)) g_crash_action = diagnostics_copy_report(g_crash_path) ? 1 : -1;
+    ImGui::SameLine();
+    if (small_button("Show report file", scale)) g_crash_action = diagnostics_show_report(g_crash_path) ? 2 : 3;
+    ImGui::SameLine();
+    bool dismiss = small_button("Dismiss", scale);
+    const char *a = strrchr(g_crash_path, '/'), *b = strrchr(g_crash_path, '\\');
+    const char *name = a > b ? a + 1 : b ? b + 1 : g_crash_path;
+    char status[1400];
+    int copy = diagnostics_copy_status();
+    if (g_crash_action == 1 && copy > 0) snprintf(status, sizeof status, "%s", tr("Copied: paste it into the bug report (Ctrl+V)."));
+    else if (g_crash_action == 1 && copy == 0) snprintf(status, sizeof status, "%s", tr("Copying..."));
+    else if (g_crash_action == 1 || g_crash_action == -1)
+        snprintf(status, sizeof status, "%s %s", tr("Could not copy. Attach the file instead:"), g_crash_path);
+    else if (g_crash_action == 2) snprintf(status, sizeof status, "%s %s", tr("Its folder is open: attach the file"), name);
+    else if (g_crash_action == 3) snprintf(status, sizeof status, "%s %s", tr("The report file:"), g_crash_path);
+    else snprintf(status, sizeof status, "%s", tr("To report it: copy the report's text and paste it into the bug report, or "
+                                                 "attach the file."));
+    ImGui::PushStyleColor(ImGuiCol_Text, kTextDimV);
+    ImGui::TextWrapped("%s", status);
+    ImGui::PopStyleColor();
+    ImGui::PopTextWrapPos();
+    ImGui::EndGroup();
+    float y1 = ImGui::GetItemRectMax().y + in * 0.8f;
+    dl->ChannelsSetCurrent(0);
+    dl->AddRectFilled(p0, ImVec2(p0.x + w, y1), theme_u32(kSidebarV), 14 * scale);
+    dl->AddRect(p0, ImVec2(p0.x + w, y1), theme_u32(kAccentV, 0.6f), 14 * scale, 0, fmaxf(1, 1.5f * scale));
+    dl->ChannelsMerge();
+    ImGui::SetCursorScreenPos(ImVec2(p0.x, y1 + 14 * scale));
+    ImGui::Dummy(ImVec2(w, 0));
+    if (dismiss) g_crash_notice = false;
+}
+
 static bool g_cfg_settings;      // the Settings view (else Home)
 static int g_cfg_focus = 1;      // put the cursor on Play (1) / Settings (2) next frame; 0: leave it
 static void home_view(float scale, ImFont *big, ImVec2 c0, float cardw, float cardh, float pad) {
@@ -681,6 +772,9 @@ static void home_view(float scale, ImFont *big, ImVec2 c0, float cardw, float ca
     float bh = ImGui::GetFontSize() + 2 * 14 * scale;
     // the left column: the buttons, centred in the card's height
     float stack = bh * 1.35f + 2 * (bh + 14 * scale) + 70 * scale;
+#ifndef __APPLE__
+    if (g_prep_due_home) stack += bh + 14 * scale + ImGui::GetFontSize() * 2.6f;
+#endif
     float y0 = c0.y + fmaxf(pad * 3.2f, (cardh - stack) * 0.5f);
     ImGui::SetCursorScreenPos(ImVec2(c0.x + pad * 1.6f, y0));
     ImGui::BeginGroup();
@@ -689,6 +783,16 @@ static void home_view(float scale, ImFont *big, ImVec2 c0, float cardw, float ca
     ImGui::PopFont();
     if (g_cfg_focus == 1) { ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow()); ImGui::SetNavCursorVisible(true); g_cfg_focus = 0; }
     ImGui::Dummy(ImVec2(0, 6 * scale));
+#ifndef __APPLE__
+    if (g_prep_due_home) {  // (compiles, then this page again: Play starts at once)
+        if (plain_button("Compile shaders now", scale, ImVec2(bw, bh))) { g_prep_stay = true; prep_start(); }
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + bw);
+        ImGui::TextColored(kTextDimV, "%s", tr("The shaders need compiling (a new install or an update that changed them). "
+                                               "Do it now and play later, or press Play and choose then."));
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 6 * scale));
+    }
+#endif
     if (plain_button("Settings", scale, ImVec2(bw, bh))) { g_cfg_settings = true; menu_focus_sidebar(); }
     if (g_cfg_focus == 2) { ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow()); ImGui::SetNavCursorVisible(true); g_cfg_focus = 0; }
     if (plain_button("Exit", scale, ImVec2(bw, bh))) g_config_result = 2;
@@ -704,8 +808,9 @@ static void home_view(float scale, ImFont *big, ImVec2 c0, float cardw, float ca
     // the right column: the settings that matter most, at a glance (Settings changes them)
     float rx = c0.x + pad * 1.6f + colw + pad * 2.2f, rw = c0.x + cardw - pad * 1.6f - rx;
     if (rw > 260 * scale) {
-        ImGui::SetCursorScreenPos(ImVec2(rx, y0));
+        ImGui::SetCursorScreenPos(ImVec2(rx, g_crash_notice ? fminf(y0, c0.y + pad * 3.2f) : y0));
         ImGui::BeginGroup();
+        crash_notice(scale, rw);
         ImDrawList *dl = ImGui::GetWindowDrawList();
         ImVec2 b0 = ImGui::GetCursorScreenPos();
         float lh = ImGui::GetFontSize() * 1.75f;
@@ -879,10 +984,22 @@ bool config_run(void) {
 #endif
     LOG("[config] show at start %d, shaders to prepare %d%s\n", g_settings.config_at_start, prep_due,
         force ? " (ODYSSEY_CONFIG)" : "");
-    if (force ? atoi(force) == 0 : !g_settings.config_at_start && !prep_due) return true;
+    {   // the last session crashed (its notice not shown yet): this page shows once for it, even when turned off
+        bool seen = true;
+        g_crash_notice = diagnostics_last_crash_info(g_crash_path, sizeof g_crash_path, g_crash_reason, sizeof g_crash_reason,
+                                                     &seen) && !seen;
+        if (g_crash_notice) {
+            LOG("[config] the last session crashed: %s (%s)\n", g_crash_reason, g_crash_path);
+            diagnostics_last_crash_seen();
+        }
+    }
+    if (force ? atoi(force) == 0 : !g_settings.config_at_start && !prep_due && !g_crash_notice) return true;
     ui_window_init();
 #ifndef __APPLE__
     if (prep_due && !g_settings.config_at_start) g_prep = PREP_ASK;  // (straight to the question)
+#ifndef __APPLE__
+    g_prep_due_home = prep_due;
+#endif
 #endif
     SDL_Window *w = ui_window();
     LOG("[config] the configuration page before the game\n");
@@ -912,7 +1029,7 @@ bool config_run(void) {
             if (e.type == SDL_EVENT_QUIT) result = 2;
             else {
                 if (e.type == SDL_EVENT_GAMEPAD_ADDED && !SDL_GetGamepadFromID(e.gdevice.which)) SDL_OpenGamepad(e.gdevice.which);
-                menu_handle_event(&e);
+                if (!input_motion_only_event(&e)) menu_handle_event(&e);  // (the Deck's own controller under Steam Input: gyro only)
             }
         }
         menu_apply_window_requests(w);
@@ -924,7 +1041,7 @@ bool config_run(void) {
         {   // (60 frames a second: the page is static, and a mailbox swapchain would otherwise draw it flat out)
             static uint64_t next;
             uint64_t now = SDL_GetTicksNS();
-            if (next > now && next - now < 100000000ull) SDL_DelayPrecise(next - now);
+            if (next > now && next - now < 100000000ull) SDL_DelayNS(next - now);  // (a sleep, no spinning: a page, not the game)
             next = (next > now && next - now < 100000000ull ? next : now) + 16666667ull;
         }
         frame++;
@@ -950,13 +1067,18 @@ bool config_run(void) {
         bool s = shot && frame == atol(shot);
 #ifndef __APPLE__
         // ODYSSEY_PREP_PAGE_TEST=1 (tests): the question at frame 60 (build/prep_ask.png), Compile now at 90, the progress
-        // at 900 (build/prep_run.png), then stopped
+        // at 900 (build/prep_run.png), then stopped. =play: Compile now at 90, left to finish, then the game (a new
+        // player's path: tools' stutter census)
         static const char *pt = getenv("ODYSSEY_PREP_PAGE_TEST");
         const char *pshot = NULL;
-        if (pt) {
+        if (pt && !strcmp(pt, "play")) {
+            if (frame == 30 && g_prep.load() == PREP_NONE) g_prep = PREP_ASK;
+            if (frame == 90 && g_prep.load() == PREP_ASK) { g_prep_stay = false; prep_start(); }
+        } else if (pt) {
             if (frame == 30 && g_prep.load() == PREP_NONE) g_prep = PREP_ASK;
             if (frame == 60) pshot = "build/prep_ask.png";
-            if (frame == 90 && g_prep.load() == PREP_ASK) prep_start();
+            if (frame == 90 && g_prep.load() == PREP_ASK) { g_prep_stay = !strcmp(pt, "stay"); prep_start(); }
+            if (!strcmp(pt, "stay") && frame > 901 && g_prep.load() == PREP_NONE) { pshot = "build/prep_back.png"; result = 2; }
             if (frame == 900) pshot = "build/prep_run.png";
             if (frame == 901) g_prep_cancel = 1;
         }
@@ -970,7 +1092,13 @@ bool config_run(void) {
         if (result == 1 && !s && g_prep.load() == PREP_NONE && vk_prepare_due()) { g_prep = PREP_ASK; result = 0; }
         static bool quit_after;  // (closed while compiling: it stops first, then the program exits)
         if (g_prep.load() == PREP_RUN && result == 2) { g_prep_cancel = 1; quit_after = true; result = 0; }
-        if (g_prep.load() == PREP_DONE && !result) result = quit_after ? 2 : 1;
+        if (g_prep.load() == PREP_DONE && !result) {
+            if (g_prep_stay && !quit_after) {  // (compiled, not played: the start page again, Play starts the game)
+                g_prep_stay = false, g_prep = PREP_NONE, g_cfg_settings = false, g_cfg_focus = 1;
+                g_prep_due_home = g_prep_code.load() != 0;  // (stopped: still due, the button stays)
+                LOG("[config] shader compilation ended (code %d); back on the start page (play later)\n", g_prep_code.load());
+            } else result = quit_after ? 2 : 1;
+        }
 #endif
     }
 #ifndef __APPLE__
@@ -980,6 +1108,7 @@ bool config_run(void) {
     menu_setup_mode(false);
     settings_save();
     LOG("[config] %s\n", result == 1 ? "play" : "exit");
+    if (result == 1) restart_after_prep();
     return result == 1;
 }
 
@@ -1231,6 +1360,7 @@ bool setup_run(const char *root) {
                 menu_request_window_apply();
                 menu_apply_window_requests(w);
             }
+            if (!g_code_only) restart_after_prep();
             break;
         }
 #ifdef __APPLE__
@@ -1262,13 +1392,15 @@ bool setup_run(const char *root) {
             SDL_Delay(16);
         }
 #endif
-        // While it works, about 15 pictures a second are plenty for a progress bar: drawn at the display's rate the
-        // page took most of a core the game code's compile could use (a Steam Deck has four).
-        if (busy) SDL_Delay(50);
-        else {  // (60 a second otherwise: with a mailbox swapchain the page was drawn thousands of times a second)
+        // 60 pictures a second, also while it works (owner 2026-11-18: at the ~15 a second it had while installing, the
+        // page and its progress bar looked stuck). The cost is small now that it is paced: on a Steam Deck the page at
+        // 60 took 9.5% of one core, a fifth of that in the precise delay's spinning - a plain sleep here. (Unpaced, on
+        // a mailbox swapchain, it was drawn thousands of times a second and took most of a core from the compile.)
+        (void)busy;
+        {
             static uint64_t next;
             uint64_t now = SDL_GetTicksNS();
-            if (next > now && next - now < 100000000ull) SDL_DelayPrecise(next - now);
+            if (next > now && next - now < 100000000ull) SDL_DelayNS(next - now);
             next = (next > now && next - now < 100000000ull ? next : now) + 16666667ull;
         }
     }

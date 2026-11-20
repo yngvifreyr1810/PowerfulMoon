@@ -260,6 +260,9 @@ Ultra ||| 울트라
 High (2x) ||| 높음 (2x)
 Ultra (4x) ||| 울트라 (4x)
 Shadow quality ||| 그림자 품질
+Draw distance ||| 표시 거리
+Very high ||| 매우 높음
+Enemies, coins, characters and other objects appear from farther away, and models switch to their simpler versions and fade out farther away. High: twice the Switch's distances, Very high: four times. Faraway objects then also keep moving, as they do near you. Costs CPU and GPU time in large kingdoms. The landscape itself is unchanged. Switch: as on the Switch. Changes at once. ||| 적, 코인, 캐릭터 등의 오브젝트가 더 먼 곳에서부터 보이고, 모델이 더 멀리에서 단순한 버전으로 바뀌거나 사라집니다. 높음: Switch 거리의 2배, 매우 높음: 4배. 먼 곳의 오브젝트도 가까이 있을 때처럼 계속 움직입니다. 큰 왕국에서 CPU와 GPU 시간을 더 씁니다. 지형 자체는 바뀌지 않습니다. Switch: Switch와 같음. 바로 적용됩니다.
 Draws the game's shadow maps at 2x or 4x their size: sharper, steadier shadow edges without the stair steps. Costs some GPU time and video memory (Ultra: about 300 MB more). Switch: as on the Switch. Applies from the next area loaded. ||| 게임의 그림자 맵을 2배 또는 4배 크기로 그립니다: 계단 현상 없이 더 선명하고 안정적인 그림자 가장자리. GPU 시간과 비디오 메모리를 조금 더 씁니다(울트라: 약 300 MB 추가). Switch: Switch와 같음. 다음에 불러오는 지역부터 적용됩니다.
 Above 60, the game draws that many frames per second, each a real frame showing Mario, the camera and the world where they are at that moment (no generated in-between images); gameplay itself - physics, enemies, timers - keeps the game's own 60 steps a second, as it was made. Choose your display's refresh rate or a divisor of it (a 144 Hz screen: 72 or 144), and a PC that can draw that fast - 60 FPS on a 144 Hz screen can't be smooth: frames alternate 2 and 3 refreshes (a judder no VSync setting removes; G-Sync / FreeSync does). Match display picks that rate for you. 60 FPS matches the Switch and uses the least power. Changes at once. ||| 60을 넘으면 게임이 초당 그만큼의 프레임을 그립니다. 각 프레임은 그 순간의 마리오, 카메라, 세계를 보여 주는 실제 프레임입니다(생성된 중간 이미지 없음). 물리, 적, 타이머 등 게임 진행 자체는 원래대로 초당 60단계를 유지합니다. 화면 주사율이나 그 약수(144Hz 화면: 72 또는 144)를 고르고, 그만큼 빠르게 그릴 수 있는 PC가 필요합니다 - 144Hz 화면에서 60 FPS는 부드러울 수 없습니다: 프레임이 2번과 3번 주사를 번갈아 차지합니다(VSync로는 없앨 수 없는 끊김, G-Sync / FreeSync로는 없어짐). '디스플레이에 맞춤'이 그 값을 골라 줍니다. 60 FPS는 Switch와 같고 전력을 가장 적게 씁니다. 바로 바뀝니다.
 Early frame hand-off ||| 빠른 프레임 전달
@@ -404,7 +407,7 @@ On (the default). Off if objects flicker. ||| 켜기(기본값). 물체가 깜�
 Uses one more CPU core to feed the graphics card, for more FPS. ||| CPU 코어를 하나 더 써서 그래픽 카드에 일을 넘겨 FPS를 높입니다.
 Auto (the default): on with NVIDIA cards, off with AMD and Intel ones and on the Steam Deck. ||| 자동(기본값): NVIDIA 카드에서는 켜기, AMD와 Intel 카드 및 Steam Deck에서는 끄기.
 How many frames a second the game draws. The Switch draws 60. ||| 게임이 1초에 그리는 프레임 수입니다. Switch는 60입니다.
-60 FPS (the default, as on the Switch). Your screen's rate if your PC holds it steadily. ||| 60 FPS(기본값, Switch와 같음). PC가 안정적으로 유지하면 화면의 주사율.
+60 FPS (the default, as on the Switch). Your screen's rate if your PC holds it steadily. Above 60, the busiest places (New Donk City seen from high up) can drop frames on any PC. ||| 60 FPS(기본값, Switch와 같음). PC가 안정적으로 유지하면 화면의 주사율. 60을 넘으면 가장 복잡한 곳(높은 곳에서 본 뉴 동크 시티)에서는 어떤 PC에서도 프레임이 떨어질 수 있습니다.
 A small frame rate counter in the corner. ||| 구석에 작은 프레임 레이트 표시를 띄웁니다.
 Frame rate, frame times, and how busy the graphics card, CPU and memory are. ||| 프레임 레이트, 프레임 시간, 그리고 그래픽 카드·CPU·메모리 사용량입니다.
 Off (the default). On to find out why a scene is slow. ||| 끄기(기본값). 장면이 느린 이유를 찾을 때 켜기.
@@ -452,3 +455,30 @@ YOUR SETTINGS ||| 내 설정
 Version ||| 버전
 Mouse in menus ||| 메뉴에서 마우스
 In the game's own menus (title, file select, pause menu, shops, dialogue): left click confirms (A), right click or the mouse's Back button goes back (B), the wheel moves up and down. Mouse buttons you bound to something else keep that binding. Not while you play. ||| 게임 자체 메뉴(타이틀, 파일 선택, 일시 정지 메뉴, 상점, 대화)에서: 왼쪽 클릭은 확인(A), 오른쪽 클릭이나 마우스의 뒤로 버튼은 뒤로(B), 휠은 위아래로 이동합니다. 다른 동작에 지정한 마우스 버튼은 그 지정을 유지합니다. 플레이 중에는 동작하지 않습니다.
+Sharper HUD and menus ||| 더 선명한 HUD와 메뉴
+The game's HUD, text and menus are drawn from artwork made for the Switch's 720 lines; enlarged on a bigger screen their edges turn soft. On: they are sharpened on screens of 900 lines and more (nothing below - a Steam Deck's screen stays as it is), the more the bigger the screen, without adding outlines or halos. It makes edges crisper, not more detailed. Off: as the game draws them. Changes at once. ||| 게임의 HUD, 글자와 메뉴는 Switch의 720줄에 맞춰 만든 그림으로 그려집니다. 더 큰 화면에서는 확대되어 가장자리가 흐려집니다. 켬: 900줄 이상의 화면에서 선명하게 합니다(그 아래에서는 적용되지 않음 - Steam Deck 화면은 그대로). 화면이 클수록 더 강하게, 윤곽선이나 후광 없이 적용됩니다. 가장자리가 또렷해질 뿐 세부가 늘어나지는 않습니다. 끔: 게임이 그리는 그대로. 바로 적용됩니다.
+Crisper edges on the game's HUD, text and menus on large screens. ||| 큰 화면에서 게임의 HUD, 글자와 메뉴의 가장자리가 더 또렷해집니다.
+On (the default). Off if the HUD looks too hard to you. ||| 켬(기본값). HUD가 너무 딱딱해 보이면 끄세요.
+Frame rate counter ||| 프레임 레이트 표시
+Gyro sensitivity ||| 자이로 감도
+How far turning the controller turns what the game aims with motion (first-person views, aiming Cappy). 100% is the controller's own movement. ||| 컨트롤러를 돌렸을 때 게임이 모션으로 조준하는 대상(1인칭 시점, 캐피 조준)이 얼마나 돌아가는지 정합니다. 100%는 컨트롤러의 실제 움직임 그대로입니다.
+Shake threshold ||| 흔들기 기준
+Jolts smaller than this are not passed on to the game, so the controller's own rumble (hidden moons nearby) or bumping it doesn't throw Cappy. Raise it until rumble no longer throws; real shakes then need to be a little stronger. Off passes everything on, as the Switch does. ||| 이보다 작은 흔들림은 게임에 전달되지 않습니다. 그래서 컨트롤러 자체의 진동(근처에 숨겨진 문)이나 부딪힘으로 캐피가 던져지지 않습니다. 진동으로 더 이상 던져지지 않을 때까지 올리세요. 그러면 실제로 흔들 때 조금 더 세게 흔들어야 합니다. 끄기는 Switch처럼 모든 움직임을 전달합니다.
+Sticks ||| 스틱
+Left stick deadzone ||| 왼쪽 스틱 데드존
+Right stick deadzone ||| 오른쪽 스틱 데드존
+How far a stick moves before it counts. Raise it if Mario, the camera or the map pointer moves on its own (the map's pointer drifting away from what you select is a sign of it). The default is 5%. ||| 스틱이 얼마나 움직여야 입력으로 인식되는지 정합니다. 마리오, 카메라 또는 지도 포인터가 저절로 움직이면 올리세요(지도에서 선택한 곳에서 포인터가 벗어나는 것이 그 신호입니다). 기본값은 5%입니다.
+Left stick range ||| 왼쪽 스틱 범위
+Right stick range ||| 오른쪽 스틱 범위
+How much of a full tilt the stick's end gives. Above 100% a full tilt comes before the stick's end (a worn or small stick that doesn't reach it); below 100% the stick's end gives less than a full tilt. ||| 스틱을 끝까지 밀었을 때 최대 기울기의 몇 %가 되는지 정합니다. 100%보다 높으면 스틱 끝에 닿기 전에 최대 기울기가 됩니다(끝까지 닿지 않는 낡거나 작은 스틱용). 100%보다 낮으면 스틱 끝이 최대 기울기보다 작아집니다.
+Now: left %3.0f%%, right %3.0f%% of a full tilt ||| 현재: 왼쪽 %3.0f%%, 오른쪽 %3.0f%% (최대 기울기 기준)
+5% (the default). Higher if Mario moves on his own. ||| 5%(기본값). 마리오가 저절로 움직이면 더 높게.
+5% (the default). Higher if the camera or the map pointer drifts on its own. ||| 5%(기본값). 카메라나 지도 포인터가 저절로 움직이면 더 높게.
+Compile shaders now ||| 지금 셰이더 컴파일
+The shaders need compiling (a new install or an update that changed them). Do it now and play later, or press Play and choose then. ||| 셰이더를 컴파일해야 합니다(새로 설치했거나 셰이더가 바뀐 업데이트). 지금 하고 나중에 플레이하거나, 플레이를 누른 뒤 선택하세요.
+Compile, play later ||| 컴파일하고 나중에 플레이
+What is compiled so far is kept; the rest is made while you play. When it is done you are back on the start page. ||| 지금까지 컴파일된 것은 유지되고, 나머지는 플레이하면서 만들어집니다. 끝나면 시작 화면으로 돌아갑니다.
+Bloom quality ||| 블룸 품질
+The game draws its glow (bloom, light shafts) as a small image, a quarter of its picture's width, and stretches it over the screen; its edges along bright sky and lights then show small steps, more visible next to a sharp high-resolution picture. High: the glow is stretched with a smoother filter, so those edges fade evenly. The glow keeps the game's shape and strength, and its detail stays the game's (it isn't drawn at a higher resolution). High also smooths the hazy far horizon behind the kingdoms (a small picture stretched over the sky, whose texels show as blocks and blobs). Costs a little GPU time (about 0.3 ms a frame at 4K on a fast graphics card). Switch: as on the Switch. Changes at once. ||| 게임은 빛 번짐(블룸, 빛줄기)을 화면 너비의 4분의 1 크기인 작은 이미지로 그린 뒤 화면 전체로 늘립니다. 그래서 밝은 하늘과 조명 가장자리에 작은 계단이 보이며, 선명한 고해상도 화면에서 더 눈에 띕니다. 높음: 더 부드러운 필터로 늘려서 가장자리가 고르게 흐려집니다. 빛 번짐의 모양과 세기, 디테일은 게임 그대로입니다(더 높은 해상도로 그리지는 않습니다). 높음은 왕국 뒤편의 뿌연 먼 지평선도 부드럽게 합니다(하늘에 늘려 그린 작은 그림이라 텍셀이 블록과 얼룩으로 보입니다). GPU 시간이 조금 듭니다(빠른 그래픽 카드, 4K에서 프레임당 약 0.3ms). Switch: Switch와 같습니다. 즉시 적용됩니다.
+Smoother edges on the glow around bright sky and lights, and a smoother far horizon. ||| 밝은 하늘과 조명 주변 빛 번짐의 가장자리와 먼 지평선이 더 부드러워집니다.
+Switch (the default, as on the Switch). High at high resolutions. ||| Switch(기본값, Switch와 같음). 높은 해상도에서는 높음.

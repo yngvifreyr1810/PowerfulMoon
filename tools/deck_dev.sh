@@ -20,7 +20,7 @@ MODE=${1:-quick}
 
 # the sources, LF line endings (the working copy may be CRLF), modification times kept so make stays incremental
 TAR=$(mktemp)
-tar -cf "$TAR" runtime tools Makefile data/pipeline-seed.bin third_party/fsr2
+tar -cf "$TAR" runtime tools Makefile data/pipeline-seed.bin.zst third_party/fsr2
 timeout 300 scp -q -o BatchMode=yes "$(cygpath -m "$TAR" 2>/dev/null || echo "$TAR")" "$DECK:sopr-sync.tar"
 rm -f "$TAR"
 # (unpacked into a staging folder and made LF there; only files whose content differs are copied into ~/sopr, so

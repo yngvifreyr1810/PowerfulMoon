@@ -22,6 +22,7 @@ struct KThread {
     KObject obj;  // signaled when the thread exits
     Cpu cpu;
     pthread_t host;
+    void *win_handle;      // (Windows: the host thread's handle when started with a reserved stack - kernel.c thread_start)
     uint64_t entry, tlr, id;
     uint32_t handle;
     int prio, core;

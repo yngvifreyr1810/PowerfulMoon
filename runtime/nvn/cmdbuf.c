@@ -28,11 +28,68 @@ typedef struct Arena {
     bool open;                 // a command buffer records into it
 } Arena;
 
-// Every alive list: its handle (the guest address it was begun at) -> its first record. Sorted by handle.
+// Every alive list: its handle (the guest address it was begun at) -> its first record. Sorted by handle within
+// regions of 1 MB of guest memory (a hash table of regions): one sorted array of all of them - ~21,000 lists in New Donk
+// City - moved ~10,000 entries (300 KB) at every list begun, ~70 times a frame; a region holds a few hundred.
 typedef struct { uint64_t handle; CmdRec *rec; Arena *arena; } ListStart;
 static pthread_mutex_t g_list_lock = PTHREAD_MUTEX_INITIALIZER;
-static ListStart *g_lists;
-static int g_nlists, g_lists_cap;
+#define LREG_SHIFT 20
+#define LREG_TAB 32768  // (more than the guest window has regions: 12.5 GB / 1 MB)
+typedef struct { uint64_t key; ListStart *v; int n, cap; } ListRegion;  // (key: handle >> LREG_SHIFT, + 1)
+static ListRegion g_lreg[LREG_TAB];
+static int g_nlists;
+static ListRegion *lreg(uint64_t handle, bool create) {  // (g_list_lock)
+    uint64_t key = (handle >> LREG_SHIFT) + 1;
+    uint32_t i = (uint32_t)(key * 0x9E3779B97F4A7C15ull >> 49) & (LREG_TAB - 1);
+    for (int probes = 0; probes < LREG_TAB; probes++, i = (i + 1) & (LREG_TAB - 1)) {
+        if (g_lreg[i].key == key) return &g_lreg[i];
+        if (!g_lreg[i].key) {
+            if (!create) return NULL;
+            g_lreg[i].key = key;
+            return &g_lreg[i];
+        }
+    }
+    FATAL("nvn: command list regions exhausted" "%s", "");
+    return NULL;
+}
+static int lreg_lower(const ListRegion *r, uint64_t handle) {
+    int lo = 0, hi = r->n;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (r->v[mid].handle < handle) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+static ListStart *list_find(uint64_t handle) {  // (g_list_lock)
+    ListRegion *r = lreg(handle, false);
+    if (!r) return NULL;
+    int i = lreg_lower(r, handle);
+    return i < r->n && r->v[i].handle == handle ? &r->v[i] : NULL;
+}
+static void list_insert(ListStart e) {  // (g_list_lock; not there yet)
+    ListRegion *r = lreg(e.handle, true);
+    if (r->n == r->cap) {
+        r->cap = r->cap ? r->cap * 2 : 16;
+        r->v = realloc(r->v, (size_t)r->cap * sizeof *r->v);
+        if (!r->v) FATAL("nvn: out of host memory for command lists" "%s", "");
+    }
+    int i = lreg_lower(r, e.handle);
+    memmove(&r->v[i + 1], &r->v[i], (size_t)(r->n - i) * sizeof *r->v);
+    r->v[i] = e;
+    r->n++, g_nlists++;
+}
+// The first list at or after `at` and before `end`: its handle, 0 if none
+static uint64_t list_next(uint64_t at, uint64_t end) {  // (g_list_lock)
+    if (end <= at) return 0;
+    for (uint64_t k = at >> LREG_SHIFT; k <= (end - 1) >> LREG_SHIFT; k++) {
+        ListRegion *r = lreg(k << LREG_SHIFT, false);
+        if (!r || !r->n) continue;
+        int i = lreg_lower(r, at);
+        if (i < r->n) return r->v[i].handle < end ? r->v[i].handle : 0;
+    }
+    return 0;
+}
 static _Atomic uint64_t g_list_gen;  // changes with every list begun or ended (command buffers re-check their next_list)
 
 static _Atomic uint64_t g_rec_bytes;  // (the status line: host memory of all records)
@@ -73,15 +130,6 @@ void cmd_reap(uint64_t done) {  // (the render thread, after an item: what no qu
     pthread_mutex_unlock(&g_list_lock);
 }
 
-static int list_lower_bound(uint64_t handle) {  // (g_list_lock)
-    int lo = 0, hi = g_nlists;
-    while (lo < hi) {
-        int mid = (lo + hi) / 2;
-        if (g_lists[mid].handle < handle) lo = mid + 1;
-        else hi = mid;
-    }
-    return lo;
-}
 
 // Room for a record of `size` bytes (each block keeps room for the jump to the next).
 static CmdRec *arena_rec(Arena *a, uint32_t op, uint32_t size) {
@@ -111,18 +159,24 @@ static CmdRec *arena_rec(Arena *a, uint32_t op, uint32_t size) {
 static void lists_overwritten(NvnCmdBuf *cb, uint64_t at, uint64_t end) {
     if (cb->list_gen == atomic_load(&g_list_gen) && (!cb->next_list || cb->next_list >= end)) return;
     pthread_mutex_lock(&g_list_lock);
-    int i = list_lower_bound(at), j = i;
-    while (j < g_nlists && g_lists[j].handle < end) {
-        Arena *la = g_lists[j++].arena;
-        la->live--;
-        arena_release(la);  // (an arena still recorded into stays)
+    bool ended = false;
+    for (uint64_t k = at >> LREG_SHIFT; end > at && k <= (end - 1) >> LREG_SHIFT; k++) {
+        ListRegion *r = lreg(k << LREG_SHIFT, false);
+        if (!r || !r->n) continue;
+        int i = lreg_lower(r, at), j = i;
+        while (j < r->n && r->v[j].handle < end) {
+            Arena *la = r->v[j++].arena;
+            la->live--;
+            arena_release(la);  // (an arena still recorded into stays)
+        }
+        if (j > i) {
+            memmove(&r->v[i], &r->v[j], (size_t)(r->n - j) * sizeof *r->v);
+            r->n -= j - i, g_nlists -= j - i;
+            ended = true;
+        }
     }
-    if (j > i) {
-        memmove(&g_lists[i], &g_lists[j], (g_nlists - j) * sizeof *g_lists);
-        g_nlists -= j - i;
-        atomic_fetch_add(&g_list_gen, 1);
-    }
-    cb->next_list = i < g_nlists && g_lists[i].handle < cb->mem + cb->size ? g_lists[i].handle : 0;
+    if (ended) atomic_fetch_add(&g_list_gen, 1);
+    cb->next_list = list_next(at, cb->mem + cb->size);
     cb->list_gen = atomic_load(&g_list_gen);
     pthread_mutex_unlock(&g_list_lock);
 }
@@ -131,8 +185,8 @@ static void lists_overwritten(NvnCmdBuf *cb, uint64_t at, uint64_t end) {
 CmdRec *cmd_list(uint64_t handle) {
     CmdRec *r = NULL;
     pthread_mutex_lock(&g_list_lock);
-    int i = list_lower_bound(handle);
-    if (i < g_nlists && g_lists[i].handle == handle) r = g_lists[i].rec;
+    ListStart *e = list_find(handle);
+    if (e) r = e->rec;
     pthread_mutex_unlock(&g_list_lock);
     if (!r) {
         static int warned;
@@ -173,8 +227,7 @@ NVN(nvnCommandBufferAddCommandMemory) {
     if (log_lists < 0) log_lists = getenv("ODYSSEY_LOG_LISTS") != NULL;
     if (log_lists) LOG("[lists] cb %llx memory %llx+%llx (was %llx+%llx, used %llx)\n", (unsigned long long)A(0), (unsigned long long)mem,
                        (unsigned long long)size, (unsigned long long)cb->mem, (unsigned long long)cb->size, (unsigned long long)cb->used);
-    int i = list_lower_bound(mem);
-    cb->next_list = i < g_nlists && g_lists[i].handle < mem + size ? g_lists[i].handle : 0;
+    cb->next_list = list_next(mem, mem + size);
     cb->list_gen = atomic_load(&g_list_gen);
     if (old) {
         if (cb->recording) {  // the list being recorded goes on in the new memory
@@ -245,24 +298,21 @@ NVN(nvnCommandBufferBeginRecording) {
     CmdRec *r = rec(c, cb, CMD_BARRIER, 0);  // makes sure memory exists; the list starts here
     cb->start = cb->at;
     pthread_mutex_lock(&g_list_lock);
-    int i = list_lower_bound(cb->start);
-    if (i < g_nlists && g_lists[i].handle == cb->start) {  // (begun there before without new memory: replaced)
-        Arena *was = g_lists[i].arena;
+    ListStart *e = list_find(cb->start);
+    if (e) {  // (begun there before without new memory: replaced)
+        Arena *was = e->arena;
         was->live--;
-        g_lists[i] = (ListStart){cb->start, r, cb->arena};
+        *e = (ListStart){cb->start, r, cb->arena};
         if (was != cb->arena) arena_release(was);
-    } else {
-        if (g_nlists == g_lists_cap) {
-            g_lists_cap = g_lists_cap ? g_lists_cap * 2 : 1024;
-            g_lists = realloc(g_lists, g_lists_cap * sizeof *g_lists);
-            if (!g_lists) FATAL("nvn: out of host memory for command lists\n");
-        }
-        memmove(&g_lists[i + 1], &g_lists[i], (g_nlists - i) * sizeof *g_lists);
-        g_lists[i] = (ListStart){cb->start, r, cb->arena};
-        g_nlists++;
-    }
+    } else list_insert((ListStart){cb->start, r, cb->arena});
     atomic_fetch_add(&g_list_gen, 1);
     cb->arena->live++;
+    {   // ODYSSEY_LOG_LIST_COUNT=1: how many lists are kept
+        static int lc = -1;
+        static uint64_t begins;
+        if (lc < 0) lc = getenv("ODYSSEY_LOG_LIST_COUNT") != NULL;
+        if (lc && ++begins % 20000 == 0) LOG("[lists] %d lists kept\n", g_nlists);
+    }
     pthread_mutex_unlock(&g_list_lock);
 }
 NVN(nvnCommandBufferEndRecording) {
@@ -270,7 +320,10 @@ NVN(nvnCommandBufferEndRecording) {
     rec(c, cb, CMD_END, 0);
     cb->recording = false;
     plat_heap_check("EndRecording");
-    if (getenv("ODYSSEY_LOG_LISTS"))
+    static int log_end = -1;  // (not getenv at every list: on Windows it searches the environment by string each call -
+                              // 8.7% of the game thread in New Donk City's slow frames, which record thousands of lists)
+    if (log_end < 0) log_end = getenv("ODYSSEY_LOG_LISTS") != NULL;
+    if (log_end)
         LOG("[lists] cb %llx recorded %llx .. %llx (lr %llx)\n", (unsigned long long)A(0), (unsigned long long)cb->start,
             (unsigned long long)(cb->mem + cb->used), (unsigned long long)c->x[30]);
     RET(cb->start);

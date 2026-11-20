@@ -726,6 +726,32 @@ static bool toggle(const char *label, bool *v) {
     return ch;
 }
 
+// A row with a label on the left and a slider on the right (owner 2026-11-19: "control over it, like Eden"): drag or
+// click with the mouse; with the keyboard or a controller, Left / Right step by `step` while the row is selected, and
+// A / Enter lets it be dragged. fmt: printf for the value (one %d), e.g. "%d%%".
+static bool slider(const char *label, int *value, int lo, int hi, int step, const char *fmt) {
+    ImGui::PushID(label);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(tr(label));
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
+    ImGui::SetNextItemWidth(-1);
+    bool changed = ImGui::SliderInt("##s", value, lo, hi, fmt, ImGuiSliderFlags_AlwaysClamp);
+    if (ImGui::IsItemFocused() && !ImGui::IsItemActive()) {
+        int v = *value;
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight) || ImGui::IsKeyPressed(ImGuiKey_RightArrow)) v += step;
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft) || ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) v -= step;
+        v = v < lo ? lo : v > hi ? hi : v;
+        if (v != *value) { *value = v; changed = true; }
+    }
+    ImGui::PopID();
+    if (const OptionNote *note = option_note(label)) {
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextDisabled("%s %s", tr("Recommended:"), tr(note->recommended));
+        ImGui::PopTextWrapPos();
+    }
+    return changed;
+}
+
 extern "C" void renderer_get_scale(float *sx, float *sy);
 #ifndef __APPLE__
 extern "C" void vk_request_swapchain_remake(void);
@@ -733,6 +759,7 @@ extern "C" void vk_request_swapchain_remake(void);
 extern "C" void output_scale_preview(double dw, double dh, double want, int mode, double *w, double *h);
 extern "C" float odyssey_wide_shape(void);
 extern "C" int input_pad_family(void);  // runtime/hle/input.c
+extern "C" void input_stick_now(int right, float *x, float *y);  // runtime/hle/input.c
 extern "C" void input_motion_calibrate(void);
 extern "C" int input_motion_calibration(void);
 extern "C" double output_scale_dynamic_factor(void);
@@ -1110,16 +1137,83 @@ static void tab_graphics(void) {
                    "stair steps. Costs some GPU time and video memory (Ultra: about 300 MB more). Switch: as on the "
                    "Switch. Applies from the next area loaded.", false);
     }
+    {
+        static const char *bq[] = {"Switch", "High"};
+        opt_choice("Bloom quality", &g_settings.bloom_quality, bq, 2, 0,
+                   "The game draws its glow (bloom, light shafts) as a small image, a quarter of its picture's width, "
+                   "and stretches it over the screen; its edges along bright sky and lights then show small steps, "
+                   "more visible next to a sharp high-resolution picture. High: the glow is stretched with a smoother "
+                   "filter, so those edges fade evenly. The glow keeps the game's shape and strength, and its detail "
+                   "stays the game's (it isn't drawn at a higher resolution). High also smooths the hazy far horizon "
+                   "behind the kingdoms (a small picture stretched over the sky, whose texels show as blocks and "
+                   "blobs). Costs a little GPU time (about 0.3 ms a frame at 4K on a fast graphics card). Switch: as "
+                   "on the Switch. Changes at once.", false);
+        static const char *dd[] = {"Switch", "High", "Very high"};
+        opt_choice("Draw distance", &g_settings.draw_distance, dd, 3, 0,
+                   "Enemies, coins, characters and other objects appear from farther away, and models switch to their "
+                   "simpler versions and fade out farther away. High: twice the Switch's distances, Very high: four "
+                   "times. Faraway objects then also keep moving, as they do near you. Costs CPU and GPU time in "
+                   "large kingdoms. The landscape itself is unchanged. Switch: as on the Switch. Changes at once.",
+                   false);
+    }
     opt_toggle("Smooth color gradients", &g_settings.deband, true,
                "Fixes color banding: in night skies, fog, water and dark rooms the game's colors change in visible steps "
                "(bands or rings) instead of a smooth fade - on the Switch too. On: the game's picture is kept in more "
                "precise colors until it reaches the screen, with a fine, invisible grain there that hides the steps. "
                "Costs almost nothing. Off: the picture exactly as on the Switch.");
+    opt_toggle("Sharper HUD and menus", &g_settings.hud_sharpen, true,
+               "The game's HUD, text and menus are drawn from artwork made for the Switch's 720 lines; enlarged on a "
+               "bigger screen their edges turn soft. On: they are sharpened on screens of 900 lines and more "
+               "(nothing below - a Steam Deck's screen stays as it is), the more the bigger the screen, without "
+               "adding outlines or halos. It makes edges crisper, not more detailed. Off: as the game draws them. "
+               "Changes at once.");
 #endif
     opt_end();
 }
 
-// Performance: frame rate, the overlays, and the shaders (stutter)
+// Overlay (a page of its own since 0.4.4, owner 2026-11-18): the FPS counter and the performance overlay
+static void tab_overlay(void) {
+    float scale = ImGui::GetFontSize() / 34;
+    opt_begin("##overlay", scale);
+    opt_section("Frame rate counter");
+    opt_toggle("Show FPS", &g_settings.show_fps, false, "Shows the frame rate in the top right corner.");
+    opt_section("Performance overlay");
+    opt_toggle("Performance overlay", &g_settings.performance_overlay, false,
+               "Shows the frame rate and frame times with a graph, GPU / CPU / memory use, temperatures and power where "
+               "your PC reports them, the upscaler and resolution, and Mario's position. Hidden while this menu is open. "
+               "Choose its parts below.");
+    {
+        static const char *const corners[OVERLAY_CORNER_COUNT] = {"Top right", "Top left", "Bottom right", "Bottom left"};
+        static const char *const sizes[3] = {"Small", "Medium", "Large"};
+        if (!g_settings.performance_overlay) opt_disable_next();
+        opt_choice("Overlay position", &g_settings.overlay_corner, corners, OVERLAY_CORNER_COUNT, OVERLAY_TOP_RIGHT,
+                   "The corner of the picture the performance overlay sits in.");
+        if (!g_settings.performance_overlay) opt_disable_next();
+        opt_choice("Overlay size", &g_settings.overlay_size, sizes, 3, 1, "The size of the performance overlay's text.");
+        float opacity = (float)g_settings.overlay_opacity;
+        if (!g_settings.performance_overlay) opt_disable_next();
+        if (opt_slider("Overlay background", &opacity, 0, 100, 10, 80, "%g%%",
+                       "How solid the overlay's background is. 0% shows only the text."))
+            g_settings.overlay_opacity = (int)(opacity + 0.5f);
+        struct { const char *label; bool *on; const char *help; } parts[] = {
+            {"Show GPU", &g_settings.overlay_gpu, "GPU use, temperature, power draw, video memory and clock speed. "
+             "Temperature, power and clock need an NVIDIA card, or Linux with an AMD or Intel one."},
+            {"Show CPU", &g_settings.overlay_cpu, "CPU use, the game's own share of it, and on Linux the CPU's temperature."},
+            {"Show memory", &g_settings.overlay_ram, "The PC's memory in use, and the game's own."},
+            {"Show frame time graph", &g_settings.overlay_graph, "A line of the last frames' times: flat when the game runs evenly, a spike at each hitch."},
+            {"Show hardware names", &g_settings.overlay_hardware, "The names of the graphics card and the processor."},
+            {"Show upscaler and resolution", &g_settings.overlay_render, "The upscaler and anti-aliasing in use, and the game's internal resolution next to its size on screen."},
+            {"Show Mario's position", &g_settings.overlay_position, "Mario's position in the kingdom, in metres. Useful for bug reports."},
+        };
+        for (auto &part : parts) {
+            if (!g_settings.performance_overlay) opt_disable_next();
+            opt_toggle(part.label, part.on, true, part.help);
+        }
+    }
+    opt_end();
+}
+
+// Performance: frame rate and the shaders (stutter)
 static void tab_performance(void) {
     float scale = ImGui::GetFontSize() / 34;
     opt_begin("##performance", scale);
@@ -1186,40 +1280,6 @@ static void tab_performance(void) {
         g_settings.frame_rate = order[pos];
     }
 #endif
-    opt_section("Overlay");
-    opt_toggle("Show FPS", &g_settings.show_fps, false, "Shows the frame rate in the top right corner.");
-    opt_toggle("Performance overlay", &g_settings.performance_overlay, false,
-               "Shows the frame rate and frame times with a graph, GPU / CPU / memory use, temperatures and power where "
-               "your PC reports them, the upscaler and resolution, and Mario's position. Hidden while this menu is open. "
-               "Choose its parts below.");
-    {
-        static const char *const corners[OVERLAY_CORNER_COUNT] = {"Top right", "Top left", "Bottom right", "Bottom left"};
-        static const char *const sizes[3] = {"Small", "Medium", "Large"};
-        if (!g_settings.performance_overlay) opt_disable_next();
-        opt_choice("Overlay position", &g_settings.overlay_corner, corners, OVERLAY_CORNER_COUNT, OVERLAY_TOP_RIGHT,
-                   "The corner of the picture the performance overlay sits in.");
-        if (!g_settings.performance_overlay) opt_disable_next();
-        opt_choice("Overlay size", &g_settings.overlay_size, sizes, 3, 1, "The size of the performance overlay's text.");
-        float opacity = (float)g_settings.overlay_opacity;
-        if (!g_settings.performance_overlay) opt_disable_next();
-        if (opt_slider("Overlay background", &opacity, 0, 100, 10, 80, "%g%%",
-                       "How solid the overlay's background is. 0% shows only the text."))
-            g_settings.overlay_opacity = (int)(opacity + 0.5f);
-        struct { const char *label; bool *on; const char *help; } parts[] = {
-            {"Show GPU", &g_settings.overlay_gpu, "GPU use, temperature, power draw, video memory and clock speed. "
-             "Temperature, power and clock need an NVIDIA card, or Linux with an AMD or Intel one."},
-            {"Show CPU", &g_settings.overlay_cpu, "CPU use, the game's own share of it, and on Linux the CPU's temperature."},
-            {"Show memory", &g_settings.overlay_ram, "The PC's memory in use, and the game's own."},
-            {"Show frame time graph", &g_settings.overlay_graph, "A line of the last frames' times: flat when the game runs evenly, a spike at each hitch."},
-            {"Show hardware names", &g_settings.overlay_hardware, "The names of the graphics card and the processor."},
-            {"Show upscaler and resolution", &g_settings.overlay_render, "The upscaler and anti-aliasing in use, and the game's internal resolution next to its size on screen."},
-            {"Show Mario's position", &g_settings.overlay_position, "Mario's position in the kingdom, in metres. Useful for bug reports."},
-        };
-        for (auto &part : parts) {
-            if (!g_settings.performance_overlay) opt_disable_next();
-            opt_toggle(part.label, part.on, true, part.help);
-        }
-    }
     opt_section("Discord");
     opt_toggle("Discord activity", &g_settings.discord_presence, false,
                "Shows Super Odyssey PC Recomp, the kingdom you're in and the time played on your Discord profile, while "
@@ -1400,25 +1460,35 @@ static void tab_quit(float scale) {
     static char previous[1200];
     static bool checked_previous;
     static const char *result = "Create file";
-    auto copy_result = []() { int s = diagnostics_copy_status(); return s > 0 ? "Path copied" : s == 0 ? "Copy pending" : "Saved"; };
+    static char previous_reason[256];
+    // (the report's text, not its path: a path pasted into an issue is only a name - issue #75)
+    auto copy_result = []() { int s = diagnostics_copy_status(); return s > 0 ? "Text copied" : s == 0 ? "Copy pending" : "Saved"; };
     if (!strcmp(result, "Copy pending")) result = copy_result();
     opt_begin("##quit", scale);
     opt_section("Quit");
     if (opt_action("Quit to Desktop", "", "Closes " RT_APP_NAME " after confirmation.")) g_quit_prompt = true;
     opt_section("Diagnostics");
     if (opt_action("Copy crash report", result,
-                   "Creates one text file with the saved settings, log, hardware/driver and fault details. Copies its path to paste into the attachment file picker. Includes local paths; nothing is uploaded.")) {
+                   "Creates one text file with the saved settings, log, hardware/driver and fault details, and copies its text: paste it into the bug report. Includes local paths; nothing is uploaded.")) {
         settings_save();
         if (diagnostics_write_report(report, sizeof report))
-            result = diagnostics_copy_path(report) ? copy_result() : "Saved";
+            result = diagnostics_copy_report(report) ? copy_result() : "Saved";
         else result = "Could not save";
     }
-    if (report[0]) { opt_disable_next(); opt_action("Saved report", "", report); }
-    if (!checked_previous) { diagnostics_last_crash(previous, sizeof previous); checked_previous = true; }
-    if (previous[0] &&
-        opt_action("Copy last crash report", "", "Copies the saved crash report's path, including after restarting the game.")) {
-        if (diagnostics_last_crash(report, sizeof report)) result = diagnostics_copy_path(report) ? copy_result() : "Saved";
-        else { previous[0] = 0; result = "No saved crash"; }
+    if (report[0] && opt_action("Show report file", "", report)) diagnostics_show_report(report);
+    if (!checked_previous) {
+        diagnostics_last_crash_info(previous, sizeof previous, previous_reason, sizeof previous_reason, NULL);
+        checked_previous = true;
+    }
+    if (previous[0]) {
+        char note[400];
+        snprintf(note, sizeof note, "The last crash: %s. Copies that crash report's text, including after restarting the game.",
+                 previous_reason);
+        if (opt_action("Copy last crash report", "", note)) {
+            if (diagnostics_last_crash(report, sizeof report)) result = diagnostics_copy_report(report) ? copy_result() : "Saved";
+            else { previous[0] = 0; result = "No saved crash"; }
+        }
+        if (previous[0] && opt_action("Show last crash report file", "", previous)) diagnostics_show_report(previous);
     }
     opt_end();
 }
@@ -1651,6 +1721,19 @@ static void tab_about(void) {
     toggle("Invert gyro Y", &g_settings.motion_invert_y);
     hint("If a motion move goes the wrong way on your controller: X turns tilting forward / back the other way round, "
          "Y turning left / right.");
+    slider("Gyro sensitivity", &g_settings.motion_gyro_sens, 25, 400, 5, "%d%%");
+    hint("How far turning the controller turns what the game aims with motion (first-person views, aiming Cappy). "
+         "100% is the controller's own movement.");
+    {
+        int th = g_settings.motion_shake_threshold;
+        char fmt[32];
+        if (th) snprintf(fmt, sizeof fmt, "%d.%d G", th / 10, th % 10);  // (the slider's text: the value already in it)
+        else snprintf(fmt, sizeof fmt, "%s", tr("Off"));
+        slider("Shake threshold", &g_settings.motion_shake_threshold, 0, 20, 1, fmt);
+    }
+    hint("Jolts smaller than this are not passed on to the game, so the controller's own rumble (hidden moons nearby) "
+         "or bumping it doesn't throw Cappy. Raise it until rumble no longer throws; real shakes then need to be a "
+         "little stronger. Off passes everything on, as the Switch does.");
     {   // Calibrate gyro (runtime/hle/input.c input_motion_calibrate)
         int st = input_motion_calibration();
         ImGui::AlignTextToFramePadding();
@@ -1693,14 +1776,25 @@ static void tab_about(void) {
     }
     hint("The controller's rumble, as the game sends it (the Switch's HD rumble on the controller's motors). Turn it off "
          "for no rumble at all; DualSense and Switch Pro controllers use their own motors through it.");
-    {
-        static const int pct[] = {0, 5, 10, 15, 20, 25, 30};
-        static const char *const names[] = {"Off", "5%", "10%", "15%", "20%", "25%", "30%"};
-        int i = 0;
-        for (int k = 0; k < 7; k++) if (pct[k] <= g_settings.stick_deadzone) i = k;
-        if (choice("Stick deadzone", &i, names, 7)) g_settings.stick_deadzone = pct[i];
+    ImGui::Spacing();
+    header("Sticks");
+    slider("Left stick deadzone", &g_settings.stick_deadzone_l, 0, 50, 1, "%d%%");
+    slider("Right stick deadzone", &g_settings.stick_deadzone_r, 0, 50, 1, "%d%%");
+    hint("How far a stick moves before it counts. Raise it if Mario, the camera or the map pointer moves on its own "
+         "(the map's pointer drifting away from what you select is a sign of it). The default is 5%.");
+    slider("Left stick range", &g_settings.stick_range_l, 50, 150, 5, "%d%%");
+    slider("Right stick range", &g_settings.stick_range_r, 50, 150, 5, "%d%%");
+    hint("How much of a full tilt the stick's end gives. Above 100% a full tilt comes before the stick's end (a worn or "
+         "small stick that doesn't reach it); below 100% the stick's end gives less than a full tilt.");
+    {   // what the game gets from each stick now (a check for drift and range)
+        float v[2][2];
+        input_stick_now(0, &v[0][0], &v[0][1]);
+        input_stick_now(1, &v[1][0], &v[1][1]);
+        char line[160];
+        snprintf(line, sizeof line, tr("Now: left %3.0f%%, right %3.0f%% of a full tilt"),
+                 100 * sqrtf(v[0][0] * v[0][0] + v[0][1] * v[0][1]), 100 * sqrtf(v[1][0] * v[1][0] + v[1][1] * v[1][1]));
+        ImGui::TextDisabled("%s", line);
     }
-    hint("How far a controller stick moves before it counts. Raise it if Mario or the camera drifts on their own.");
     ImGui::Spacing();
     header("Stick camera");
     camera_speed("Stick horizontal speed", &g_settings.stick_camera_x);
@@ -1864,14 +1958,15 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
 static void tabs_body(float scale, void (*prelaunch)(float)) {
     // (id: the page; -1 = Prelaunch)
     struct Tab { const char *name; int id; bool on; };
-    Tab tabs[12];
+    Tab tabs[16];
     int ntabs = 0;
     if (prelaunch) tabs[ntabs++] = {"Prelaunch", -1, true};
     // (ids: the pages below; 5-7 were Link's Awakening's and stay unused, so ODYSSEY_MENU_TAB numbers keep meaning;
     // the old Video page is Display (0), Graphics (3) and Performance (4) now)
     static const char *names[] = {"Display", "Audio", "Mods", "Graphics", "Performance", NULL, NULL, NULL, "Controls", "Quit",
-                                  "Updates", "Language"};
-    static const int order[] = {0, 3, 4, 1, 8, 11, 2, 10, 9};  // Display, Graphics, Performance, Audio, Controls, Language, Mods, Updates, Quit
+                                  "Updates", "Language", "Overlay"};
+    // Display, Graphics, Performance, Overlay, Audio, Controls, Language, Mods, Updates, Quit
+    static const int order[] = {0, 3, 4, 12, 1, 8, 11, 2, 10, 9};
     for (int i : order)
         if (i != 9 || !prelaunch) tabs[ntabs++] = {names[i], i, true};
     int cur = 0;  // g_tab / g_tab_request hold ids
@@ -1986,6 +2081,7 @@ static void tabs_body(float scale, void (*prelaunch)(float)) {
     case 0: tab_display(); break;
     case 3: tab_graphics(); break;
     case 4: tab_performance(); break;
+    case 12: tab_overlay(); break;
     case 1: tab_audio(); break;
     case 2: tab_mods(scale); break;
     case 8: tab_about(); break;
@@ -2009,23 +2105,141 @@ bool menu_sidebar_focused(void) { return g_sidebar_was; }
 void menu_focus_sidebar(void) { g_focus_tab = -100, g_focus_frames = 0; }
 float menu_hint_bar_height(float scale) { return ImGui::GetFontSize() * 0.8f + 30 * scale; }
 static float hint_bar_height(float scale) { return menu_hint_bar_height(scale); }
-static void key_cap(ImDrawList *dl, ImVec2 &at, const char *key, const char *what, float scale) {
+// The hint bar's icons (0.4.5, owner 2026-11-18: "actual icons that match the controller or the thing being used"),
+// drawn here - no artwork is shipped: a controller's face buttons as discs (Xbox: the letter in its colour;
+// PlayStation: the cross / circle shapes; Switch: a light disc with the letter, as the game's own icons), its
+// shoulder buttons as bumper shapes, Menu / Options / Plus; the keyboard's keys as key caps, the arrows as arrows.
+// One token of a hint ("LB", "Cross", "Left", "Enter"...): draws it at `at` in a box `h` high, returns its width.
+// ODYSSEY_MENU_HINTS=pad0 / pad1 / pad2 / keys: the bar as with a Switch / Xbox / PlayStation controller or the keyboard (tests).
+static int hint_force(void) {
+    static int v = -2;
+    if (v == -2) {
+        const char *e = getenv("ODYSSEY_MENU_HINTS");
+        v = !e ? -1 : !strcmp(e, "keys") ? 3 : !strncmp(e, "pad", 3) && e[3] >= '0' && e[3] <= '2' ? e[3] - '0' : -1;
+    }
+    return v;
+}
+static float hint_icon(ImDrawList *dl, ImVec2 at, float h, const char *tok, bool pad, int fam, float scale) {
     ImFont *f = ImGui::GetFont();
-    float fs = ImGui::GetFontSize() * 0.8f, padx = 9 * scale, h = fs + 10 * scale;
-    ImVec2 ks = f->CalcTextSizeA(fs, FLT_MAX, 0, key), ws = f->CalcTextSizeA(fs, FLT_MAX, 0, tr(what));
-    float kw = fmaxf(ks.x + 2 * padx, h);
-    dl->AddRectFilled(at, ImVec2(at.x + kw, at.y + h), theme_u32(kSurfaceHoverV), 6 * scale);
-    dl->AddRect(at, ImVec2(at.x + kw, at.y + h), theme_u32(kTextV, 0.25f), 6 * scale, 0, fmaxf(1, scale));
-    dl->AddText(f, fs, ImVec2(at.x + (kw - ks.x) * 0.5f, at.y + (h - fs) * 0.5f), kText, key);
-    dl->AddText(f, fs, ImVec2(at.x + kw + 8 * scale, at.y + (h - fs) * 0.5f), kTextDim, tr(what));
-    at.x += kw + 8 * scale + ws.x + 26 * scale;
+    const ImU32 dark = IM_COL32(22, 22, 26, 255), light = IM_COL32(236, 236, 240, 255), rim = IM_COL32(236, 236, 240, 90);
+    float r = h * 0.5f, th = fmaxf(1.5f, h * 0.085f);
+    ImVec2 c(at.x + r, at.y + r);
+    auto letter = [&](const char *t, ImVec2 mid, float size, ImU32 col) {
+        ImVec2 ts = f->CalcTextSizeA(size, FLT_MAX, 0, t);
+        dl->AddText(f, size, ImVec2(mid.x - ts.x * 0.5f, mid.y - size * 0.5f), col, t);
+    };
+    if (pad) {
+        bool a = !strcmp(tok, "A") || !strcmp(tok, "Cross"), b = !strcmp(tok, "B") || !strcmp(tok, "Circle");
+        if (a || b) {  // a face button
+            if (fam == 2) {  // PlayStation: the shape, in its colour
+                ImU32 col = a ? IM_COL32(124, 178, 232, 255) : IM_COL32(255, 102, 102, 255);
+                dl->AddCircleFilled(c, r, dark, 32);
+                dl->AddCircle(c, r - th * 0.3f, rim, 32, fmaxf(1, th * 0.6f));
+                float q = r * 0.42f;
+                if (a) {
+                    dl->AddLine(ImVec2(c.x - q, c.y - q), ImVec2(c.x + q, c.y + q), col, th);
+                    dl->AddLine(ImVec2(c.x - q, c.y + q), ImVec2(c.x + q, c.y - q), col, th);
+                } else {
+                    dl->AddCircle(c, r * 0.5f, col, 24, th);
+                }
+            } else if (fam == 1) {  // Xbox: a dark disc, the letter in the button's colour
+                ImU32 col = a ? IM_COL32(120, 200, 80, 255) : IM_COL32(236, 80, 70, 255);
+                dl->AddCircleFilled(c, r, dark, 32);
+                dl->AddCircle(c, r - th * 0.3f, col, 32, fmaxf(1, th * 0.6f));
+                letter(a ? "A" : "B", c, h * 0.68f, col);
+            } else {  // Switch: a light disc, the letter dark
+                dl->AddCircleFilled(c, r, light, 32);
+                letter(a ? "A" : "B", c, h * 0.68f, dark);
+            }
+            return h;
+        }
+        if (!strcmp(tok, "Menu") || !strcmp(tok, "Options")) {  // three lines: in a disc (Xbox), in a pill (PlayStation)
+            float w = fam == 2 ? h * 0.72f : h, x0 = at.x;
+            if (fam == 2) {
+                dl->AddRectFilled(ImVec2(x0, at.y), ImVec2(x0 + w, at.y + h), dark, w * 0.5f);
+                dl->AddRect(ImVec2(x0, at.y), ImVec2(x0 + w, at.y + h), rim, w * 0.5f, 0, fmaxf(1, th * 0.6f));
+            } else {
+                dl->AddCircleFilled(c, r, dark, 32);
+                dl->AddCircle(c, r - th * 0.3f, rim, 32, fmaxf(1, th * 0.6f));
+            }
+            float mx = x0 + w * 0.5f, q = w * 0.24f;
+            for (int k = -1; k <= 1; k++)
+                dl->AddLine(ImVec2(mx - q, c.y + k * h * 0.17f), ImVec2(mx + q, c.y + k * h * 0.17f), light, fmaxf(1, th * 0.8f));
+            return w;
+        }
+        if (!strcmp(tok, "Plus")) {
+            dl->AddCircleFilled(c, r, light, 32);
+            float q = r * 0.5f;
+            dl->AddLine(ImVec2(c.x - q, c.y), ImVec2(c.x + q, c.y), dark, th * 1.2f);
+            dl->AddLine(ImVec2(c.x, c.y - q), ImVec2(c.x, c.y + q), dark, th * 1.2f);
+            return h;
+        }
+        // a shoulder button: a bumper, rounder on its outer top corner
+        bool left = tok[0] == 'L';
+        ImDrawFlags outer = left ? ImDrawFlags_RoundCornersTopLeft : ImDrawFlags_RoundCornersTopRight;
+        float fs = h * 0.6f, w = fmaxf(f->CalcTextSizeA(fs, FLT_MAX, 0, tok).x + h * 0.6f, h * 1.25f);
+        ImU32 fill = fam == 0 ? light : dark, ink = fam == 0 ? dark : light;
+        ImVec2 p0(at.x, at.y + h * 0.1f), p1(at.x + w, at.y + h * 0.9f);
+        dl->AddRectFilled(p0, p1, fill, h * 0.14f);
+        dl->AddRectFilled(p0, p1, fill, h * 0.4f, outer);
+        if (fam != 0) dl->AddRect(p0, p1, rim, h * 0.4f, outer, fmaxf(1, th * 0.6f));
+        letter(tok, ImVec2(at.x + w * 0.5f, c.y), fs, ink);
+        return w;
+    }
+    // the keyboard: a key cap; arrows and Enter as pictures
+    int arrow = !strcmp(tok, "Left") ? 0 : !strcmp(tok, "Right") ? 1 : !strcmp(tok, "Up") ? 2 : !strcmp(tok, "Down") ? 3 : -1;
+    bool enter = !strcmp(tok, "Enter");
+    float fs = h * 0.62f, tw = arrow >= 0 ? 0 : f->CalcTextSizeA(fs, FLT_MAX, 0, tok).x;
+    float w = arrow >= 0 ? h : fmaxf(tw + h * 0.56f + (enter ? h * 0.62f : 0), h);
+    ImVec2 p1(at.x + w, at.y + h);
+    dl->AddRectFilled(ImVec2(at.x, at.y + h * 0.08f), p1, IM_COL32(236, 236, 240, 70), h * 0.2f);  // (the cap's side, below)
+    dl->AddRectFilled(at, ImVec2(p1.x, p1.y - h * 0.1f), theme_u32(kSurfaceHoverV), h * 0.2f);
+    dl->AddRect(at, ImVec2(p1.x, p1.y - h * 0.1f), theme_u32(kTextV, 0.35f), h * 0.2f, 0, fmaxf(1, scale));
+    ImVec2 m(at.x + w * 0.5f, at.y + h * 0.45f);
+    if (arrow >= 0) {
+        float q = h * 0.2f, k = q * 0.7f;
+        ImVec2 t0, t1, t2;
+        if (arrow == 0) t0 = ImVec2(m.x - q, m.y), t1 = ImVec2(m.x + k, m.y - q), t2 = ImVec2(m.x + k, m.y + q);
+        else if (arrow == 1) t0 = ImVec2(m.x + q, m.y), t1 = ImVec2(m.x - k, m.y + q), t2 = ImVec2(m.x - k, m.y - q);
+        else if (arrow == 2) t0 = ImVec2(m.x, m.y - q), t1 = ImVec2(m.x + q, m.y + k), t2 = ImVec2(m.x - q, m.y + k);
+        else t0 = ImVec2(m.x, m.y + q), t1 = ImVec2(m.x - q, m.y - k), t2 = ImVec2(m.x + q, m.y - k);
+        dl->AddTriangleFilled(t0, t1, t2, kText);
+    } else {
+        dl->AddText(f, fs, ImVec2(enter ? at.x + h * 0.28f : m.x - tw * 0.5f, m.y - fs * 0.5f), kText, tok);
+        if (enter) {  // the return arrow: down, then left
+            float x1 = p1.x - h * 0.3f, x0 = x1 - h * 0.34f, y0 = m.y - h * 0.18f, y1 = m.y + h * 0.1f, q = h * 0.11f;
+            dl->AddLine(ImVec2(x1, y0), ImVec2(x1, y1), kText, th * 0.8f);
+            dl->AddLine(ImVec2(x1, y1), ImVec2(x0, y1), kText, th * 0.8f);
+            dl->AddTriangleFilled(ImVec2(x0 - q * 0.6f, y1), ImVec2(x0 + q, y1 - q), ImVec2(x0 + q, y1 + q), kText);
+        }
+    }
+    return w;
+}
+// One hint: its icons (the key string's parts, "LB / RB" -> two icons), then what they do.
+static void key_cap(ImDrawList *dl, ImVec2 &at, const char *key, const char *what, float scale) {
+    ImGuiContext *g = ImGui::GetCurrentContext();
+    bool pad = hint_force() >= 0 ? hint_force() < 3 : g->NavInputSource == ImGuiInputSource_Gamepad;
+    int fam = !pad ? 0 : hint_force() >= 0 ? hint_force() : input_pad_family();
+    ImFont *f = ImGui::GetFont();
+    float fs = ImGui::GetFontSize() * 0.8f, h = fs + 10 * scale;
+    char buf[64];
+    snprintf(buf, sizeof buf, "%s", key);
+    for (char *t = buf; t && *t;) {
+        char *sep = strstr(t, " / ");
+        if (sep) *sep = 0;
+        at.x += hint_icon(dl, at, h, t, pad, fam, scale) + (sep ? 5 * scale : 0);
+        t = sep ? sep + 3 : NULL;
+    }
+    ImVec2 ws = f->CalcTextSizeA(fs, FLT_MAX, 0, tr(what));
+    dl->AddText(f, fs, ImVec2(at.x + 8 * scale, at.y + (h - fs) * 0.5f), kTextDim, tr(what));
+    at.x += 8 * scale + ws.x + 26 * scale;
 }
 // mode: 0 the menu in game, 1 the start page's settings, 2 the start page's home (Play / Settings / Exit)
 void menu_hint_bar(float scale, int mode);
 static void hint_bar(float scale, bool in_game) { menu_hint_bar(scale, in_game ? 0 : 1); }
 void menu_hint_bar(float scale, int mode) {
     ImGuiContext *g = ImGui::GetCurrentContext();
-    bool pad = g->NavInputSource == ImGuiInputSource_Gamepad;
+    bool pad = hint_force() >= 0 ? hint_force() < 3 : g->NavInputSource == ImGuiInputSource_Gamepad;
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImVec2 at = ImGui::GetCursorScreenPos();
     float w = ImGui::GetContentRegionAvail().x;
@@ -2033,11 +2247,11 @@ void menu_hint_bar(float scale, int mode) {
     at.y += 14 * scale;
     const char *back = g_sidebar_focused || !g->NavCursorVisible ? (mode == 0 ? "Close" : "Back") : "Back";
     if (mode == 2) {  // (home: the buttons only)
-        int fam = input_pad_family();
+        int fam = hint_force() >= 0 && hint_force() < 3 ? hint_force() : input_pad_family();
         if (pad) key_cap(dl, at, fam == 2 ? "Cross" : "A", "Select", scale), key_cap(dl, at, fam == 2 ? "Options" : fam == 1 ? "Menu" : "Plus", "Play", scale);
         else key_cap(dl, at, "Up / Down", "Move", scale), key_cap(dl, at, "Enter", "Select", scale);
     } else if (pad) {
-        int fam = input_pad_family();
+        int fam = hint_force() >= 0 && hint_force() < 3 ? hint_force() : input_pad_family();
         const char *ok = fam == 2 ? "Cross" : "A", *no = fam == 2 ? "Circle" : "B";
         const char *lr = fam == 2 ? "L1 / R1" : fam == 1 ? "LB / RB" : "L / R";
         key_cap(dl, at, lr, "Category", scale);

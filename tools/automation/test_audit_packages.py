@@ -15,14 +15,14 @@ SHA = hashlib.sha256(SEED).hexdigest()
 WINDOWS_FILES = {
     "Super Odyssey PC Recomp/SuperOdysseyRecomp.exe": b"launcher",
     "Super Odyssey PC Recomp/odysseygen/python.exe": b"runtime",
-    "Super Odyssey PC Recomp/pipeline-seed.bin": SEED,
+    "Super Odyssey PC Recomp/pipeline-seed.bin.zst": SEED,
 }
-SOURCE_FILES = {"runtime/version.h": b"header", "data/pipeline-seed.bin": SEED}
+SOURCE_FILES = {"runtime/version.h": b"header", "data/pipeline-seed.bin.zst": SEED}
 LINUX_FILES = {
     "AppRun": b"bootstrap",
     "usr/bin/SuperOdysseyRecomp": b"launcher",
     "usr/bin/odysseygen/odysseygen": b"generator",
-    "usr/bin/pipeline-seed.bin": SEED,
+    "usr/bin/pipeline-seed.bin.zst": SEED,
     "usr/bin/zig/lib/std/Build/Cache/Path.zig": b"compiler source",
 }
 
@@ -75,11 +75,12 @@ class AuditPackagesTest(unittest.TestCase):
                     check_zip(win, "Windows ZIP", SHA)
 
     def test_rejects_bad_and_duplicate_seed(self):
-        seed = "Super Odyssey PC Recomp/pipeline-seed.bin"
+        seed = "Super Odyssey PC Recomp/pipeline-seed.bin.zst"
         for files, message in (
             ({name: body for name, body in WINDOWS_FILES.items() if name != seed}, "expected one upstream shader seed"),
             ({**WINDOWS_FILES, seed: b"wrong"}, "does not match"),
-            ({**WINDOWS_FILES, "Super Odyssey PC Recomp/data/pipeline-seed.bin": SEED}, "misplaced"),
+            ({**WINDOWS_FILES, "Super Odyssey PC Recomp/pipeline-seed.bin": SEED}, "misplaced"),
+            ({**WINDOWS_FILES, "Super Odyssey PC Recomp/data/pipeline-seed.bin.zst": SEED}, "misplaced"),
         ):
             with self.subTest(message=message):
                 with self.assertRaisesRegex(AuditError, message):

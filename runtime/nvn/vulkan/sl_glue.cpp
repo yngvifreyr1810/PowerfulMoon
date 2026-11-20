@@ -273,7 +273,9 @@ extern "C" void vk_sl_before_present(uint64_t frame, uint32_t w, uint32_t h) {
         slPCLSetMarker(sl::PCLMarker::ePresentStart, *t);
     }
     if (!sl_.dlssg) return;
-    {   // ([streamline] every 600 frames: what DLSS-G reports - frames presented for each one rendered)
+    if (sl_.dlssg_on > 0) {  // ([streamline] every 600 frames with generation on: what DLSS-G reports - frames presented for
+                         // each one rendered. Only while it is on: the line read as "frame generation on" in logs where
+                         // it was off - available, not used)
         static uint64_t n, shown;
         sl::DLSSGState st{};
         sl::Result r = slDLSSGGetState(sl::ViewportHandle(0u), st, nullptr);  // (presented since the last call)

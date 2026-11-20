@@ -77,15 +77,15 @@ def audit_members(entries, kind, seed_sha256, open_member):
     files = {parts for parts, regular, _ in entries if regular}
     if kind == "Windows ZIP":
         launcher = ("SuperOdysseyRecomp.exe",)
-        seed = ("pipeline-seed.bin",)
+        seed = ("pipeline-seed.bin.zst",)
         required = (launcher, ("odysseygen", "python.exe"))
     elif kind == "source archive":
         launcher = ("runtime", "version.h")
-        seed = ("data", "pipeline-seed.bin")
+        seed = ("data", "pipeline-seed.bin.zst")
         required = (launcher,)
     else:
         launcher = ("usr", "bin", "SuperOdysseyRecomp")
-        seed = ("usr", "bin", "pipeline-seed.bin")
+        seed = ("usr", "bin", "pipeline-seed.bin.zst")
         required = (launcher, ("AppRun",), ("usr", "bin", "odysseygen", "odysseygen"))
 
     roots = {parts[: -len(launcher)] for parts in files if parts[-len(launcher) :] == launcher}
@@ -113,7 +113,7 @@ def audit_members(entries, kind, seed_sha256, open_member):
         runtime_path = relative[2:] if relative[:2] == ("usr", "bin") else relative
         if forbidden(runtime_path or relative):
             raise AuditError(f"{kind}: forbidden package entry: {'/'.join(parts)}")
-        if folded[-1] == "pipeline-seed.bin":
+        if folded[-1] in {"pipeline-seed.bin", "pipeline-seed.bin.zst"}:
             if relative != seed or not regular:
                 raise AuditError(f"{kind}: misplaced or non-regular shader seed: {'/'.join(parts)}")
             seeds.append(handle)
@@ -180,8 +180,8 @@ def main(argv=None):
     parser.add_argument("--appimage-root", type=Path, help="AppDir from the final AppImage")
     parser.add_argument("--source-archive", type=Path, help="source ZIP or tar archive")
     seed = parser.add_mutually_exclusive_group(required=True)
-    seed.add_argument("--seed-reference", type=Path, help="pipeline-seed.bin from the pinned upstream commit")
-    seed.add_argument("--seed-sha256", help="SHA-256 of the pinned upstream pipeline-seed.bin")
+    seed.add_argument("--seed-reference", type=Path, help="pipeline-seed.bin.zst from the pinned upstream commit")
+    seed.add_argument("--seed-sha256", help="SHA-256 of the pinned upstream pipeline-seed.bin.zst")
     args = parser.parse_args(argv)
     if not any((args.windows_zip, args.appimage_root, args.source_archive)):
         parser.error("specify at least one package to audit")

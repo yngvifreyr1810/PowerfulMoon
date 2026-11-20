@@ -79,6 +79,8 @@ typedef struct {
     int ipa_mul;   // its multiplier register (mode 1: the result is the "pass" value attr/w times this register)
     // GLSL (fields kept last: the MSL path's layout, including its out-of-range reg_used writes, is unchanged)
     bool bloom_prefilter;
+    bool bloom_smooth;  // (the HDR composite: its quarter-resolution glow inputs read through a B-spline, bloomUp)
+    bool far_smooth;    // (the distant-view panorama: RGBM texels decoded before a B-spline enlargement, farSample)
     bool glsl;               // emit Vulkan GLSL: dialect-specific constructs here, the rest via glsl_rewrite()
     bool uses_gmem_store;    // STG present: the gmem buffer is not readonly
     uint32_t cbuf_need[18];  // highest constant vec4 index + 1 per cbuf (array size of the GLSL block)
@@ -684,7 +686,14 @@ static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, cons
     }
     char e[2000], ex[300] = "";
     if (extra) snprintf(ex, sizeof ex, ", %s", extra);
-    if (c->bloom_prefilter && slot == 1 && type == TEXTYPE_2D && !t->shadow && lod_kind <= 1) {
+    if (c->far_smooth && slot == 0 && type == TEXTYPE_2D && !t->shadow && !off && lod_kind == 0 && !layer &&
+        c->stage == STAGE_FRAGMENT) {
+        c->uses_rscale = true;
+        snprintf(e, sizeof e, "farSample(t0, %s, rscale[1])", P);
+    } else if (c->bloom_smooth && slot <= 1 && type == TEXTYPE_2D && !t->shadow && !off && lod_kind <= 1) {
+        c->uses_rscale = true;
+        snprintf(e, sizeof e, "bloomUp(t%d, %s, %s, rscale[%d])", slot, P, lod_kind == 1 ? lod : "0.0f", slot + 1);
+    } else if (c->bloom_prefilter && slot == 1 && type == TEXTYPE_2D && !t->shadow && lod_kind <= 1) {
         c->uses_rscale = true;
         snprintf(e, sizeof e, "bloomSample(t%d, %s, %s, rscale[%d].xy)", slot, P,
                  lod_kind == 1 ? lod : "0.0f", slot + 1);
@@ -2337,6 +2346,66 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                "    return color / (footprint.x * footprint.y);\n"
                "}\n");
     }
+    if (c->bloom_smooth) {
+        // Bloom quality High (settings bloom_quality: rscale[slot].z = 1): the composite enlarges the game's glow
+        // images (400x225 and smaller, whatever the screen's size) with a cubic B-spline - four bilinear taps -
+        // instead of one bilinear tap, whose steps showed as blocks around bright sky (#102). The screen-sized scene
+        // input is read as before; at Switch quality (z = 0) both are read as the game does.
+        sp(&s, "vec4 bloomUp(sampler2D src, vec2 uv, float lod, vec4 rs) {\n"
+               "    vec2 size = vec2(textureSize(src, int(lod)));\n"
+               "    if (rs.z < 0.5 || size.x > 480.0) return textureLod(src, uv, lod);\n"
+               "    if (rs.z > 1.5) return vec4(0.0);\n"  // (z = 2, tests: the glow left out - what is glow and what isn't)
+               "    vec2 p = uv * size - 0.5, i = floor(p), f = p - i, f2 = f * f, f3 = f2 * f;\n"
+               "    vec2 w0 = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0, w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;\n"
+               "    vec2 w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0, w3 = f3 / 6.0;\n"
+               "    vec2 g0 = w0 + w1, g1 = w2 + w3;\n"
+               "    vec2 a = (i - 0.5 + w1 / g0) / size, b = (i + 1.5 + w3 / g1) / size;\n"
+               "    return g0.y * (g0.x * textureLod(src, a, lod) + g1.x * textureLod(src, vec2(b.x, a.y), lod)) +\n"
+               "           g1.y * (g0.x * textureLod(src, vec2(a.x, b.y), lod) + g1.x * textureLod(src, b, lod));\n"
+               "}\n");
+    }
+    if (c->far_smooth) {
+        // The distant view (the panorama behind every kingdom, e.g. the Lost Kingdom's sunset horizon): an RGBA8 image
+        // whose alpha scales the colour (HDR = rgb * a^4 * ...), enlarged several times and read at LOD >= 0.5. One
+        // bilinear tap filters the encoded texels, so each bright texel becomes a round blob and the grid shows. At
+        // Bloom quality High (rscale[1].w = 1) the texels are decoded first and enlarged with a Mitchell-Netravali cubic
+        // (B = C = 1/3: smooth, about as sharp as the game's own picture, faint halos at most; 16 taps per mip level,
+        // the same mip blend as the game's sampler), then re-encoded for the game's own decode.
+        // Tests: w = 2 a cubic B-spline (smoother, softer), w = 3 decoded but bilinear. w = 0: the game's single tap.
+        sp(&s, "vec2 farMN(vec2 x) {\n"  // (Mitchell-Netravali, B = C = 1/3, at distance x from the sample)
+               "    vec2 x2 = x * x, x3 = x2 * x;\n"
+               "    return mix((7.0 * x3 - 12.0 * x2 + 16.0 / 3.0) / 6.0,\n"
+               "               (-7.0 / 3.0 * x3 + 12.0 * x2 - 20.0 * x + 32.0 / 3.0) / 6.0, step(1.0, x));\n"
+               "}\n"
+               "vec4 farLevel(sampler2D src, vec2 uv, int l, float mode) {\n"
+               "    vec2 size = vec2(textureSize(src, l)), p = uv * size - 0.5, i = floor(p), f = p - i, f2 = f * f, f3 = f2 * f;\n"
+               "    vec2 w[4];\n"
+               "    if (mode > 2.5) { w[0] = vec2(0.0); w[1] = 1.0 - f; w[2] = f; w[3] = vec2(0.0); }\n"
+               "    else if (mode > 1.5) { w[0] = (1.0 - 3.0 * f + 3.0 * f2 - f3) / 6.0; w[1] = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;\n"
+               "           w[2] = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0; w[3] = f3 / 6.0; }\n"
+               "    else { w[0] = farMN(1.0 + f); w[1] = farMN(f); w[2] = farMN(1.0 - f); w[3] = farMN(2.0 - f); }\n"
+               "    vec4 acc = vec4(0.0);\n"
+               "    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) {\n"
+               "        float k = w[x].x * w[y].y;\n"
+               "        if (k == 0.0) continue;\n"
+               "        vec4 t = textureLod(src, (i + vec2(float(x) - 0.5, float(y) - 0.5)) / size, float(l));\n"
+               "        float a2 = t.a * t.a;\n"
+               "        acc += k * vec4(t.rgb * (a2 * a2), t.a);\n"
+               "    }\n"
+               "    return acc;\n"
+               "}\n"
+               "vec4 farSample(sampler2D src, vec2 uv, vec4 rs) {\n"
+               "    if (rs.w < 0.5) return texture(src, uv);\n"
+               "    float lod = max(textureQueryLod(src, uv).x, 0.0), top = float(textureQueryLevels(src) - 1);\n"
+               "    float l0 = min(floor(lod), top), fl = lod - l0;\n"
+               "    vec4 r = farLevel(src, uv, int(l0), rs.w);\n"
+               "    if (fl > 0.001 && l0 < top) r = mix(r, farLevel(src, uv, int(l0) + 1, rs.w), min(fl, 1.0));\n"
+               "    r = vec4(max(r.rgb, vec3(0.0)), clamp(r.a, 0.0, 1.0));\n"  // (the cubic's negative lobes)
+               "    float a4 = r.a * r.a;\n"
+               "    a4 *= a4;\n"
+               "    return a4 > 1e-12 ? vec4(r.rgb / a4, r.a) : vec4(0.0, 0.0, 0.0, r.a);\n"
+               "}\n");
+    }
     bool tint = stage == STAGE_FRAGMENT && !dbg && (c->omap_target & 0x7) == 0x7 && (!key || key->rt_kind[0] == 0);
     if (tint) {
         sp(&s, "layout(std140, set = %d, binding = 19) uniform Tint { vec4 ltint[2]; };\n", set);
@@ -2562,6 +2631,14 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
             uint64_t hash = 1469598103934665603ull;
             for (size_t i = 0x30; i < max_size; i++) hash = (hash ^ blob[i]) * 1099511628211ull;
             c->bloom_prefilter = hash == 0x98f060ff25e7822full;
+        }
+        // The HDR composite (scene + glow, tone mapped), by its code to its end (as the translation cache keys it)
+        if (c->glsl) {
+            size_t ext = maxwell_code_extent(blob, max_size, stage);
+            uint64_t hash = 1469598103934665603ull;
+            for (size_t i = 0x30; i < ext; i++) hash = (hash ^ blob[i]) * 1099511628211ull;
+            c->bloom_smooth = hash == 0xf42bcd0d74bc1d0eull || hash == 0x025c57bc1bfe1339ull;  // 1.4.1, 1.0.0
+            c->far_smooth = hash == 0x5e59c94e801f4d6cull;  // the distant view's G-buffer shader: 1.4.1
         }
         c->omap_target = *(const uint32_t *)(sph + 0x48);
         c->omap_depth = (*(const uint32_t *)(sph + 0x4C) >> 1) & 1;
